@@ -256,10 +256,11 @@
       <select id="svc-policy"><option value="require_approval">Require approval</option><option value="auto_approve">Auto approve</option></select>
     </div>
     <div id="allowed-upstreams-hint" style="background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; margin-bottom: 16px; font-size: 12px; color: var(--text2); display: none;">
-      <strong style="color: var(--orange);">Allowed upstream domains:</strong>
+      <strong style="color: var(--orange);">⚠️ Allowed upstream domains:</strong>
       <span id="allowed-upstreams-list"></span>
       <br><span style="font-size: 11px;">The upstream URL domain must be in this list. To add new domains, edit <code>security.allowedUpstreams</code> in <code>clawguard.yaml</code> and restart ClawGuard.</span>
     </div>
+    <div id="add-service-error" style="background: rgba(255,107,107,0.1); border: 1px solid var(--red); border-radius: var(--radius); padding: 12px; margin-bottom: 16px; font-size: 13px; color: var(--red); display: none;"></div>
     <div class="modal-actions">
       <button class="btn" onclick="hideAddService()" style="background: var(--bg3);">Cancel</button>
       <button class="btn btn-primary" onclick="addService()">Add Service</button>
@@ -409,6 +410,7 @@ async function loadServices() {
 
 async function showAddService() {
   document.getElementById('add-service-modal').classList.add('show');
+  document.getElementById('add-service-error').style.display = 'none';
   try {
     const data = await api('GET', '/api/allowed-upstreams');
     const hint = document.getElementById('allowed-upstreams-hint');
@@ -437,6 +439,9 @@ async function addService() {
   if (authType === 'header' && headerName) auth.headerName = headerName;
   if (authType === 'query' && headerName) auth.paramName = headerName;
 
+  const errorDiv = document.getElementById('add-service-error');
+  errorDiv.style.display = 'none';
+
   try {
     await api('POST', '/api/services', {
       name,
@@ -449,7 +454,15 @@ async function addService() {
     hideAddService();
     loadServices();
   } catch (e) {
-    alert('Error: ' + e.message);
+    const msg = e.message || '';
+    if (msg.includes('not in the allowed upstreams')) {
+      const domain = upstream.replace(/^https?:\/\//, '').split('/')[0];
+      errorDiv.innerHTML = `<strong>❌ Domain not allowed:</strong> <code>${esc(domain)}</code> is not in <code>security.allowedUpstreams</code>.<br><br>` +
+        `To fix this, add <code>${esc(domain)}</code> to the <code>security.allowedUpstreams</code> list in <code>clawguard.yaml</code> and restart ClawGuard.`;
+    } else {
+      errorDiv.textContent = 'Error: ' + msg;
+    }
+    errorDiv.style.display = 'block';
   }
 }
 
