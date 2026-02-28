@@ -67,6 +67,8 @@ sudo update-ca-certificates
 sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain certs/ca.crt
 ```
 
+> **macOS GUI prompt:** This command will trigger a macOS authorization dialog (username/password popup) on the desktop. If you are an AI agent running this command, **tell the human operator to look at their screen and approve the popup**. The command will hang until the popup is approved or dismissed. If there is no response, the command will appear stuck — it is not frozen, it is waiting for GUI authorization.
+
 #### Step 3b: Set environment variables for your runtime
 
 Many tools (Homebrew curl, Python, Node.js) do NOT read the OS Keychain/trust store. You must tell them where to find the CA cert explicitly.
@@ -341,6 +343,9 @@ The forwarder reached ClawGuard, but ClawGuard doesn't have a service named "xyz
 - **If using the web dashboard:** the service must be added there. But note: the upstream domain (e.g. `api.github.com`) must be listed in `security.allowedUpstreams` in `clawguard.yaml`. If it's not, the dashboard will reject the addition with an error.
 - **If using YAML config:** add the service to `services:` section AND its domain to `security.allowedUpstreams`.
 - The service name in `forwarder.json` routes must match exactly (e.g. `"api.github.com": "github"` means ClawGuard must have a service named `github`).
+
+### `security add-trusted-cert` hangs on macOS
+The command is waiting for a **macOS GUI authorization popup** (username/password dialog). Ask the human operator to look at their screen and approve it. The command is not frozen — it will complete as soon as the popup is approved.
 
 ### "Unknown host" from the forwarder
 - The domain is not in `routes` in `forwarder.json`

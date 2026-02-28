@@ -138,3 +138,9 @@ Wrong agent key. Ask the human for the correct `server.agentKey` from ClawGuard 
 
 ### Connection refused / timeout
 ClawGuard is not running or not reachable. Ask the human to check the ClawGuard server.
+
+### `security add-trusted-cert` hangs on macOS
+When installing the forwarder on macOS, the command `sudo security add-trusted-cert ...` opens a **GUI authorization popup** (username/password dialog) on the desktop. If this command appears stuck or takes a long time, **tell the human operator to look at their screen and approve the macOS popup**. The command is NOT frozen — it is waiting for the user to click "Allow" in the dialog box. This is a macOS security feature and cannot be bypassed from the terminal.
+
+### Commands that need human interaction
+Some installation steps require the human to physically interact with the machine (approve GUI popups, enter passwords in dialogs). If a command hangs unexpectedly, always consider that it may be waiting for a GUI prompt. Ask the human to check their screen.
