@@ -148,6 +148,12 @@
     <!-- ─── Dashboard ───────────────────────── -->
     <div class="section active" id="sec-dashboard">
       <h2 class="page-title">Dashboard</h2>
+      <div style="margin-bottom: 16px; display: flex; gap: 12px; align-items: center;">
+        <label style="color: var(--text2); font-size: 13px;">Filter by service:</label>
+        <select id="dashboard-service-filter" onchange="loadDashboard()" style="padding: 6px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-size: 13px;">
+          <option value="">All services</option>
+        </select>
+      </div>
       <div class="stat-grid">
         <div class="stat-card"><div class="label">Requests today</div><div class="value blue" id="st-today">-</div></div>
         <div class="stat-card"><div class="label">Requests this week</div><div class="value" id="st-week">-</div></div>
@@ -342,7 +348,23 @@ function showSection(name) {
 const COLORS = ['#6c63ff','#4ecdc4','#ff6b6b','#ffa726','#42a5f5','#ab47bc','#26a69a','#ef5350'];
 
 async function loadDashboard() {
-  const stats = await api('GET', '/api/stats');
+  const filterService = document.getElementById('dashboard-service-filter').value;
+  const queryParam = filterService ? `?service=${encodeURIComponent(filterService)}` : '';
+  const stats = await api('GET', '/api/stats' + queryParam);
+
+  // Populate service filter
+  if (stats.availableServices) {
+    const select = document.getElementById('dashboard-service-filter');
+    const currentVal = select.value;
+    select.innerHTML = '<option value="">All services</option>';
+    for (const svc of stats.availableServices) {
+      const opt = document.createElement('option');
+      opt.value = svc;
+      opt.textContent = svc;
+      select.appendChild(opt);
+    }
+    select.value = currentVal;
+  }
 
   document.getElementById('st-today').textContent = stats.totalRequestsToday;
   document.getElementById('st-week').textContent = stats.totalRequestsWeek;

@@ -116,4 +116,5 @@ export interface DashboardStats {
   requestsByHour: { hour: number; count: number }[];
   approvalStats: { approved: number; denied: number; timeout: number };
   methodBreakdown: { method: string; count: number }[];
+  availableServices?: string[];
 }
