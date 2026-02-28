@@ -102,6 +102,15 @@ export class TelegramNotifier {
 
       try {
         switch (action) {
+          case 'approve_once':
+            callback(true, 1, userName);
+            await this.bot.answerCallbackQuery(query.id, { text: '✅ Approved once' });
+            await this.bot.editMessageText(
+              `✅ *Approved once* by ${userName}`,
+              { chat_id: query.message.chat.id, message_id: query.message.message_id, parse_mode: 'Markdown' }
+            );
+            break;
+
           case 'approve_15m':
             callback(true, 900, userName);
             await this.bot.answerCallbackQuery(query.id, { text: '✅ Approved for 15 minutes' });
@@ -193,8 +202,11 @@ export class TelegramNotifier {
         reply_markup: {
           inline_keyboard: [
             [
+              { text: '✅ Once', callback_data: `approve_once:${requestId}` },
               { text: '✅ 15m', callback_data: `approve_15m:${requestId}` },
               { text: '✅ 1h', callback_data: `approve_1h:${requestId}` },
+            ],
+            [
               { text: '✅ 8h', callback_data: `approve_8h:${requestId}` },
               { text: '✅ 24h', callback_data: `approve_24h:${requestId}` },
               { text: '❌ Deny', callback_data: `deny:${requestId}` },
