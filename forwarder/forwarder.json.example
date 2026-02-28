@@ -1,0 +1,11 @@
+{
+  "clawguard": "http://192.168.1.100:9090",
+  "agentKey": "your-agent-key-here",
+  "listenHost": "127.0.0.1",
+  "listenPort": 443,
+  "certsDir": "./certs",
+  "routes": {
+    "api.github.com": "github",
+    "api.openweathermap.org": "weather"
+  }
+}

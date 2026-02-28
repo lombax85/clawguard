@@ -1,0 +1,12 @@
+services:
+  clawguard:
+    build: .
+    container_name: clawguard
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./clawguard.yaml:/app/clawguard.yaml:ro   # config (read-only)
+      - ./data:/app/data                            # SQLite DB persistence
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+    restart: unless-stopped

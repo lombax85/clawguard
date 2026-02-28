@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ClawGuard Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1117;
+    --bg2: #1a1d27;
+    --bg3: #242836;
+    --border: #2d3348;
+    --text: #e4e7f1;
+    --text2: #8b92a8;
+    --accent: #6c63ff;
+    --accent2: #4ecdc4;
+    --green: #4ecdc4;
+    --red: #ff6b6b;
+    --orange: #ffa726;
+    --blue: #42a5f5;
+    --radius: 8px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); }
+
+  /* ─── Login ────────────────────────────────── */
+  #login-screen { display: flex; align-items: center; justify-content: center; height: 100vh; }
+  .login-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 40px; width: 360px; text-align: center; }
+  .login-card h1 { font-size: 24px; margin-bottom: 8px; }
+  .login-card .subtitle { color: var(--text2); font-size: 14px; margin-bottom: 24px; }
+  .login-card input { width: 100%; padding: 12px; background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-size: 16px; text-align: center; letter-spacing: 8px; margin-bottom: 16px; outline: none; }
+  .login-card input:focus { border-color: var(--accent); }
+  .login-card button { width: 100%; padding: 12px; background: var(--accent); border: none; border-radius: var(--radius); color: white; font-size: 16px; cursor: pointer; font-weight: 600; }
+  .login-card button:hover { opacity: 0.9; }
+  .login-error { color: var(--red); font-size: 13px; margin-top: 8px; display: none; }
+
+  /* ─── Layout ───────────────────────────────── */
+  #app { display: none; }
+  .layout { display: flex; min-height: 100vh; }
+  .sidebar { width: 220px; background: var(--bg2); border-right: 1px solid var(--border); padding: 20px 0; position: fixed; height: 100vh; overflow-y: auto; }
+  .sidebar .logo { padding: 0 20px 20px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
+  .sidebar .logo h2 { font-size: 18px; display: flex; align-items: center; gap: 8px; }
+  .sidebar .logo span { color: var(--text2); font-size: 12px; }
+  .sidebar nav a { display: flex; align-items: center; gap: 10px; padding: 10px 20px; color: var(--text2); text-decoration: none; font-size: 14px; transition: all 0.15s; }
+  .sidebar nav a:hover, .sidebar nav a.active { color: var(--text); background: var(--bg3); }
+  .sidebar nav a.active { border-right: 3px solid var(--accent); }
+  .main { margin-left: 220px; flex: 1; padding: 24px; }
+
+  /* ─── Cards ────────────────────────────────── */
+  .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .stat-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
+  .stat-card .label { color: var(--text2); font-size: 13px; margin-bottom: 4px; }
+  .stat-card .value { font-size: 28px; font-weight: 700; }
+  .stat-card .value.green { color: var(--green); }
+  .stat-card .value.blue { color: var(--blue); }
+  .stat-card .value.orange { color: var(--orange); }
+
+  /* ─── Charts ───────────────────────────────── */
+  .chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+  .chart-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
+  .chart-card h3 { font-size: 14px; color: var(--text2); margin-bottom: 12px; }
+  .chart-card canvas { max-height: 260px; }
+
+  /* ─── Tables ───────────────────────────────── */
+  .panel { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; margin-bottom: 24px; }
+  .panel h3 { font-size: 16px; margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--text2); padding: 8px 12px; border-bottom: 1px solid var(--border); font-weight: 600; }
+  td { padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  tr:hover td { background: var(--bg3); }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .badge.green { background: rgba(78,205,196,0.15); color: var(--green); }
+  .badge.red { background: rgba(255,107,107,0.15); color: var(--red); }
+  .badge.blue { background: rgba(66,165,245,0.15); color: var(--blue); }
+  .badge.orange { background: rgba(255,167,38,0.15); color: var(--orange); }
+
+  /* ─── Forms ────────────────────────────────── */
+  .form-group { margin-bottom: 16px; }
+  .form-group label { display: block; color: var(--text2); font-size: 13px; margin-bottom: 4px; }
+  .form-group input, .form-group select { width: 100%; padding: 10px; background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-size: 14px; outline: none; }
+  .form-group input:focus, .form-group select:focus { border-color: var(--accent); }
+  .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .btn { padding: 8px 16px; border: none; border-radius: var(--radius); cursor: pointer; font-size: 13px; font-weight: 600; }
+  .btn-primary { background: var(--accent); color: white; }
+  .btn-danger { background: var(--red); color: white; }
+  .btn-sm { padding: 4px 10px; font-size: 12px; }
+  .btn:hover { opacity: 0.85; }
+
+  /* ─── Sections ─────────────────────────────── */
+  .section { display: none; }
+  .section.active { display: block; }
+  .page-title { font-size: 22px; font-weight: 700; margin-bottom: 20px; }
+
+  /* ─── Modal ────────────────────────────────── */
+  .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100; align-items: center; justify-content: center; }
+  .modal-overlay.show { display: flex; }
+  .modal { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 24px; width: 480px; max-height: 80vh; overflow-y: auto; }
+  .modal h3 { margin-bottom: 16px; }
+  .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; }
+
+  /* ─── Payload viewer ───────────────────────── */
+  .payload-toggle { color: var(--accent); cursor: pointer; font-size: 12px; }
+  .payload-content { display: none; margin-top: 8px; padding: 8px; background: var(--bg); border-radius: 4px; font-family: monospace; font-size: 12px; white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; }
+
+  /* ─── Responsive ───────────────────────────── */
+  @media (max-width: 900px) {
+    .sidebar { width: 60px; }
+    .sidebar .logo h2 span, .sidebar nav a span { display: none; }
+    .sidebar .logo span { display: none; }
+    .main { margin-left: 60px; }
+    .chart-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ─── Login Screen ──────────────────────────── -->
+<div id="login-screen">
+  <div class="login-card">
+    <h1>&#128737; ClawGuard</h1>
+    <p class="subtitle">Security gateway for OpenClaw agents</p>
+    <input type="password" id="pin-input" placeholder="PIN" autofocus>
+    <button onclick="doLogin()">Unlock</button>
+    <p class="login-error" id="login-error">Invalid PIN</p>
+  </div>
+</div>
+
+<!-- ─── App ───────────────────────────────────── -->
+<div id="app">
+<div class="layout">
+  <div class="sidebar">
+    <div class="logo">
+      <h2>&#128737; <span>ClawGuard</span></h2>
+      <span>v0.2.0</span>
+    </div>
+    <nav>
+      <a href="#" data-section="dashboard" class="active" onclick="showSection('dashboard')">&#128200; <span>Dashboard</span></a>
+      <a href="#" data-section="services" onclick="showSection('services')">&#128268; <span>Services</span></a>
+      <a href="#" data-section="approvals" onclick="showSection('approvals')">&#9989; <span>Approvals</span></a>
+      <a href="#" data-section="audit" onclick="showSection('audit')">&#128203; <span>Audit Log</span></a>
+      <a href="#" data-section="telegram" onclick="showSection('telegram')">&#128242; <span>Telegram</span></a>
+    </nav>
+  </div>
+
+  <div class="main">
+
+    <!-- ─── Dashboard ───────────────────────── -->
+    <div class="section active" id="sec-dashboard">
+      <h2 class="page-title">Dashboard</h2>
+      <div class="stat-grid">
+        <div class="stat-card"><div class="label">Requests today</div><div class="value blue" id="st-today">-</div></div>
+        <div class="stat-card"><div class="label">Requests this week</div><div class="value" id="st-week">-</div></div>
+        <div class="stat-card"><div class="label">Active approvals</div><div class="value green" id="st-approvals">-</div></div>
+        <div class="stat-card"><div class="label">Services</div><div class="value orange" id="st-services">-</div></div>
+      </div>
+      <div class="chart-grid">
+        <div class="chart-card"><h3>Requests by service</h3><canvas id="chart-services"></canvas></div>
+        <div class="chart-card"><h3>Requests by hour</h3><canvas id="chart-hours"></canvas></div>
+        <div class="chart-card"><h3>Approved vs Denied</h3><canvas id="chart-approval"></canvas></div>
+        <div class="chart-card"><h3>HTTP methods</h3><canvas id="chart-methods"></canvas></div>
+      </div>
+    </div>
+
+    <!-- ─── Services ────────────────────────── -->
+    <div class="section" id="sec-services">
+      <h2 class="page-title">Services</h2>
+      <div class="panel">
+        <h3>Configured services <button class="btn btn-primary btn-sm" onclick="showAddService()">+ Add Service</button></h3>
+        <p style="color: var(--text2); font-size: 12px; margin-bottom: 12px;">Services added here are persisted in the database and survive restarts. No YAML changes needed. However, the upstream domain must be in <code>security.allowedUpstreams</code> in <code>clawguard.yaml</code>.</p>
+        <table>
+          <thead><tr><th>Name</th><th>Upstream</th><th>Auth type</th><th>Token</th><th>Policy</th><th>Actions</th></tr></thead>
+          <tbody id="services-table"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ─── Approvals ───────────────────────── -->
+    <div class="section" id="sec-approvals">
+      <h2 class="page-title">Approvals</h2>
+      <div class="panel">
+        <h3>Active approvals <button class="btn btn-danger btn-sm" onclick="revokeAll()">Revoke all</button></h3>
+        <table>
+          <thead><tr><th>Service</th><th>Approved by</th><th>Expires</th><th>Remaining</th><th>Actions</th></tr></thead>
+          <tbody id="approvals-table"></tbody>
+        </table>
+      </div>
+      <div class="panel">
+        <h3>Recent approval history</h3>
+        <table>
+          <thead><tr><th>Time</th><th>Service</th><th>Approved by</th><th>TTL</th></tr></thead>
+          <tbody id="approval-history"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ─── Audit Log ───────────────────────── -->
+    <div class="section" id="sec-audit">
+      <h2 class="page-title">Audit Log</h2>
+      <div class="panel">
+        <h3>Recent requests</h3>
+        <table>
+          <thead><tr><th>Time</th><th>Service</th><th>Method</th><th>Path</th><th>Status</th><th>Approved</th><th>Agent IP</th><th>Payload</th></tr></thead>
+          <tbody id="audit-table"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ─── Telegram ────────────────────────── -->
+    <div class="section" id="sec-telegram">
+      <h2 class="page-title">Telegram Pairing</h2>
+      <div class="panel">
+        <h3>Paired users</h3>
+        <table>
+          <thead><tr><th>Chat ID</th><th>User name</th><th>Paired at</th></tr></thead>
+          <tbody id="telegram-table"></tbody>
+        </table>
+        <p style="color: var(--text2); font-size: 13px; margin-top: 12px;">
+          To pair a new user, send <code>/pair &lt;secret&gt;</code> to the Telegram bot.
+        </p>
+      </div>
+    </div>
+
+  </div>
+</div>
+</div>
+
+<!-- ─── Add Service Modal ─────────────────────── -->
+<div class="modal-overlay" id="add-service-modal">
+  <div class="modal">
+    <h3>Add Service</h3>
+    <div class="form-group">
+      <label>Service name</label>
+      <input type="text" id="svc-name" placeholder="e.g. openai">
+    </div>
+    <div class="form-group">
+      <label>Upstream URL</label>
+      <input type="text" id="svc-upstream" placeholder="e.g. https://api.openai.com">
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Auth type</label>
+        <select id="svc-auth-type"><option value="bearer">Bearer token</option><option value="header">Custom header</option><option value="query">Query parameter</option></select>
+      </div>
+      <div class="form-group">
+        <label>Token</label>
+        <input type="password" id="svc-token" placeholder="API key or token">
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Header name (for custom header) / Parameter name (for query)</label>
+      <input type="text" id="svc-header-name" placeholder="e.g. X-API-Key or appid">
+    </div>
+    <div class="form-group">
+      <label>Default policy</label>
+      <select id="svc-policy"><option value="require_approval">Require approval</option><option value="auto_approve">Auto approve</option></select>
+    </div>
+    <div id="allowed-upstreams-hint" style="background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; margin-bottom: 16px; font-size: 12px; color: var(--text2); display: none;">
+      <strong style="color: var(--orange);">Allowed upstream domains:</strong>
+      <span id="allowed-upstreams-list"></span>
+      <br><span style="font-size: 11px;">The upstream URL domain must be in this list. To add new domains, edit <code>security.allowedUpstreams</code> in <code>clawguard.yaml</code> and restart ClawGuard.</span>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="hideAddService()" style="background: var(--bg3);">Cancel</button>
+      <button class="btn btn-primary" onclick="addService()">Add Service</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let PIN = '';
+const BASE = '/__admin';
+let charts = {};
+
+// ─── Auth ────────────────────────────────────────
+
+async function doLogin() {
+  PIN = document.getElementById('pin-input').value;
+  try {
+    const res = await api('POST', '/api/login', { pin: PIN });
+    if (res.ok) {
+      document.getElementById('login-screen').style.display = 'none';
+      document.getElementById('app').style.display = 'block';
+      loadDashboard();
+    }
+  } catch {
+    document.getElementById('login-error').style.display = 'block';
+    PIN = '';
+  }
+}
+
+document.getElementById('pin-input').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+
+async function api(method, path, body) {
+  const opts = {
+    method,
+    headers: { 'X-ClawGuard-Pin': PIN, 'Content-Type': 'application/json' },
+  };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(BASE + path, opts);
+  if (res.status === 401) {
+    document.getElementById('login-screen').style.display = 'flex';
+    document.getElementById('app').style.display = 'none';
+    throw new Error('Unauthorized');
+  }
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || res.statusText);
+  }
+  return res.json();
+}
+
+// ─── Navigation ──────────────────────────────────
+
+function showSection(name) {
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  document.querySelectorAll('.sidebar nav a').forEach(a => a.classList.remove('active'));
+  document.getElementById('sec-' + name).classList.add('active');
+  document.querySelector(`[data-section="${name}"]`).classList.add('active');
+  if (name === 'dashboard') loadDashboard();
+  if (name === 'services') loadServices();
+  if (name === 'approvals') loadApprovals();
+  if (name === 'audit') loadAudit();
+  if (name === 'telegram') loadTelegram();
+}
+
+// ─── Dashboard ───────────────────────────────────
+
+const COLORS = ['#6c63ff','#4ecdc4','#ff6b6b','#ffa726','#42a5f5','#ab47bc','#26a69a','#ef5350'];
+
+async function loadDashboard() {
+  const stats = await api('GET', '/api/stats');
+
+  document.getElementById('st-today').textContent = stats.totalRequestsToday;
+  document.getElementById('st-week').textContent = stats.totalRequestsWeek;
+  document.getElementById('st-approvals').textContent = stats.activeApprovals;
+  document.getElementById('st-services').textContent = stats.configuredServices;
+
+  // Requests by service
+  renderChart('chart-services', 'bar', {
+    labels: stats.requestsByService.map(r => r.service),
+    datasets: [{ label: 'Requests', data: stats.requestsByService.map(r => r.count), backgroundColor: COLORS }]
+  });
+
+  // Requests by hour
+  const hours = Array.from({length: 24}, (_, i) => i);
+  const hourData = hours.map(h => {
+    const found = stats.requestsByHour.find(r => r.hour === h);
+    return found ? found.count : 0;
+  });
+  renderChart('chart-hours', 'line', {
+    labels: hours.map(h => h + ':00'),
+    datasets: [{ label: 'Requests', data: hourData, borderColor: '#6c63ff', backgroundColor: 'rgba(108,99,255,0.1)', fill: true, tension: 0.3 }]
+  });
+
+  // Approval stats
+  renderChart('chart-approval', 'doughnut', {
+    labels: ['Approved', 'Denied'],
+    datasets: [{ data: [stats.approvalStats.approved, stats.approvalStats.denied], backgroundColor: ['#4ecdc4', '#ff6b6b'] }]
+  });
+
+  // Method breakdown
+  renderChart('chart-methods', 'bar', {
+    labels: stats.methodBreakdown.map(r => r.method),
+    datasets: [{ label: 'Count', data: stats.methodBreakdown.map(r => r.count), backgroundColor: COLORS }]
+  });
+}
+
+function renderChart(canvasId, type, data) {
+  if (charts[canvasId]) charts[canvasId].destroy();
+  const ctx = document.getElementById(canvasId).getContext('2d');
+  charts[canvasId] = new Chart(ctx, {
+    type,
+    data,
+    options: {
+      responsive: true,
+      maintainAspectRatio: true,
+      plugins: { legend: { display: type === 'doughnut', labels: { color: '#8b92a8' } } },
+      scales: type === 'doughnut' ? {} : {
+        x: { ticks: { color: '#8b92a8' }, grid: { color: '#2d3348' } },
+        y: { ticks: { color: '#8b92a8' }, grid: { color: '#2d3348' }, beginAtZero: true }
+      }
+    }
+  });
+}
+
+// ─── Services ────────────────────────────────────
+
+async function loadServices() {
+  const services = await api('GET', '/api/services');
+  const tbody = document.getElementById('services-table');
+  tbody.innerHTML = '';
+  for (const [name, svc] of Object.entries(services)) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><strong>${esc(name)}</strong></td>
+      <td><code>${esc(svc.upstream)}</code></td>
+      <td><span class="badge blue">${esc(svc.auth.type)}</span></td>
+      <td><code>${esc(svc.auth.token)}</code></td>
+      <td><span class="badge ${svc.policy.default === 'auto_approve' ? 'green' : 'orange'}">${esc(svc.policy.default)}</span></td>
+      <td><button class="btn btn-danger btn-sm" onclick="deleteService('${esc(name)}')">Delete</button></td>
+    `;
+    tbody.appendChild(tr);
+  }
+  if (Object.keys(services).length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text2)">No services configured</td></tr>';
+  }
+}
+
+async function showAddService() {
+  document.getElementById('add-service-modal').classList.add('show');
+  try {
+    const data = await api('GET', '/api/allowed-upstreams');
+    const hint = document.getElementById('allowed-upstreams-hint');
+    const list = document.getElementById('allowed-upstreams-list');
+    if (data.allowedUpstreams && data.allowedUpstreams.length > 0) {
+      list.textContent = data.allowedUpstreams.join(', ');
+      hint.style.display = 'block';
+    } else {
+      hint.style.display = 'none';
+    }
+  } catch { /* ignore */ }
+}
+function hideAddService() { document.getElementById('add-service-modal').classList.remove('show'); }
+
+async function addService() {
+  const name = document.getElementById('svc-name').value.trim();
+  const upstream = document.getElementById('svc-upstream').value.trim();
+  const authType = document.getElementById('svc-auth-type').value;
+  const token = document.getElementById('svc-token').value;
+  const headerName = document.getElementById('svc-header-name').value.trim();
+  const policy = document.getElementById('svc-policy').value;
+
+  if (!name || !upstream || !token) { alert('Fill all required fields'); return; }
+
+  const auth = { type: authType, token };
+  if (authType === 'header' && headerName) auth.headerName = headerName;
+  if (authType === 'query' && headerName) auth.paramName = headerName;
+
+  try {
+    await api('POST', '/api/services', {
+      name,
+      config: {
+        upstream,
+        auth,
+        policy: { default: policy }
+      }
+    });
+    hideAddService();
+    loadServices();
+  } catch (e) {
+    alert('Error: ' + e.message);
+  }
+}
+
+async function deleteService(name) {
+  if (!confirm(`Delete service "${name}"?`)) return;
+  try {
+    await api('DELETE', '/api/services/' + name);
+    loadServices();
+  } catch (e) {
+    alert('Error: ' + e.message);
+  }
+}
+
+// ─── Approvals ───────────────────────────────────
+
+async function loadApprovals() {
+  const data = await api('GET', '/api/approvals');
+  const tbody = document.getElementById('approvals-table');
+  tbody.innerHTML = '';
+
+  const active = data.active || {};
+  for (const [service, info] of Object.entries(active)) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><strong>${esc(service)}</strong></td>
+      <td>${esc(info.approvedBy)}</td>
+      <td>${new Date(info.expiresAt).toLocaleString()}</td>
+      <td><span class="badge green">${info.remainingMinutes} min</span></td>
+      <td><button class="btn btn-danger btn-sm" onclick="revokeApproval('${esc(service)}')">Revoke</button></td>
+    `;
+    tbody.appendChild(tr);
+  }
+  if (Object.keys(active).length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text2)">No active approvals</td></tr>';
+  }
+
+  // History
+  const histTbody = document.getElementById('approval-history');
+  histTbody.innerHTML = '';
+  for (const row of (data.recent || [])) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${new Date(row.timestamp).toLocaleString()}</td>
+      <td>${esc(row.service)}</td>
+      <td>${esc(row.approved_by)}</td>
+      <td>${Math.round(row.ttl_seconds / 3600)}h</td>
+    `;
+    histTbody.appendChild(tr);
+  }
+}
+
+async function revokeApproval(service) {
+  await api('POST', '/api/revoke/' + service);
+  loadApprovals();
+}
+
+async function revokeAll() {
+  if (!confirm('Revoke ALL active approvals?')) return;
+  await api('POST', '/api/revoke-all');
+  loadApprovals();
+}
+
+// ─── Audit Log ───────────────────────────────────
+
+async function loadAudit() {
+  const rows = await api('GET', '/api/requests?limit=200');
+  const tbody = document.getElementById('audit-table');
+  tbody.innerHTML = '';
+  for (const row of rows) {
+    const tr = document.createElement('tr');
+    const hasPayload = row.request_body || row.response_body;
+    tr.innerHTML = `
+      <td style="white-space:nowrap">${new Date(row.timestamp).toLocaleString()}</td>
+      <td>${esc(row.service)}</td>
+      <td><span class="badge blue">${esc(row.method)}</span></td>
+      <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis"><code>${esc(row.path)}</code></td>
+      <td><span class="badge ${row.response_status < 400 ? 'green' : 'red'}">${row.response_status || '-'}</span></td>
+      <td>${row.approved ? '<span class="badge green">Yes</span>' : '<span class="badge red">No</span>'}</td>
+      <td><code>${esc(row.agent_ip || '-')}</code></td>
+      <td>${hasPayload ? `<span class="payload-toggle" onclick="togglePayload(this)">View</span><div class="payload-content">${row.request_body ? '<b>Request:</b>\n' + esc(row.request_body) + '\n\n' : ''}${row.response_body ? '<b>Response:</b>\n' + esc(row.response_body) : ''}</div>` : '-'}</td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
+
+function togglePayload(el) {
+  const content = el.nextElementSibling;
+  if (content.style.display === 'block') {
+    content.style.display = 'none';
+    el.textContent = 'View';
+  } else {
+    content.style.display = 'block';
+    el.textContent = 'Hide';
+  }
+}
+
+// ─── Telegram ────────────────────────────────────
+
+async function loadTelegram() {
+  const data = await api('GET', '/api/telegram');
+  const tbody = document.getElementById('telegram-table');
+  tbody.innerHTML = '';
+  for (const user of (data.pairedUsers || [])) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><code>${esc(user.chatId)}</code></td>
+      <td>${esc(user.userName)}</td>
+      <td>${new Date(user.pairedAt).toLocaleString()}</td>
+    `;
+    tbody.appendChild(tr);
+  }
+  if ((data.pairedUsers || []).length === 0) {
+    tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--text2)">No paired users</td></tr>';
+  }
+}
+
+// ─── Helpers ─────────────────────────────────────
+
+function esc(str) {
+  if (!str) return '';
+  const d = document.createElement('div');
+  d.textContent = String(str);
+  return d.innerHTML;
+}
+
+// Auto-refresh dashboard every 30s
+setInterval(() => {
+  if (document.getElementById('sec-dashboard').classList.contains('active')) loadDashboard();
+}, 30000);
+</script>
+</body>
+</html>

@@ -1,0 +1,91 @@
+server:
+  port: 9090
+  agentKey: "change-me-to-a-random-string"    # IMPORTANT: openssl rand -hex 24
+
+services:
+  # ─── Safe test service (start here!) ────────────────────
+  # No signup needed. httpbin.org echoes your request back,
+  # so you can verify ClawGuard injects the token correctly.
+  httpbin:
+    upstream: https://httpbin.org
+    auth:
+      type: bearer
+      token: "test-secret-token-12345"   # fake token — httpbin echoes it back
+    policy:
+      default: require_approval
+
+  # ─── GitHub (the real reason you need ClawGuard) ────────
+  # Imagine a prompt injection tries: DELETE /repos/you/important-repo
+  # Without ClawGuard: repo deleted. With ClawGuard: you tap Deny.
+  github:
+    upstream: https://api.github.com
+    auth:
+      type: bearer
+      token: "ghp_your-github-token"
+    policy:
+      default: require_approval
+      rules:
+        - match: { method: GET }
+          action: auto_approve              # reads pass through
+        - match: { method: POST }
+          action: require_approval          # writes need your OK
+        - match: { method: DELETE }
+          action: require_approval          # deletes DEFINITELY need your OK
+
+  # ─── OpenAI (with host-based routing for forwarder) ─────
+  openai:
+    upstream: https://api.openai.com
+    hostnames:                              # optional: for /etc/hosts or forwarder mode
+      - api.openai.com
+    auth:
+      type: bearer
+      token: "sk-your-openai-key-here"
+    policy:
+      default: require_approval
+      rules:
+        - match: { method: GET }
+          action: auto_approve
+        - match: { method: POST }
+          action: require_approval
+
+  # ─── Slack ──────────────────────────────────────────────
+  slack:
+    upstream: https://slack.com/api
+    hostnames:
+      - slack.com
+    auth:
+      type: bearer
+      token: "xoxb-your-slack-token"
+    policy:
+      default: require_approval
+
+notifications:
+  telegram:
+    botToken: "${TELEGRAM_BOT_TOKEN}"
+    chatId: "your-telegram-chat-id"
+    pairing:
+      enabled: true
+      secret: "change-me-to-a-random-pairing-secret"  # IMPORTANT: openssl rand -hex 16
+
+security:
+  allowedUpstreams:
+    - httpbin.org
+    - api.github.com
+    - api.openai.com
+    - slack.com
+  blockPrivateIPs: true
+  followRedirects: false
+  maxPayloadLogSize: 10240
+
+admin:
+  enabled: true
+  pin: "change-me"                          # IMPORTANT: quote it! YAML parses numbers as integers
+  allowedIPs:
+    - "127.0.0.1"
+    - "::1"
+    # - "192.168.1.0/24"                    # uncomment to allow entire LAN
+
+audit:
+  type: sqlite
+  path: ./data/clawguard.db    # use ./data/ for Docker volume persistence
+  logPayload: false
