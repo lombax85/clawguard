@@ -9,6 +9,7 @@ export class TelegramNotifier {
   private config: TelegramConfig;
   private audit: AuditLogger;
   private pendingCallbacks: Map<string, ApprovalCallback> = new Map();
+  private pendingTexts: Map<string, string> = new Map(); // requestId → original message text
   private paired: boolean = false;
 
   constructor(config: TelegramConfig, audit: AuditLogger) {
@@ -99,61 +100,45 @@ export class TelegramNotifier {
       }
 
       const userName = query.from.first_name || query.from.username || 'unknown';
+      const originalText = this.pendingTexts.get(requestId) || '';
+      const editOpts = { chat_id: query.message.chat.id, message_id: query.message.message_id, parse_mode: 'Markdown' as const };
 
       try {
         switch (action) {
           case 'approve_once':
             callback(true, 1, userName);
             await this.bot.answerCallbackQuery(query.id, { text: '✅ Approved once' });
-            await this.bot.editMessageText(
-              `✅ *Approved once* by ${userName}`,
-              { chat_id: query.message.chat.id, message_id: query.message.message_id, parse_mode: 'Markdown' }
-            );
+            await this.bot.editMessageText(`${originalText}\n\n✅ *Approved once* by ${userName}`, editOpts);
             break;
 
           case 'approve_15m':
             callback(true, 900, userName);
             await this.bot.answerCallbackQuery(query.id, { text: '✅ Approved for 15 minutes' });
-            await this.bot.editMessageText(
-              `✅ *Approved for 15min* by ${userName}`,
-              { chat_id: query.message.chat.id, message_id: query.message.message_id, parse_mode: 'Markdown' }
-            );
+            await this.bot.editMessageText(`${originalText}\n\n✅ *Approved for 15min* by ${userName}`, editOpts);
             break;
 
           case 'approve_1h':
             callback(true, 3600, userName);
             await this.bot.answerCallbackQuery(query.id, { text: '✅ Approved for 1 hour' });
-            await this.bot.editMessageText(
-              `✅ *Approved for 1h* by ${userName}`,
-              { chat_id: query.message.chat.id, message_id: query.message.message_id, parse_mode: 'Markdown' }
-            );
+            await this.bot.editMessageText(`${originalText}\n\n✅ *Approved for 1h* by ${userName}`, editOpts);
             break;
 
           case 'approve_8h':
             callback(true, 28800, userName);
             await this.bot.answerCallbackQuery(query.id, { text: '✅ Approved for 8 hours' });
-            await this.bot.editMessageText(
-              `✅ *Approved for 8h* by ${userName}`,
-              { chat_id: query.message.chat.id, message_id: query.message.message_id, parse_mode: 'Markdown' }
-            );
+            await this.bot.editMessageText(`${originalText}\n\n✅ *Approved for 8h* by ${userName}`, editOpts);
             break;
 
           case 'approve_24h':
             callback(true, 86400, userName);
             await this.bot.answerCallbackQuery(query.id, { text: '✅ Approved for 24 hours' });
-            await this.bot.editMessageText(
-              `✅ *Approved for 24h* by ${userName}`,
-              { chat_id: query.message.chat.id, message_id: query.message.message_id, parse_mode: 'Markdown' }
-            );
+            await this.bot.editMessageText(`${originalText}\n\n✅ *Approved for 24h* by ${userName}`, editOpts);
             break;
 
           case 'deny':
             callback(false, 0, userName);
             await this.bot.answerCallbackQuery(query.id, { text: '❌ Denied' });
-            await this.bot.editMessageText(
-              `❌ *Denied* by ${userName}`,
-              { chat_id: query.message.chat.id, message_id: query.message.message_id, parse_mode: 'Markdown' }
-            );
+            await this.bot.editMessageText(`${originalText}\n\n❌ *Denied* by ${userName}`, editOpts);
             break;
         }
       } catch (err) {
@@ -161,6 +146,7 @@ export class TelegramNotifier {
       }
 
       this.pendingCallbacks.delete(requestId);
+      this.pendingTexts.delete(requestId);
     });
   }
 
@@ -186,7 +172,7 @@ export class TelegramNotifier {
 
       this.pendingCallbacks.set(requestId, callback);
 
-      const text = [
+      const text: string = [
         `🛡️ *ClawGuard — Approval Request*`,
         ``,
         `🔹 Service: *${service}*`,
@@ -196,6 +182,8 @@ export class TelegramNotifier {
         `🔹 Time: ${new Date().toLocaleString('it-IT', { timeZone: 'Europe/Rome' })}`,
         `🔹 Request ID: \`${requestId}\``,
       ].join('\n');
+
+      this.pendingTexts.set(requestId, text);
 
       this.safeSendMessage(this.config.chatId, text, {
         parse_mode: 'Markdown',
@@ -216,6 +204,7 @@ export class TelegramNotifier {
       }).catch(() => {
         // If sending fails, deny the request
         this.pendingCallbacks.delete(requestId);
+        this.pendingTexts.delete(requestId);
         resolve({ approved: false, ttlSeconds: 0, approvedBy: 'telegram_error' });
       });
     });
