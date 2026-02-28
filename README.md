@@ -267,6 +267,18 @@ What happens:
 
 The agent never had the token. ClawGuard injected it after your approval. You can see proof right in the response.
 
+> **🛡️ Security note: is httpbin safe in the allowedUpstreams list?**
+>
+> You might wonder: if httpbin echoes back headers, could a compromised agent use it to steal tokens from *other* services (e.g. Todoist, GitHub)? **No.** We tested the following attack vectors and ClawGuard blocks them all:
+>
+> | Attack | Result |
+> |--------|--------|
+> | Path traversal (`/todoist/../httpbin/headers`) | Returns httpbin with httpbin's token, not Todoist's. Each service has isolated token injection. |
+> | Host header spoofing (call todoist route with `Host: httpbin.org`) | Request goes to `api.todoist.com` anyway. Routing is path-based, not Host-based. |
+> | Redirect bounce (`/httpbin/redirect-to?url=https://api.todoist.com/...`) | **Blocked** — `"Redirect blocked by security policy"` (`followRedirects: false` by default). |
+>
+> That said, **remove httpbin from your config after testing**. An echo endpoint in production is unnecessary attack surface. Keep your `allowedUpstreams` list minimal.
+
 ### 3. Now try GitHub (the real reason you need ClawGuard)
 
 Add GitHub to `clawguard.yaml`:
