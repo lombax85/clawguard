@@ -199,6 +199,19 @@
       <h2 class="page-title">Audit Log</h2>
       <div class="panel">
         <h3>Recent requests</h3>
+        <div style="margin-bottom: 12px; display: flex; gap: 12px; align-items: center;">
+          <label style="color: var(--text2); font-size: 13px;">Filter by service:</label>
+          <select id="audit-service-filter" onchange="filterAudit()" style="padding: 6px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-size: 13px;">
+            <option value="">All services</option>
+          </select>
+          <label style="color: var(--text2); font-size: 13px;">Status:</label>
+          <select id="audit-status-filter" onchange="filterAudit()" style="padding: 6px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-size: 13px;">
+            <option value="">All</option>
+            <option value="approved">Approved</option>
+            <option value="denied">Denied</option>
+          </select>
+          <span id="audit-count" style="color: var(--text2); font-size: 12px; margin-left: auto;"></span>
+        </div>
         <table>
           <thead><tr><th>Time</th><th>Service</th><th>Method</th><th>Path</th><th>Status</th><th>Approved</th><th>Agent IP</th><th>Payload</th></tr></thead>
           <tbody id="audit-table"></tbody>
@@ -514,11 +527,41 @@ async function revokeAll() {
 
 // ─── Audit Log ───────────────────────────────────
 
+let auditRows = []; // cached for filtering
+
 async function loadAudit() {
-  const rows = await api('GET', '/api/requests?limit=200');
+  auditRows = await api('GET', '/api/requests?limit=200');
+
+  // Populate service filter dropdown
+  const services = [...new Set(auditRows.map(r => r.service).filter(Boolean))].sort();
+  const select = document.getElementById('audit-service-filter');
+  const currentVal = select.value;
+  select.innerHTML = '<option value="">All services</option>';
+  for (const svc of services) {
+    const opt = document.createElement('option');
+    opt.value = svc;
+    opt.textContent = svc;
+    select.appendChild(opt);
+  }
+  select.value = currentVal; // preserve selection on reload
+
+  filterAudit();
+}
+
+function filterAudit() {
+  const serviceFilter = document.getElementById('audit-service-filter').value;
+  const statusFilter = document.getElementById('audit-status-filter').value;
+
+  const filtered = auditRows.filter(row => {
+    if (serviceFilter && row.service !== serviceFilter) return false;
+    if (statusFilter === 'approved' && !row.approved) return false;
+    if (statusFilter === 'denied' && row.approved) return false;
+    return true;
+  });
+
   const tbody = document.getElementById('audit-table');
   tbody.innerHTML = '';
-  for (const row of rows) {
+  for (const row of filtered) {
     const tr = document.createElement('tr');
     const hasPayload = row.request_body || row.response_body;
     tr.innerHTML = `
@@ -533,6 +576,8 @@ async function loadAudit() {
     `;
     tbody.appendChild(tr);
   }
+
+  document.getElementById('audit-count').textContent = `Showing ${filtered.length} of ${auditRows.length}`;
 }
 
 function togglePayload(el) {
