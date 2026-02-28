@@ -135,6 +135,18 @@ export class TelegramNotifier {
             await this.bot.editMessageText(`${originalText}\n\n✅ *Approved for 24h* by ${userName}`, editOpts);
             break;
 
+          case 'approve_1w':
+            callback(true, 604800, userName);
+            await this.bot.answerCallbackQuery(query.id, { text: '✅ Approved for 1 week' });
+            await this.bot.editMessageText(`${originalText}\n\n✅ *Approved for 1 week* by ${userName}`, editOpts);
+            break;
+
+          case 'approve_forever':
+            callback(true, 315360000, userName); // 10 years ≈ forever
+            await this.bot.answerCallbackQuery(query.id, { text: '✅ Approved forever' });
+            await this.bot.editMessageText(`${originalText}\n\n✅ *Approved forever* by ${userName}`, editOpts);
+            break;
+
           case 'deny':
             callback(false, 0, userName);
             await this.bot.answerCallbackQuery(query.id, { text: '❌ Denied' });
@@ -197,6 +209,10 @@ export class TelegramNotifier {
             [
               { text: '✅ 8h', callback_data: `approve_8h:${requestId}` },
               { text: '✅ 24h', callback_data: `approve_24h:${requestId}` },
+              { text: '✅ 1w', callback_data: `approve_1w:${requestId}` },
+            ],
+            [
+              { text: '✅ Forever', callback_data: `approve_forever:${requestId}` },
               { text: '❌ Deny', callback_data: `deny:${requestId}` },
             ],
           ],
