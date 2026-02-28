@@ -98,10 +98,12 @@ export function createAdminRouter(
 
   // ─── Dashboard stats ─────────────────────────────────────
 
-  router.get('/api/stats', pinAuth, (_req: Request, res: Response) => {
+  router.get('/api/stats', pinAuth, (req: Request, res: Response) => {
+    const filterService = req.query['service'] as string | undefined;
     const stats = audit.getDashboardStats(
       approvalManager.getActiveCount(),
-      Object.keys(config.services).length
+      Object.keys(config.services).length,
+      filterService || undefined
     );
     res.json(stats);
   });

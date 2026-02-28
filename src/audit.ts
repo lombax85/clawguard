@@ -202,7 +202,16 @@ export class AuditLogger {
     `).all(sinceISO) as { service: string; count: number }[];
   }
 
-  getRequestsByHour(sinceISO: string): { hour: number; count: number }[] {
+  getRequestsByHour(sinceISO: string, service?: string): { hour: number; count: number }[] {
+    if (service) {
+      return this.db.prepare(`
+        SELECT CAST(strftime('%H', timestamp) AS INTEGER) as hour, COUNT(*) as count
+        FROM requests
+        WHERE timestamp >= ? AND service = ?
+        GROUP BY hour
+        ORDER BY hour
+      `).all(sinceISO, service) as { hour: number; count: number }[];
+    }
     return this.db.prepare(`
       SELECT CAST(strftime('%H', timestamp) AS INTEGER) as hour, COUNT(*) as count
       FROM requests
@@ -212,18 +221,27 @@ export class AuditLogger {
     `).all(sinceISO) as { hour: number; count: number }[];
   }
 
-  getApprovalStats(sinceISO: string): { approved: number; denied: number } {
-    const row = this.db.prepare(`
-      SELECT
-        SUM(CASE WHEN approved = 1 THEN 1 ELSE 0 END) as approved,
-        SUM(CASE WHEN approved = 0 THEN 1 ELSE 0 END) as denied
-      FROM requests
-      WHERE timestamp >= ?
-    `).get(sinceISO) as { approved: number; denied: number } | undefined;
+  getApprovalStats(sinceISO: string, service?: string): { approved: number; denied: number } {
+    const query = service
+      ? `SELECT SUM(CASE WHEN approved = 1 THEN 1 ELSE 0 END) as approved, SUM(CASE WHEN approved = 0 THEN 1 ELSE 0 END) as denied FROM requests WHERE timestamp >= ? AND service = ?`
+      : `SELECT SUM(CASE WHEN approved = 1 THEN 1 ELSE 0 END) as approved, SUM(CASE WHEN approved = 0 THEN 1 ELSE 0 END) as denied FROM requests WHERE timestamp >= ?`;
+    const row = (service
+      ? this.db.prepare(query).get(sinceISO, service)
+      : this.db.prepare(query).get(sinceISO)
+    ) as { approved: number; denied: number } | undefined;
     return { approved: row?.approved || 0, denied: row?.denied || 0 };
   }
 
-  getMethodBreakdown(sinceISO: string): { method: string; count: number }[] {
+  getMethodBreakdown(sinceISO: string, service?: string): { method: string; count: number }[] {
+    if (service) {
+      return this.db.prepare(`
+        SELECT method, COUNT(*) as count
+        FROM requests
+        WHERE timestamp >= ? AND service = ?
+        GROUP BY method
+        ORDER BY count DESC
+      `).all(sinceISO, service) as { method: string; count: number }[];
+    }
     return this.db.prepare(`
       SELECT method, COUNT(*) as count
       FROM requests
@@ -233,29 +251,40 @@ export class AuditLogger {
     `).all(sinceISO) as { method: string; count: number }[];
   }
 
-  getTotalRequests(sinceISO: string): number {
+  getTotalRequests(sinceISO: string, service?: string): number {
+    if (service) {
+      const row = this.db.prepare(`
+        SELECT COUNT(*) as total FROM requests WHERE timestamp >= ? AND service = ?
+      `).get(sinceISO, service) as { total: number };
+      return row.total;
+    }
     const row = this.db.prepare(`
       SELECT COUNT(*) as total FROM requests WHERE timestamp >= ?
     `).get(sinceISO) as { total: number };
     return row.total;
   }
 
-  getDashboardStats(activeApprovals: number, configuredServices: number): DashboardStats {
+  getDistinctServices(): string[] {
+    return (this.db.prepare(`SELECT DISTINCT service FROM requests ORDER BY service`).all() as { service: string }[]).map(r => r.service);
+  }
+
+  getDashboardStats(activeApprovals: number, configuredServices: number, filterService?: string): DashboardStats {
     const now = new Date();
     const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
     const weekStart = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
 
-    const approvalStats = this.getApprovalStats(weekStart);
+    const approvalStats = this.getApprovalStats(weekStart, filterService);
 
     return {
-      totalRequestsToday: this.getTotalRequests(todayStart),
-      totalRequestsWeek: this.getTotalRequests(weekStart),
+      totalRequestsToday: this.getTotalRequests(todayStart, filterService),
+      totalRequestsWeek: this.getTotalRequests(weekStart, filterService),
       activeApprovals,
       configuredServices,
       requestsByService: this.getRequestCountByService(weekStart),
-      requestsByHour: this.getRequestsByHour(weekStart),
+      requestsByHour: this.getRequestsByHour(weekStart, filterService),
       approvalStats: { ...approvalStats, timeout: 0 },
-      methodBreakdown: this.getMethodBreakdown(weekStart),
+      methodBreakdown: this.getMethodBreakdown(weekStart, filterService),
+      availableServices: this.getDistinctServices(),
     };
   }
 
