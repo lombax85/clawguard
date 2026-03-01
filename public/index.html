@@ -156,13 +156,15 @@
       </div>
       <div class="stat-grid">
         <div class="stat-card"><div class="label">Requests today</div><div class="value blue" id="st-today">-</div></div>
+        <div class="stat-card"><div class="label">Requests (last 24h)</div><div class="value" id="st-24h">-</div></div>
         <div class="stat-card"><div class="label">Requests this week</div><div class="value" id="st-week">-</div></div>
         <div class="stat-card"><div class="label">Active approvals</div><div class="value green" id="st-approvals">-</div></div>
         <div class="stat-card"><div class="label">Services</div><div class="value orange" id="st-services">-</div></div>
       </div>
       <div class="chart-grid">
         <div class="chart-card"><h3>Requests by service</h3><canvas id="chart-services"></canvas></div>
-        <div class="chart-card"><h3>Requests by hour</h3><canvas id="chart-hours"></canvas></div>
+        <div class="chart-card"><h3>Today / last 24h (hourly)</h3><canvas id="chart-24h"></canvas></div>
+        <div class="chart-card"><h3>Requests by hour (last 7 days, hour-of-day)</h3><canvas id="chart-hours"></canvas></div>
         <div class="chart-card"><h3>Approved vs Denied</h3><canvas id="chart-approval"></canvas></div>
         <div class="chart-card"><h3>HTTP methods</h3><canvas id="chart-methods"></canvas></div>
       </div>
@@ -367,6 +369,7 @@ async function loadDashboard() {
   }
 
   document.getElementById('st-today').textContent = stats.totalRequestsToday;
+  document.getElementById('st-24h').textContent = stats.totalRequestsLast24h;
   document.getElementById('st-week').textContent = stats.totalRequestsWeek;
   document.getElementById('st-approvals').textContent = stats.activeApprovals;
   document.getElementById('st-services').textContent = stats.configuredServices;
@@ -377,7 +380,15 @@ async function loadDashboard() {
     datasets: [{ label: 'Requests', data: stats.requestsByService.map(r => r.count), backgroundColor: COLORS }]
   });
 
-  // Requests by hour
+  // Today / last 24h (hourly buckets)
+  const buckets = (stats.requestsLast24hByHour || []).map(r => r.bucket);
+  const bucketCounts = (stats.requestsLast24hByHour || []).map(r => r.count);
+  renderChart('chart-24h', 'line', {
+    labels: buckets.map(b => b.slice(11)), // show only HH:MM
+    datasets: [{ label: 'Requests', data: bucketCounts, borderColor: '#4ecdc4', backgroundColor: 'rgba(78,205,196,0.10)', fill: true, tension: 0.3 }]
+  });
+
+  // Requests by hour (hour-of-day, last 7 days)
   const hours = Array.from({length: 24}, (_, i) => i);
   const hourData = hours.map(h => {
     const found = stats.requestsByHour.find(r => r.hour === h);

@@ -268,20 +268,43 @@ export class AuditLogger {
     return (this.db.prepare(`SELECT DISTINCT service FROM requests ORDER BY service`).all() as { service: string }[]).map(r => r.service);
   }
 
+  getRequestsLast24hByHour(sinceISO: string, service?: string): { bucket: string; count: number }[] {
+    if (service) {
+      return this.db.prepare(`
+        SELECT strftime('%Y-%m-%d %H:00', timestamp) as bucket, COUNT(*) as count
+        FROM requests
+        WHERE timestamp >= ? AND service = ?
+        GROUP BY bucket
+        ORDER BY bucket
+      `).all(sinceISO, service) as { bucket: string; count: number }[];
+    }
+
+    return this.db.prepare(`
+      SELECT strftime('%Y-%m-%d %H:00', timestamp) as bucket, COUNT(*) as count
+      FROM requests
+      WHERE timestamp >= ?
+      GROUP BY bucket
+      ORDER BY bucket
+    `).all(sinceISO) as { bucket: string; count: number }[];
+  }
+
   getDashboardStats(activeApprovals: number, configuredServices: number, filterService?: string): DashboardStats {
     const now = new Date();
     const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
     const weekStart = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const last24hStart = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
 
     const approvalStats = this.getApprovalStats(weekStart, filterService);
 
     return {
       totalRequestsToday: this.getTotalRequests(todayStart, filterService),
       totalRequestsWeek: this.getTotalRequests(weekStart, filterService),
+      totalRequestsLast24h: this.getTotalRequests(last24hStart, filterService),
       activeApprovals,
       configuredServices,
       requestsByService: this.getRequestCountByService(weekStart),
       requestsByHour: this.getRequestsByHour(weekStart, filterService),
+      requestsLast24hByHour: this.getRequestsLast24hByHour(last24hStart, filterService),
       approvalStats: { ...approvalStats, timeout: 0 },
       methodBreakdown: this.getMethodBreakdown(weekStart, filterService),
       availableServices: this.getDistinctServices(),
