@@ -124,6 +124,15 @@ notifications:
 TELEGRAM_BOT_TOKEN=your-bot-token docker compose up -d
 ```
 
+> **Docker networking note:** When running in Docker, requests from your host machine arrive with the Docker bridge IP (typically `172.17.0.1`), not `127.0.0.1`. To access the admin dashboard, add your Docker bridge IP to `allowedIPs` in `clawguard.yaml`:
+> ```yaml
+> admin:
+>   allowedIPs:
+>     - "127.0.0.1"
+>     - "172.17.0.1"    # Docker host IP
+> ```
+> To find your Docker bridge IP: `docker network inspect bridge | grep Gateway`
+
 **Or from source:**
 
 ```bash

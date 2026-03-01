@@ -84,6 +84,8 @@ admin:
     - "127.0.0.1"
     - "::1"
     # - "192.168.1.0/24"                    # uncomment to allow entire LAN
+    # - "172.17.0.1"                        # Docker: host IP on default bridge network
+    # - "172.16.0.0/12"                     # Docker: allow all Docker networks (172.16-31.x.x)
 
 audit:
   type: sqlite
