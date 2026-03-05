@@ -125,6 +125,57 @@ Key points:
 - Set up as a persistent service (systemd/launchd)
 - **DO NOT install the full project, DO NOT run npm install**
 
+## Git operations (push, pull requests)
+
+**DO NOT use SSH keys or local Git credentials** — they bypass ClawGuard entirely.
+
+All Git operations on GitHub repositories should go through the **GitHub API**, which is routed through ClawGuard like any other API call. This ensures every push, branch creation, and PR is subject to human approval.
+
+### Push a commit via API
+
+```bash
+# 1. Create a blob for each modified file
+CONTENT=$(base64 -i path/to/file.ext)
+BLOB_SHA=$(curl -s -X POST 'https://api.github.com/repos/OWNER/REPO/git/blobs' \
+  -H "Content-Type: application/json" \
+  -d "{\"content\":\"$CONTENT\",\"encoding\":\"base64\"}" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['sha'])")
+
+# 2. Get the current main branch SHA and its tree
+MAIN_SHA=$(curl -s 'https://api.github.com/repos/OWNER/REPO/git/refs/heads/main' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['object']['sha'])")
+BASE_TREE=$(curl -s "https://api.github.com/repos/OWNER/REPO/git/commits/$MAIN_SHA" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['tree']['sha'])")
+
+# 3. Create a new tree with the changed file(s)
+TREE_SHA=$(curl -s -X POST 'https://api.github.com/repos/OWNER/REPO/git/trees' \
+  -H "Content-Type: application/json" \
+  -d "{\"base_tree\":\"$BASE_TREE\",\"tree\":[{\"path\":\"path/to/file.ext\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"$BLOB_SHA\"}]}" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['sha'])")
+
+# 4. Create a commit
+COMMIT_SHA=$(curl -s -X POST 'https://api.github.com/repos/OWNER/REPO/git/commits' \
+  -H "Content-Type: application/json" \
+  -d "{\"message\":\"your commit message\",\"tree\":\"$TREE_SHA\",\"parents\":[\"$MAIN_SHA\"]}" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['sha'])")
+
+# 5. Create a branch
+curl -s -X POST 'https://api.github.com/repos/OWNER/REPO/git/refs' \
+  -H "Content-Type: application/json" \
+  -d "{\"ref\":\"refs/heads/my-branch\",\"sha\":\"$COMMIT_SHA\"}"
+
+# 6. Create a Pull Request
+curl -s -X POST 'https://api.github.com/repos/OWNER/REPO/pulls' \
+  -H "Content-Type: application/json" \
+  -d '{"title":"PR title","body":"PR description","head":"my-branch","base":"main"}'
+```
+
+Every one of these API calls goes through ClawGuard → the human sees and approves each one via Telegram. No code reaches GitHub without human approval.
+
+### Why not SSH?
+
+SSH keys authenticate directly with GitHub, completely bypassing ClawGuard. If a prompt injection tricks the agent into running `git push` via SSH, the code goes to GitHub with **zero human oversight**. Using the API ensures ClawGuard intercepts every interaction.
+
 ## Troubleshooting
 
 ### "Approval denied or timed out"
