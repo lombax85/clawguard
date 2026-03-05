@@ -222,11 +222,14 @@ export function createAdminRouter(
 
   router.post('/api/revoke/:service', pinAuth, (req: Request, res: Response) => {
     const service = req.params['service'] as string;
-    const revoked = approvalManager.revokeApproval(service);
+    const method = (req.query['method'] as string | undefined)?.toUpperCase();
+    const revoked = approvalManager.revokeApproval(service, method);
     if (revoked) {
-      res.json({ ok: true, message: `Approval for "${service}" revoked` });
+      const scope = method ? `${service} ${method}` : service;
+      res.json({ ok: true, message: `Approval for "${scope}" revoked` });
     } else {
-      res.status(404).json({ error: `No active approval for "${service}"` });
+      const scope = method ? `${service} ${method}` : service;
+      res.status(404).json({ error: `No active approval for "${scope}"` });
     }
   });
 
