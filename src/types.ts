@@ -79,6 +79,7 @@ export interface Config {
 
 export interface Approval {
   service: string;
+  method: string;
   approvedAt: number;
   expiresAt: number;
   approvedBy: string;
@@ -110,23 +111,10 @@ export interface AuditEntry {
 export interface DashboardStats {
   totalRequestsToday: number;
   totalRequestsWeek: number;
-  totalRequestsLast24h: number;
   activeApprovals: number;
   configuredServices: number;
   requestsByService: { service: string; count: number }[];
-
-  /**
-   * Hour-of-day breakdown (0-23) for the last 7 days.
-   * Useful to see daily patterns.
-   */
   requestsByHour: { hour: number; count: number }[];
-
-  /**
-   * Rolling last-24h breakdown, grouped by hour bucket (UTC, based on stored ISO timestamps).
-   * Example label: "2026-03-01 14:00".
-   */
-  requestsLast24hByHour: { bucket: string; count: number }[];
-
   approvalStats: { approved: number; denied: number; timeout: number };
   methodBreakdown: { method: string; count: number }[];
   availableServices?: string[];
