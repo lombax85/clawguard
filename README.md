@@ -124,15 +124,6 @@ notifications:
 TELEGRAM_BOT_TOKEN=your-bot-token docker compose up -d
 ```
 
-> **Docker networking note:** When running in Docker, requests from your host machine arrive with the Docker bridge IP (typically `172.17.0.1`), not `127.0.0.1`. To access the admin dashboard, add your Docker bridge IP to `allowedIPs` in `clawguard.yaml`:
-> ```yaml
-> admin:
->   allowedIPs:
->     - "127.0.0.1"
->     - "172.17.0.1"    # Docker host IP
-> ```
-> To find your Docker bridge IP: `docker network inspect bridge | grep Gateway`
-
 **Or from source:**
 
 ```bash
@@ -524,7 +515,9 @@ audit:
 - [ ] OpenClaw skill for one-command setup
 - [ ] Encrypted token storage (1Password / Vault integration)
 - [ ] Webhook notifications (Slack, Discord, email)
-- [ ] Per-action approval (not just per-service)
+- [x] Per-method approval granularity (approvals are now separated by service + HTTP method)
+- [ ] Policy scope selector for approvals: choose filter type per rule (`method` only, or `service + method + path prefix`, or `service + method + exact path`)
+- [ ] Per-action approval beyond method (e.g. payload-aware policies)
 - [ ] Rate limiting and anomaly detection
 - [ ] MCP server integration
 - [ ] Multi-agent support (different keys, different policies)
