@@ -10,6 +10,10 @@ function generateRequestId(): string {
 
 export class ApprovalManager {
   private activeApprovals: Map<string, Approval> = new Map();
+
+  private approvalKey(service: string, method: string): string {
+    return `${service}::${method.toUpperCase()}`;
+  }
   private telegram: TelegramNotifier;
   private audit: AuditLogger;
   private approvalTimeout: number;
@@ -26,9 +30,10 @@ export class ApprovalManager {
   private restoreApprovals(): void {
     const saved = this.audit.getActiveApprovals();
     for (const approval of saved) {
-      this.activeApprovals.set(approval.service, approval);
+      const key = this.approvalKey(approval.service, approval.method);
+      this.activeApprovals.set(key, approval);
       const remaining = Math.round((approval.expiresAt - Date.now()) / 1000 / 60);
-      console.log(`   ↻ Restored approval for ${approval.service} (${remaining}min remaining)`);
+      console.log(`   ↻ Restored approval for ${approval.service} ${approval.method} (${remaining}min remaining)`);
     }
     if (saved.length > 0) {
       console.log(`   ✓ ${saved.length} approval(s) restored from database`);
@@ -56,13 +61,15 @@ export class ApprovalManager {
     return serviceConfig.policy.default;
   }
 
-  hasActiveApproval(service: string): boolean {
-    const approval = this.activeApprovals.get(service);
+  hasActiveApproval(service: string, method: string): boolean {
+    const key = this.approvalKey(service, method);
+    const approval = this.activeApprovals.get(key);
     if (!approval) return false;
 
     if (Date.now() > approval.expiresAt) {
-      this.activeApprovals.delete(service);
-      console.log(`⏰ Approval expired for service: ${service}`);
+      this.activeApprovals.delete(key);
+      this.audit.revokeApprovalInDb(service, method);
+      console.log(`⏰ Approval expired for service+method: ${service} ${method.toUpperCase()}`);
       return false;
     }
 
@@ -84,11 +91,12 @@ export class ApprovalManager {
       return true;
     }
 
-    // Check existing approval
-    if (this.hasActiveApproval(service)) {
-      const approval = this.activeApprovals.get(service)!;
+    // Check existing approval (scoped by service + HTTP method)
+    if (this.hasActiveApproval(service, method)) {
+      const key = this.approvalKey(service, method);
+      const approval = this.activeApprovals.get(key)!;
       const remaining = Math.round((approval.expiresAt - Date.now()) / 1000 / 60);
-      console.log(`✅ Active approval for ${service} (${remaining}min remaining)`);
+      console.log(`✅ Active approval for ${service} ${method.toUpperCase()} (${remaining}min remaining)`);
       return true;
     }
 
@@ -110,13 +118,15 @@ export class ApprovalManager {
     if (result.approved) {
       const approval: Approval = {
         service,
+        method: method.toUpperCase(),
         approvedAt: Date.now(),
         expiresAt: Date.now() + result.ttlSeconds * 1000,
         approvedBy: result.approvedBy,
       };
-      this.activeApprovals.set(service, approval);
-      this.audit.logApproval(service, result.approvedBy, result.ttlSeconds);
-      console.log(`✅ Approved by ${result.approvedBy} for ${result.ttlSeconds / 3600}h`);
+      const key = this.approvalKey(service, method);
+      this.activeApprovals.set(key, approval);
+      this.audit.logApproval(service, method, result.approvedBy, result.ttlSeconds);
+      console.log(`✅ Approved by ${result.approvedBy} for ${service} ${method.toUpperCase()} (${result.ttlSeconds / 3600}h)`);
       return true;
     }
 
@@ -124,22 +134,37 @@ export class ApprovalManager {
     return false;
   }
 
-  revokeApproval(service: string): boolean {
-    if (this.activeApprovals.has(service)) {
-      this.activeApprovals.delete(service);
-      this.audit.revokeApprovalInDb(service);
-      console.log(`🔒 Approval revoked for service: ${service}`);
-      return true;
+  revokeApproval(service: string, method?: string): boolean {
+    if (method) {
+      const key = this.approvalKey(service, method);
+      if (this.activeApprovals.has(key)) {
+        this.activeApprovals.delete(key);
+        this.audit.revokeApprovalInDb(service, method);
+        console.log(`🔒 Approval revoked for service+method: ${service} ${method.toUpperCase()}`);
+        return true;
+      }
+      return false;
     }
-    return false;
+
+    // Revoke all methods for this service
+    const keysToDelete = [...this.activeApprovals.keys()].filter((k) => k.startsWith(`${service}::`));
+    if (keysToDelete.length === 0) return false;
+
+    for (const key of keysToDelete) {
+      this.activeApprovals.delete(key);
+    }
+    this.audit.revokeApprovalInDb(service);
+    console.log(`🔒 Approval revoked for service: ${service} (${keysToDelete.length} method(s))`);
+    return true;
   }
 
   revokeAll(): number {
     const count = this.activeApprovals.size;
-    const services = [...this.activeApprovals.keys()];
+    const keys = [...this.activeApprovals.keys()];
     this.activeApprovals.clear();
-    for (const service of services) {
-      this.audit.revokeApprovalInDb(service);
+    for (const key of keys) {
+      const [service, method] = key.split('::');
+      this.audit.revokeApprovalInDb(service, method);
     }
     console.log(`🔒 All ${count} approvals revoked`);
     return count;
@@ -147,19 +172,21 @@ export class ApprovalManager {
 
   getActiveCount(): number {
     // Clean expired first
-    for (const [service, approval] of this.activeApprovals) {
+    for (const [key, approval] of this.activeApprovals) {
       if (Date.now() > approval.expiresAt) {
-        this.activeApprovals.delete(service);
+        this.activeApprovals.delete(key);
       }
     }
     return this.activeApprovals.size;
   }
 
-  getStatus(): Record<string, { expiresAt: string; approvedBy: string; remainingMinutes: number }> {
-    const status: Record<string, { expiresAt: string; approvedBy: string; remainingMinutes: number }> = {};
-    for (const [service, approval] of this.activeApprovals) {
+  getStatus(): Record<string, { service: string; method: string; expiresAt: string; approvedBy: string; remainingMinutes: number }> {
+    const status: Record<string, { service: string; method: string; expiresAt: string; approvedBy: string; remainingMinutes: number }> = {};
+    for (const [key, approval] of this.activeApprovals) {
       if (Date.now() < approval.expiresAt) {
-        status[service] = {
+        status[key] = {
+          service: approval.service,
+          method: approval.method,
           expiresAt: new Date(approval.expiresAt).toISOString(),
           approvedBy: approval.approvedBy,
           remainingMinutes: Math.round((approval.expiresAt - Date.now()) / 1000 / 60),
