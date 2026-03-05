@@ -29,6 +29,7 @@ export class AuditLogger {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp TEXT NOT NULL,
         service TEXT NOT NULL,
+        method TEXT NOT NULL DEFAULT '*',
         approved_by TEXT NOT NULL,
         ttl_seconds INTEGER NOT NULL,
         expires_at TEXT NOT NULL,
@@ -53,6 +54,7 @@ export class AuditLogger {
     try { this.db.exec('ALTER TABLE requests ADD COLUMN request_body TEXT'); } catch { /* already exists */ }
     try { this.db.exec('ALTER TABLE requests ADD COLUMN response_body TEXT'); } catch { /* already exists */ }
     try { this.db.exec('ALTER TABLE approvals ADD COLUMN revoked INTEGER NOT NULL DEFAULT 0'); } catch { /* already exists */ }
+    try { this.db.exec("ALTER TABLE approvals ADD COLUMN method TEXT NOT NULL DEFAULT '*'"); } catch { /* already exists */ }
   }
 
   // ─── Request logging ──────────────────────────────────────
@@ -76,13 +78,13 @@ export class AuditLogger {
 
   // ─── Approval logging ─────────────────────────────────────
 
-  logApproval(service: string, approvedBy: string, ttlSeconds: number): void {
+  logApproval(service: string, method: string, approvedBy: string, ttlSeconds: number): void {
     const now = new Date();
     const expiresAt = new Date(now.getTime() + ttlSeconds * 1000);
     this.db.prepare(`
-      INSERT INTO approvals (timestamp, service, approved_by, ttl_seconds, expires_at)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(now.toISOString(), service, approvedBy, ttlSeconds, expiresAt.toISOString());
+      INSERT INTO approvals (timestamp, service, method, approved_by, ttl_seconds, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(now.toISOString(), service, method.toUpperCase(), approvedBy, ttlSeconds, expiresAt.toISOString());
   }
 
   /**
@@ -96,20 +98,23 @@ export class AuditLogger {
     this.db.prepare(`DELETE FROM approvals WHERE expires_at <= ?`).run(now);
 
     const rows = this.db.prepare(`
-      SELECT service, approved_by, ttl_seconds, expires_at, timestamp
+      SELECT service, method, approved_by, ttl_seconds, expires_at, timestamp
       FROM approvals
       WHERE expires_at > ? AND revoked = 0
       ORDER BY id DESC
-    `).all(now) as { service: string; approved_by: string; ttl_seconds: number; expires_at: string; timestamp: string }[];
+    `).all(now) as { service: string; method: string; approved_by: string; ttl_seconds: number; expires_at: string; timestamp: string }[];
 
-    // Deduplicate — keep only the latest approval per service
+    // Deduplicate — keep only the latest approval per service+method
     const seen = new Set<string>();
     const approvals: Approval[] = [];
     for (const row of rows) {
-      if (seen.has(row.service)) continue;
-      seen.add(row.service);
+      const method = (row.method || '*').toUpperCase();
+      const key = `${row.service}::${method}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
       approvals.push({
         service: row.service,
+        method,
         approvedAt: new Date(row.timestamp).getTime(),
         expiresAt: new Date(row.expires_at).getTime(),
         approvedBy: row.approved_by,
@@ -121,7 +126,13 @@ export class AuditLogger {
   /**
    * Mark an approval as revoked in the database so it won't be restored on restart.
    */
-  revokeApprovalInDb(service: string): void {
+  revokeApprovalInDb(service: string, method?: string): void {
+    if (method) {
+      this.db.prepare(`
+        UPDATE approvals SET revoked = 1 WHERE service = ? AND method = ? AND revoked = 0
+      `).run(service, method.toUpperCase());
+      return;
+    }
     this.db.prepare(`
       UPDATE approvals SET revoked = 1 WHERE service = ? AND revoked = 0
     `).run(service);
@@ -268,43 +279,20 @@ export class AuditLogger {
     return (this.db.prepare(`SELECT DISTINCT service FROM requests ORDER BY service`).all() as { service: string }[]).map(r => r.service);
   }
 
-  getRequestsLast24hByHour(sinceISO: string, service?: string): { bucket: string; count: number }[] {
-    if (service) {
-      return this.db.prepare(`
-        SELECT strftime('%Y-%m-%d %H:00', timestamp) as bucket, COUNT(*) as count
-        FROM requests
-        WHERE timestamp >= ? AND service = ?
-        GROUP BY bucket
-        ORDER BY bucket
-      `).all(sinceISO, service) as { bucket: string; count: number }[];
-    }
-
-    return this.db.prepare(`
-      SELECT strftime('%Y-%m-%d %H:00', timestamp) as bucket, COUNT(*) as count
-      FROM requests
-      WHERE timestamp >= ?
-      GROUP BY bucket
-      ORDER BY bucket
-    `).all(sinceISO) as { bucket: string; count: number }[];
-  }
-
   getDashboardStats(activeApprovals: number, configuredServices: number, filterService?: string): DashboardStats {
     const now = new Date();
     const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
     const weekStart = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
-    const last24hStart = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
 
     const approvalStats = this.getApprovalStats(weekStart, filterService);
 
     return {
       totalRequestsToday: this.getTotalRequests(todayStart, filterService),
       totalRequestsWeek: this.getTotalRequests(weekStart, filterService),
-      totalRequestsLast24h: this.getTotalRequests(last24hStart, filterService),
       activeApprovals,
       configuredServices,
       requestsByService: this.getRequestCountByService(weekStart),
       requestsByHour: this.getRequestsByHour(weekStart, filterService),
-      requestsLast24hByHour: this.getRequestsLast24hByHour(last24hStart, filterService),
       approvalStats: { ...approvalStats, timeout: 0 },
       methodBreakdown: this.getMethodBreakdown(weekStart, filterService),
       availableServices: this.getDistinctServices(),
