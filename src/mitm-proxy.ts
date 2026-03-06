@@ -230,6 +230,8 @@ export function attachMitmProxy(
       trackDiscoveredHost(hostname);
 
       if (!config.proxy.discovery || config.proxy.discoveryPolicy === 'block') {
+        // Ignore socket errors (client may close before we finish responding)
+        clientSocket.on('error', () => { /* ignore */ });
         // Default-safe behavior: block unknown services unless explicitly allowed.
         clientSocket.write('HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\n\r\n{"error":"Unknown service blocked by policy. Add service config or set proxy.discoveryPolicy=silent_allow."}');
         clientSocket.end();
