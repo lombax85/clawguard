@@ -7,7 +7,7 @@ import { Config, ServiceConfig } from './types';
 import { ApprovalManager } from './approval';
 import { AuditLogger } from './audit';
 import { CertManager } from './cert-manager';
-import { validateRuntimeUrl } from './security';
+import { validateRuntimeUrl, validateUpstreamUrl, resolveAndCheckPrivateIP } from './security';
 import { rewriteRequestAuth } from './auth-rewrite';
 
 // ─── Discovery host tracking ─────────────────────────────────
@@ -25,6 +25,7 @@ interface DiscoveredHost {
 
 const discoveredHosts: Map<string, DiscoveredHost> = new Map();
 const MAX_PATHS = 10;
+const MAX_DISCOVERED_HOSTS = 1000;
 
 function detectAuth(
   headers: Record<string, string | string[] | undefined>,
@@ -92,20 +93,30 @@ function trackDiscoveredHost(hostname: string, method?: string, path?: string, h
       entry.authType = auth.authType;
       entry.authHeaderName = auth.authHeaderName;
     }
-  } else {
-    const auth = headers ? detectAuth(headers, url) : { authHeader: null, authType: null, authHeaderName: null };
-    discoveredHosts.set(hostname, {
-      count: 1,
-      firstSeen: now,
-      lastSeen: now,
-      authHeader: auth.authHeader,
-      authType: auth.authType,
-      authHeaderName: auth.authHeaderName,
-      methods: new Set(method ? [method] : []),
-      paths: path ? [path] : [],
-    });
-    console.log(`🔍 New unconfigured host discovered: ${hostname}${auth.authType ? ` (auth: ${auth.authType})` : ''}`);
+    // refresh insertion order for LRU-like eviction
+    discoveredHosts.delete(hostname);
+    discoveredHosts.set(hostname, entry);
+    return;
   }
+
+  // Evict oldest discovered host when over cap
+  if (discoveredHosts.size >= MAX_DISCOVERED_HOSTS) {
+    const oldestKey = discoveredHosts.keys().next().value as string | undefined;
+    if (oldestKey) discoveredHosts.delete(oldestKey);
+  }
+
+  const auth = headers ? detectAuth(headers, url) : { authHeader: null, authType: null, authHeaderName: null };
+  discoveredHosts.set(hostname, {
+    count: 1,
+    firstSeen: now,
+    lastSeen: now,
+    authHeader: auth.authHeader,
+    authType: auth.authType,
+    authHeaderName: auth.authHeaderName,
+    methods: new Set(method ? [method] : []),
+    paths: path ? [path] : [],
+  });
+  console.log(`🔍 New unconfigured host discovered: ${hostname}${auth.authType ? ` (auth: ${auth.authType})` : ''}`);
 }
 
 export function getPassthroughHosts(): {
@@ -120,6 +131,15 @@ export function getPassthroughHosts(): {
       methods: [...info.methods], paths: info.paths,
     }))
     .sort((a, b) => b.count - a.count);
+}
+
+// Test helpers (no runtime side effects)
+export function __resetDiscoveredHostsForTests(): void {
+  discoveredHosts.clear();
+}
+
+export function __trackDiscoveredHostForTests(hostname: string, method?: string, path?: string): void {
+  trackDiscoveredHost(hostname, method, path);
 }
 
 /**
@@ -217,7 +237,7 @@ export function attachMitmProxy(
       }
 
       // discovery + silent_allow: MITM unknown hosts, inspect, and forward safely.
-      handleDiscoveryMitm(hostname, port, clientSocket, head, certManager, config);
+      handleDiscoveryMitm(hostname, port, clientSocket, head, certManager, config, audit, clientIp);
       return;
     }
 
@@ -426,7 +446,9 @@ function handleDiscoveryMitm(
   clientSocket: net.Socket,
   head: Buffer,
   certManager: CertManager,
-  config: Config
+  config: Config,
+  audit: AuditLogger,
+  clientIp: string
 ): void {
   clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
 
@@ -450,11 +472,21 @@ function handleDiscoveryMitm(
     // Forward as-is to the real upstream
     const upstreamUrl = new URL(requestPath, `https://${hostname}`);
 
-    // SSRF/runtime safety check also in discovery path
-    const runtimeCheck = validateRuntimeUrl(upstreamUrl.toString(), `https://${hostname}`, config.security);
-    if (!runtimeCheck.valid) {
+    // Discovery SSRF/runtime safety checks:
+    // 1) allowlist + protocol checks
+    const upstreamCheck = validateUpstreamUrl(upstreamUrl.toString(), config.security);
+    if (!upstreamCheck.valid) {
+      audit.logRequest({
+        timestamp: new Date().toISOString(),
+        service: `discovery:${hostname}`,
+        method,
+        path: requestPath,
+        approved: false,
+        responseStatus: 403,
+        agentIp: clientIp,
+      });
       res.writeHead(403, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: `Request blocked by security policy: ${runtimeCheck.reason}` }));
+      res.end(JSON.stringify({ error: `Request blocked by security policy: ${upstreamCheck.reason}` }));
       return;
     }
 
@@ -469,7 +501,26 @@ function handleDiscoveryMitm(
     // Collect body
     const bodyChunks: Buffer[] = [];
     req.on('data', (chunk: Buffer) => bodyChunks.push(chunk));
-    req.on('end', () => {
+    req.on('end', async () => {
+      // 2) DNS resolution check against private IPs (defense against SSRF/rebinding)
+      if (config.security.blockPrivateIPs) {
+        const isPrivate = await resolveAndCheckPrivateIP(hostname);
+        if (isPrivate) {
+          audit.logRequest({
+            timestamp: new Date().toISOString(),
+            service: `discovery:${hostname}`,
+            method,
+            path: requestPath,
+            approved: false,
+            responseStatus: 403,
+            agentIp: clientIp,
+          });
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Request blocked by security policy: private IP target' }));
+          return;
+        }
+      }
+
       const body = Buffer.concat(bodyChunks);
 
       const proxyReq = https.request(upstreamUrl.toString(), {
@@ -482,9 +533,28 @@ function handleDiscoveryMitm(
         }
         res.writeHead(proxyRes.statusCode || 502, resHeaders);
         proxyRes.pipe(res);
+
+        audit.logRequest({
+          timestamp: new Date().toISOString(),
+          service: `discovery:${hostname}`,
+          method,
+          path: requestPath,
+          approved: true,
+          responseStatus: proxyRes.statusCode || 0,
+          agentIp: clientIp,
+        });
       });
 
       proxyReq.on('error', (err) => {
+        audit.logRequest({
+          timestamp: new Date().toISOString(),
+          service: `discovery:${hostname}`,
+          method,
+          path: requestPath,
+          approved: true,
+          responseStatus: 502,
+          agentIp: clientIp,
+        });
         res.writeHead(502, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: `Upstream error: ${err.message}` }));
       });

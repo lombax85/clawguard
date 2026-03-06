@@ -8,7 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 - Discovery policy control for unknown hosts in HTTPS proxy mode: `proxy.discoveryPolicy` with values `block` (default) and `silent_allow` (explicit opt-in).
-- Runtime SSRF validation in discovery MITM forwarding path (same `validateRuntimeUrl` guard used by configured services).
+- Runtime SSRF validation in discovery MITM forwarding path (allowlist/protocol validation + DNS private-IP check).
+- Discovery `silent_allow` requests now generate audit entries (status + path/method/client IP) like other proxy paths.
+- Discovery host tracking now uses memory cap with eviction to prevent unbounded growth under hostile traffic.
+- Tests for discovery host tracking cap/eviction and same-host aggregation (`tests/mitm-proxy.test.js`).
 - README section explaining functional differences between Mode C (`HTTPS_PROXY`) and `/etc/hosts` + forwarder setup.
 - Hardening guidance for proxy mode (agent key strength, network/IP restrictions, private IP blocking, conservative discovery defaults).
 - Roadmap note for planned policy scope selector: `method` only, or `service + method + path prefix`, or `service + method + exact path`.

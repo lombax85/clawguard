@@ -337,9 +337,11 @@ Configured services always get full MITM with approval policies and token inject
 When `proxy.discovery: true`, ClawGuard inspects unconfigured hosts to detect authentication patterns and suggest YAML entries.
 
 - `discoveryPolicy: block` (default): unknown hosts are denied until you explicitly add a service.
-- `discoveryPolicy: silent_allow`: unknown hosts are forwarded while still being tracked.
+- `discoveryPolicy: silent_allow`: unknown hosts are forwarded while still being tracked and audit-logged.
 
 `silent_allow` must be set explicitly; it is never the default.
+
+Discovery tracking is memory-capped (LRU-style eviction) to avoid unbounded growth under hostile traffic.
 
 Detected information:
 - Hostname and request count
