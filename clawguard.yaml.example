@@ -48,6 +48,39 @@ services:
         - match: { method: POST }
           action: require_approval
 
+  # ─── OAuth2 service (e.g. Stripe) ──────────────────────
+  # For APIs that use OAuth2 client_credentials flow.
+  # The script sends dummy client_id/client_secret to the /token endpoint,
+  # ClawGuard replaces them with the real ones before forwarding.
+  # stripe:
+  #   upstream: https://api.stripe.com
+  #   auth:
+  #     type: oauth2_client_credentials
+  #     token: "unused"
+  #     tokenPath: /oauth/token                # where the script POSTs for tokens
+  #     clientId: "ca_your-client-id"
+  #     clientSecret: "sk_live_your-client-secret"
+  #   policy:
+  #     default: require_approval
+  #     rules:
+  #       - match: { method: GET }
+  #         action: auto_approve
+  #       - match: { method: POST, path: /oauth/token }
+  #         action: auto_approve               # let token exchange pass through
+
+  # ─── Anthropic (Claude API) ─────────────────────────────
+  anthropic:
+    upstream: https://api.anthropic.com
+    auth:
+      type: header
+      headerName: x-api-key
+      token: "sk-ant-your-api-key"
+    policy:
+      default: require_approval
+      rules:
+        - match: { method: POST, path: "/v1/messages" }
+          action: require_approval           # API calls always need approval
+
   # ─── Slack ──────────────────────────────────────────────
   slack:
     upstream: https://slack.com/api
@@ -72,6 +105,8 @@ security:
     - httpbin.org
     - api.github.com
     - api.openai.com
+    - api.anthropic.com
+    - api.stripe.com
     - slack.com
   blockPrivateIPs: true
   followRedirects: false
@@ -83,6 +118,7 @@ admin:
   allowedIPs:
     - "127.0.0.1"
     - "::1"
+    - "172.16.0.0/12"                       # Docker networks (172.16-31.x.x)
     # - "192.168.1.0/24"                    # uncomment to allow entire LAN
     # - "172.17.0.1"                        # Docker: host IP on default bridge network
     # - "172.16.0.0/12"                     # Docker: allow all Docker networks (172.16-31.x.x)
@@ -91,3 +127,14 @@ audit:
   type: sqlite
   path: ./data/clawguard.db    # use ./data/ for Docker volume persistence
   logPayload: false
+
+# ─── HTTPS_PROXY mode (Mode C) ──────────────────────────────
+# When enabled, ClawGuard also handles CONNECT requests on the same port.
+# Your scripts don't need ANY changes — just set an env var:
+#   export HTTPS_PROXY=http://YOUR_AGENT_KEY:x@clawguard-host:9090
+#   export NODE_EXTRA_CA_CERTS=/path/to/data/ca/ca.crt
+# ClawGuard intercepts TLS, applies approval policies, injects real tokens.
+proxy:
+  enabled: false
+  caDir: ./data/ca              # CA cert/key stored here (auto-generated on first run)
+  discovery: false              # MITM unknown hosts to detect auth patterns (see Discovered tab in dashboard)

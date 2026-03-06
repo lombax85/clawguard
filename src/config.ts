@@ -44,13 +44,19 @@ const DEFAULT_SECURITY = {
 const DEFAULT_ADMIN = {
   enabled: true,
   pin: '',
-  allowedIPs: ['127.0.0.1', '::1', '::ffff:127.0.0.1'],
+  allowedIPs: ['127.0.0.1', '::1', '::ffff:127.0.0.1', '172.16.0.0/12'],
 };
 
 const DEFAULT_AUDIT = {
   type: 'sqlite' as const,
   path: './clawguard.db',
   logPayload: false,
+};
+
+const DEFAULT_PROXY = {
+  enabled: false,
+  caDir: './data/ca',
+  discovery: false,
 };
 
 const DEFAULT_TELEGRAM_PAIRING = {
@@ -96,6 +102,7 @@ export function loadConfig(configPath: string): Config {
   config.security = { ...DEFAULT_SECURITY, ...(config.security || {}) };
   config.admin = { ...DEFAULT_ADMIN, ...(config.admin || {}) };
   config.audit = { ...DEFAULT_AUDIT, ...(config.audit || {}) };
+  config.proxy = { ...DEFAULT_PROXY, ...(config.proxy || {}) };
 
   if (!config.notifications.telegram.pairing) {
     config.notifications.telegram.pairing = { ...DEFAULT_TELEGRAM_PAIRING };

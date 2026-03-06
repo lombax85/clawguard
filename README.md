@@ -216,6 +216,134 @@ The SDK doesn't need any code changes. The forwarder adds the `X-ClawGuard-Key` 
 
 ---
 
+### Mode C: HTTPS_PROXY — Transparent Interception (most powerful)
+
+No code changes, no forwarder, no `/etc/hosts`. ClawGuard acts as an HTTPS proxy using MITM TLS. Any tool that respects `HTTPS_PROXY` (curl, Python requests, brew-installed CLIs like `railway`, `gh`, etc.) works automatically.
+
+```
+SDK/CLI → HTTPS_PROXY → ClawGuard (CONNECT + MITM) → upstream API
+```
+
+#### 1. Enable proxy mode in `clawguard.yaml`
+
+```yaml
+proxy:
+  enabled: true
+  caDir: ./data/ca        # CA cert/key auto-generated on first run
+  discovery: false        # set true to detect unconfigured hosts (see Discovery Mode)
+```
+
+Restart ClawGuard: `docker compose up -d --build`
+
+#### 2. Trust the CA certificate
+
+ClawGuard generates a CA certificate on first run at `<caDir>/ca.crt`. You need to trust it so TLS works through the proxy.
+
+**Option A — macOS Keychain (recommended for macOS, works for all tools):**
+
+```bash
+sudo security add-trusted-cert -d -r trustRoot \
+  -k /Library/Keychains/System.keychain \
+  ./data/ca/ca.crt
+```
+
+This makes curl, Python, Ruby, brew CLIs, and everything else trust ClawGuard's CA automatically.
+
+**Option B — Node.js only:**
+
+```bash
+export NODE_EXTRA_CA_CERTS="/path/to/clawguard/data/ca/ca.crt"
+```
+
+**Option C — Generic env var (Python, Ruby, curl):**
+
+```bash
+export SSL_CERT_FILE="/path/to/clawguard/data/ca/ca.crt"
+```
+
+> **Note:** Option C overrides the system CA bundle, which may break connections to hosts not proxied by ClawGuard. Option A is preferred.
+
+#### 3. Set environment variables
+
+Add to your `~/.zshrc` (or `~/.bashrc`):
+
+```bash
+# ClawGuard HTTPS Proxy
+export HTTPS_PROXY="http://YOUR_AGENT_KEY:x@clawguard-host:9090"
+export NODE_EXTRA_CA_CERTS="/path/to/clawguard/data/ca/ca.crt"
+export NO_PROXY="localhost,127.0.0.1,::1"
+```
+
+The proxy authenticates via `Proxy-Authorization: Basic base64(agentKey:x)` — most tools build this from the URL automatically.
+
+#### 4. Node.js `fetch()` special case
+
+Node.js built-in `fetch()` does **not** respect `HTTPS_PROXY` by default. You need the `undici` bootstrap:
+
+```bash
+npm install undici
+```
+
+Create `clawguard-proxy-bootstrap.js`:
+
+```js
+const { setGlobalDispatcher, EnvHttpProxyAgent } = require('undici');
+setGlobalDispatcher(new EnvHttpProxyAgent());
+```
+
+Add to your shell profile:
+
+```bash
+export NODE_OPTIONS="--require /path/to/clawguard-proxy-bootstrap.js"
+```
+
+Now Node.js `fetch()`, Axios, and other HTTP clients route through ClawGuard.
+
+#### 5. Unconfigured hosts
+
+Hosts that are **not** configured as services in `clawguard.yaml` are handled based on the `proxy.discovery` setting:
+
+| `discovery` | Behavior for unconfigured hosts |
+|---|---|
+| `false` (default) | TCP passthrough — traffic flows directly, no MITM, no logging |
+| `true` | MITM inspection — ClawGuard inspects headers to detect auth patterns, then forwards as-is (see Discovery Mode below) |
+
+Configured services always get full MITM with approval policies and token injection.
+
+---
+
+### Discovery Mode
+
+When `proxy.discovery: true`, ClawGuard performs MITM on unconfigured hosts to detect authentication patterns. It does **not** block or modify traffic — it just inspects and logs what it sees.
+
+Detected information:
+- Hostname and request count
+- HTTP methods used (GET, POST, etc.)
+- Request paths
+- Auth pattern: Bearer tokens, API keys, Basic auth, custom headers
+- Auth values are automatically masked (e.g., `Bearer sk-pr****j8Kx`)
+
+Visit the **Discovered** tab in the admin dashboard to see all detected hosts. Click **YAML** on any host to get a ready-to-use config snippet with the detected auth pattern:
+
+```yaml
+# Example suggested config for a discovered host
+discord-com:
+  upstream: https://discord.com
+  auth:
+    type: header
+    headerName: "authorization"
+    token: "Bot YOUR_REAL_TOKEN"  # detected: Bot MTQ3****4-QE
+  policy:
+    default: require_approval
+    rules:
+      - match: { method: GET }
+        action: auto_approve
+```
+
+Copy the snippet into your `clawguard.yaml`, replace the placeholder with your real token, add the hostname to `security.allowedUpstreams`, and restart.
+
+---
+
 ## Try It: Safe First Test with httpbin
 
 Before connecting real services, test the full approval flow with [httpbin.org](https://httpbin.org) — a free echo API that mirrors back your request. No signup, no API key, works instantly. The best part: httpbin's `/headers` endpoint shows you exactly what headers ClawGuard injected.
@@ -240,7 +368,7 @@ security:
     # ... your other domains
 ```
 
-> ClawGuard supports three auth injection modes: `bearer` (Authorization header), `header` (custom header name), and `query` (URL query parameter).
+> ClawGuard supports four auth injection modes: `bearer` (Authorization header), `header` (custom header name), `query` (URL query parameter, e.g. `?access_token=...`), and `oauth2_client_credentials` (client_id/client_secret body rewriting).
 
 Restart ClawGuard: `docker compose up -d --build`
 
@@ -396,13 +524,31 @@ services:
   # Another example — OpenAI with host-based routing
   openai:
     upstream: https://api.openai.com
-    hostnames:                           # optional: for forwarder/hosts mode
+    hostnames:                           # optional: for forwarder/hosts or proxy mode
       - api.openai.com
     auth:
       type: bearer
       token: "sk-your-real-openai-key"
     policy:
       default: require_approval
+
+  # OAuth2 client_credentials — ClawGuard rewrites client_id/client_secret in POST body
+  # Your script sends dummy credentials; ClawGuard replaces them before forwarding
+  myapi:
+    upstream: https://api.example.com
+    auth:
+      type: oauth2_client_credentials
+      token: "unused"
+      tokenPath: /token                  # path where the script POSTs for tokens
+      clientId: "real-client-id"
+      clientSecret: "real-client-secret"
+    policy:
+      default: require_approval
+      rules:
+        - match: { method: GET }
+          action: auto_approve
+        - match: { method: POST, path: /token }
+          action: auto_approve           # let token exchange pass through
 
 notifications:
   telegram:
@@ -429,6 +575,11 @@ audit:
   type: sqlite
   path: ./data/clawguard.db              # ./data/ is mounted as Docker volume
   logPayload: true                       # log request/response bodies
+
+proxy:
+  enabled: false                         # enable HTTPS_PROXY mode (Mode C)
+  caDir: ./data/ca                       # CA cert/key stored here (auto-generated)
+  discovery: false                       # MITM unknown hosts to detect auth patterns
 ```
 
 ### Critical config values to change
@@ -513,7 +664,9 @@ audit:
 - [x] Docker image + docker-compose
 - [x] Forwarder for hardcoded-URL SDKs (Mode B)
 - [x] CIDR support for admin IP allowlist
-- [ ] Forward proxy mode (HTTPS_PROXY — transparent to SDKs)
+- [x] Forward proxy mode (HTTPS_PROXY — transparent to SDKs)
+- [x] OAuth2 client_credentials body rewriting
+- [x] Discovery mode for unconfigured hosts
 - [ ] OpenClaw skill for one-command setup
 - [ ] Encrypted token storage (1Password / Vault integration)
 - [ ] Webhook notifications (Slack, Discord, email)
