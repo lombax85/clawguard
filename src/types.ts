@@ -11,10 +11,14 @@ export interface PolicyRule {
 export interface ServiceConfig {
   upstream: string;
   auth: {
-    type: 'bearer' | 'header' | 'query';
+    type: 'bearer' | 'header' | 'query' | 'oauth2_client_credentials';
     token: string;
     headerName?: string;   // for type: 'header'
     paramName?: string;    // for type: 'query' (e.g. 'appid' for OpenWeatherMap)
+    // for type: 'oauth2_client_credentials'
+    tokenPath?: string;    // e.g. '/token' — the path where client sends credentials
+    clientId?: string;
+    clientSecret?: string;
   };
   policy: {
     default: 'auto_approve' | 'require_approval';
@@ -59,6 +63,14 @@ export interface AuditConfig {
   logPayload: boolean;
 }
 
+// ─── Proxy (HTTPS_PROXY MITM mode) ─────────────────────────
+
+export interface ProxyConfig {
+  enabled: boolean;
+  caDir: string; // directory for CA cert/key
+  discovery: boolean; // MITM unknown hosts to inspect headers and suggest config
+}
+
 // ─── Config (root) ──────────────────────────────────────────
 
 export interface Config {
@@ -73,6 +85,7 @@ export interface Config {
   audit: AuditConfig;
   security: SecurityConfig;
   admin: AdminConfig;
+  proxy: ProxyConfig;
 }
 
 // ─── Runtime types ──────────────────────────────────────────
