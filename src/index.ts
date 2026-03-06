@@ -79,7 +79,7 @@ if (config.proxy.enabled) {
   console.log(`🔀 HTTPS_PROXY mode: ENABLED`);
   const caDir = path.resolve(config.proxy.caDir);
   const certManager = new CertManager(caDir);
-  attachMitmProxy(server, config, approvalManager, audit, certManager);
+  attachMitmProxy(server, config, approvalManager, audit, certManager, telegram);
   console.log(`   CA cert: ${certManager.getCaCertPath()}`);
   console.log(`   Usage:   export HTTPS_PROXY=http://AGENT_KEY:x@CLAWGUARD_HOST:${port}`);
   console.log(`   Trust:   NODE_EXTRA_CA_CERTS=${certManager.getCaCertPath()}`);

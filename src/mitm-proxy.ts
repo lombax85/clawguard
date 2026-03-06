@@ -9,6 +9,7 @@ import { AuditLogger } from './audit';
 import { CertManager } from './cert-manager';
 import { validateRuntimeUrl, validateUpstreamUrl, resolveAndCheckPrivateIP } from './security';
 import { rewriteRequestAuth } from './auth-rewrite';
+import { TelegramNotifier } from './telegram';
 
 // ─── Discovery host tracking ─────────────────────────────────
 
@@ -74,7 +75,7 @@ function maskDiscoveredToken(value: string): string {
   return `${value.substring(0, 4)}****${value.substring(value.length - 4)}`;
 }
 
-function trackDiscoveredHost(hostname: string, method?: string, path?: string, headers?: Record<string, string | string[] | undefined>, url?: string): void {
+function trackDiscoveredHost(hostname: string, method?: string, path?: string, headers?: Record<string, string | string[] | undefined>, url?: string): boolean {
   const now = new Date().toISOString();
   const entry = discoveredHosts.get(hostname);
 
@@ -96,7 +97,7 @@ function trackDiscoveredHost(hostname: string, method?: string, path?: string, h
     // refresh insertion order for LRU-like eviction
     discoveredHosts.delete(hostname);
     discoveredHosts.set(hostname, entry);
-    return;
+    return false; // not new
   }
 
   // Evict oldest discovered host when over cap
@@ -117,6 +118,7 @@ function trackDiscoveredHost(hostname: string, method?: string, path?: string, h
     paths: path ? [path] : [],
   });
   console.log(`🔍 New unconfigured host discovered: ${hostname}${auth.authType ? ` (auth: ${auth.authType})` : ''}`);
+  return true; // new host
 }
 
 export function getPassthroughHosts(): {
@@ -138,8 +140,8 @@ export function __resetDiscoveredHostsForTests(): void {
   discoveredHosts.clear();
 }
 
-export function __trackDiscoveredHostForTests(hostname: string, method?: string, path?: string): void {
-  trackDiscoveredHost(hostname, method, path);
+export function __trackDiscoveredHostForTests(hostname: string, method?: string, path?: string): boolean {
+  return trackDiscoveredHost(hostname, method, path);
 }
 
 /**
@@ -205,7 +207,8 @@ export function attachMitmProxy(
   config: Config,
   approvalManager: ApprovalManager,
   audit: AuditLogger,
-  certManager: CertManager
+  certManager: CertManager,
+  telegram: TelegramNotifier
 ): void {
   server.on('connect', (req: http.IncomingMessage, clientSocket: net.Socket, head: Buffer) => {
     const target = req.url || '';
@@ -227,11 +230,15 @@ export function attachMitmProxy(
     const match = resolveServiceByHostname(hostname, config.services);
     if (!match) {
       // Always track unknown hosts for discovery suggestions
-      trackDiscoveredHost(hostname);
+      const isNewHost = trackDiscoveredHost(hostname);
 
       if (!config.proxy.discovery || config.proxy.discoveryPolicy === 'block') {
         // Ignore socket errors (client may close before we finish responding)
         clientSocket.on('error', () => { /* ignore */ });
+        // Notify via Telegram if this is a newly discovered host
+        if (isNewHost) {
+          telegram.notifyDiscoveryBlocked(hostname, clientIp).catch(() => { /* ignore */ });
+        }
         // Default-safe behavior: block unknown services unless explicitly allowed.
         clientSocket.write('HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\n\r\n{"error":"Unknown service blocked by policy. Add service config or set proxy.discoveryPolicy=silent_allow."}');
         clientSocket.end();

@@ -241,6 +241,24 @@ export class TelegramNotifier {
     }
   }
 
+  // ─── Info notifications ─────────────────────────────────────
+
+  async notifyDiscoveryBlocked(hostname: string, clientIp: string): Promise<void> {
+    if (this.config.pairing.enabled && !this.paired) return;
+
+    const text = [
+      `🔍 *Discovery: new host blocked*`,
+      ``,
+      `Host: \`${hostname}\``,
+      `Agent IP: \`${clientIp}\``,
+      `Time: ${new Date().toLocaleString('it-IT', { timeZone: 'Europe/Rome' })}`,
+      ``,
+      `_Add to services config or set discoveryPolicy=silent\\_allow_`,
+    ].join('\n');
+
+    await this.safeSendMessage(this.config.chatId, text, { parse_mode: 'Markdown' });
+  }
+
   // ─── Lifecycle ─────────────────────────────────────────────
 
   stop(): void {
