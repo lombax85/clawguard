@@ -253,7 +253,7 @@ export class TelegramNotifier {
       `Agent IP: \`${clientIp}\``,
       `Time: ${new Date().toLocaleString('it-IT', { timeZone: 'Europe/Rome' })}`,
       ``,
-      `_Add to services config or set discoveryPolicy=silent\\_allow_`,
+      `Add to services config or set \`discoveryPolicy: silent_allow\``,
     ].join('\n');
 
     await this.safeSendMessage(this.config.chatId, text, { parse_mode: 'Markdown' });
