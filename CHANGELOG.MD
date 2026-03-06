@@ -7,7 +7,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 ## [Unreleased]
 
 ### Added
+- Discovery policy control for unknown hosts in HTTPS proxy mode: `proxy.discoveryPolicy` with values `block` (default) and `silent_allow` (explicit opt-in).
+- Runtime SSRF validation in discovery MITM forwarding path (same `validateRuntimeUrl` guard used by configured services).
+- README section explaining functional differences between Mode C (`HTTPS_PROXY`) and `/etc/hosts` + forwarder setup.
+- Hardening guidance for proxy mode (agent key strength, network/IP restrictions, private IP blocking, conservative discovery defaults).
 - Roadmap note for planned policy scope selector: `method` only, or `service + method + path prefix`, or `service + method + exact path`.
+
+### Changed
+- Unknown/unconfigured hosts are now default-deny in discovery flows unless `proxy.discoveryPolicy: silent_allow` is explicitly set.
 
 ## [0.2.1] - 2026-03-05
 

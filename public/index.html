@@ -140,6 +140,7 @@
       <a href="#" data-section="approvals" onclick="showSection('approvals')">&#9989; <span>Approvals</span></a>
       <a href="#" data-section="audit" onclick="showSection('audit')">&#128203; <span>Audit Log</span></a>
       <a href="#" data-section="telegram" onclick="showSection('telegram')">&#128242; <span>Telegram</span></a>
+      <a href="#" data-section="discovered" onclick="showSection('discovered')">&#128269; <span>Discovered</span></a>
     </nav>
   </div>
 
@@ -225,6 +226,25 @@
       </div>
     </div>
 
+    <!-- ─── Discovered Hosts ────────────────── -->
+    <div class="section" id="sec-discovered">
+      <h2 class="page-title">Discovered Hosts</h2>
+      <div class="panel">
+        <h3>Unconfigured hosts passing through the proxy</h3>
+        <p style="color: var(--text2); font-size: 12px; margin-bottom: 12px;">These domains were accessed via the HTTPS proxy but are not configured as services. They pass through as plain TCP tunnels (no auth injection, no approval). Click the config icon to see a suggested configuration.</p>
+        <table>
+          <thead><tr><th>Hostname</th><th>Auth detected</th><th>Methods</th><th>Requests</th><th>Last seen</th><th>Config</th></tr></thead>
+          <tbody id="discovered-table"></tbody>
+        </table>
+        <div id="no-discovered" style="text-align:center;color:var(--text2);padding:20px;display:none;">No unconfigured hosts discovered yet. Traffic will appear here when scripts make HTTPS requests to new domains.</div>
+      </div>
+      <div class="panel" id="suggested-config-panel" style="display:none;">
+        <h3>Suggested configuration for <code id="suggested-config-host"></code></h3>
+        <p style="color: var(--text2); font-size: 12px; margin-bottom: 12px;">Add this to your <code>clawguard.yaml</code> under <code>services:</code> and add the domain to <code>security.allowedUpstreams</code>. Replace the placeholder values with your real credentials.</p>
+        <pre id="suggested-config-yaml" style="background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; font-size: 13px; overflow-x: auto; white-space: pre-wrap;"></pre>
+      </div>
+    </div>
+
     <!-- ─── Telegram ────────────────────────── -->
     <div class="section" id="sec-telegram">
       <h2 class="page-title">Telegram Pairing</h2>
@@ -259,16 +279,33 @@
     <div class="form-row">
       <div class="form-group">
         <label>Auth type</label>
-        <select id="svc-auth-type"><option value="bearer">Bearer token</option><option value="header">Custom header</option><option value="query">Query parameter</option></select>
+        <select id="svc-auth-type" onchange="onAuthTypeChange()"><option value="bearer">Bearer token</option><option value="header">Custom header</option><option value="query">Query parameter</option><option value="oauth2_client_credentials">OAuth2 Client Credentials</option></select>
       </div>
-      <div class="form-group">
+      <div class="form-group" id="svc-token-group">
         <label>Token</label>
         <input type="password" id="svc-token" placeholder="API key or token">
       </div>
     </div>
-    <div class="form-group">
+    <div class="form-group" id="svc-header-name-group">
       <label>Header name (for custom header) / Parameter name (for query)</label>
       <input type="text" id="svc-header-name" placeholder="e.g. X-API-Key or appid">
+    </div>
+    <div id="svc-oauth2-fields" style="display:none;">
+      <div class="form-group">
+        <label>Token endpoint path</label>
+        <input type="text" id="svc-token-path" placeholder="/token" value="/token">
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Client ID (real)</label>
+          <input type="text" id="svc-client-id" placeholder="Real client_id">
+        </div>
+        <div class="form-group">
+          <label>Client Secret (real)</label>
+          <input type="password" id="svc-client-secret" placeholder="Real client_secret">
+        </div>
+      </div>
+      <p style="color: var(--text2); font-size: 11px; margin-bottom: 16px;">The agent script sends dummy credentials. ClawGuard replaces them with these real values before forwarding to the token endpoint.</p>
     </div>
     <div class="form-group">
       <label>Default policy</label>
@@ -342,6 +379,7 @@ function showSection(name) {
   if (name === 'approvals') loadApprovals();
   if (name === 'audit') loadAudit();
   if (name === 'telegram') loadTelegram();
+  if (name === 'discovered') loadDiscovered();
 }
 
 // ─── Dashboard ───────────────────────────────────
@@ -428,11 +466,17 @@ async function loadServices() {
   tbody.innerHTML = '';
   for (const [name, svc] of Object.entries(services)) {
     const tr = document.createElement('tr');
+    let tokenDisplay = `<code>${esc(svc.auth.token)}</code>`;
+    if (svc.auth.type === 'oauth2_client_credentials') {
+      tokenDisplay = `<span style="font-size:11px;color:var(--text2)">ID:</span> <code>${esc(svc.auth.clientId || '-')}</code><br>` +
+        `<span style="font-size:11px;color:var(--text2)">Secret:</span> <code>${esc(svc.auth.clientSecret || '-')}</code>` +
+        (svc.auth.tokenPath ? `<br><span style="font-size:11px;color:var(--text2)">Path:</span> <code>${esc(svc.auth.tokenPath)}</code>` : '');
+    }
     tr.innerHTML = `
       <td><strong>${esc(name)}</strong></td>
       <td><code>${esc(svc.upstream)}</code></td>
       <td><span class="badge blue">${esc(svc.auth.type)}</span></td>
-      <td><code>${esc(svc.auth.token)}</code></td>
+      <td>${tokenDisplay}</td>
       <td><span class="badge ${svc.policy.default === 'auto_approve' ? 'green' : 'orange'}">${esc(svc.policy.default)}</span></td>
       <td><button class="btn btn-danger btn-sm" onclick="deleteService('${esc(name)}')">Delete</button></td>
     `;
@@ -446,6 +490,8 @@ async function loadServices() {
 async function showAddService() {
   document.getElementById('add-service-modal').classList.add('show');
   document.getElementById('add-service-error').style.display = 'none';
+  document.getElementById('svc-auth-type').value = 'bearer';
+  onAuthTypeChange();
   try {
     const data = await api('GET', '/api/allowed-upstreams');
     const hint = document.getElementById('allowed-upstreams-hint');
@@ -460,6 +506,22 @@ async function showAddService() {
 }
 function hideAddService() { document.getElementById('add-service-modal').classList.remove('show'); }
 
+function onAuthTypeChange() {
+  const authType = document.getElementById('svc-auth-type').value;
+  const oauth2Fields = document.getElementById('svc-oauth2-fields');
+  const tokenGroup = document.getElementById('svc-token-group');
+  const headerGroup = document.getElementById('svc-header-name-group');
+  if (authType === 'oauth2_client_credentials') {
+    oauth2Fields.style.display = 'block';
+    tokenGroup.style.display = 'none';
+    headerGroup.style.display = 'none';
+  } else {
+    oauth2Fields.style.display = 'none';
+    tokenGroup.style.display = 'block';
+    headerGroup.style.display = (authType === 'header' || authType === 'query') ? 'block' : 'none';
+  }
+}
+
 async function addService() {
   const name = document.getElementById('svc-name').value.trim();
   const upstream = document.getElementById('svc-upstream').value.trim();
@@ -468,11 +530,18 @@ async function addService() {
   const headerName = document.getElementById('svc-header-name').value.trim();
   const policy = document.getElementById('svc-policy').value;
 
-  if (!name || !upstream || !token) { alert('Fill all required fields'); return; }
-
-  const auth = { type: authType, token };
-  if (authType === 'header' && headerName) auth.headerName = headerName;
-  if (authType === 'query' && headerName) auth.paramName = headerName;
+  if (authType === 'oauth2_client_credentials') {
+    const clientId = document.getElementById('svc-client-id').value.trim();
+    const clientSecret = document.getElementById('svc-client-secret').value.trim();
+    const tokenPath = document.getElementById('svc-token-path').value.trim() || '/token';
+    if (!name || !upstream || !clientId || !clientSecret) { alert('Fill all required fields'); return; }
+    var auth = { type: authType, token: 'unused', tokenPath, clientId, clientSecret };
+  } else {
+    if (!name || !upstream || !token) { alert('Fill all required fields'); return; }
+    var auth = { type: authType, token };
+    if (authType === 'header' && headerName) auth.headerName = headerName;
+    if (authType === 'query' && headerName) auth.paramName = headerName;
+  }
 
   const errorDiv = document.getElementById('add-service-error');
   errorDiv.style.display = 'none';
@@ -627,6 +696,105 @@ function togglePayload(el) {
     content.style.display = 'block';
     el.textContent = 'Hide';
   }
+}
+
+// ─── Discovered Hosts ─────────────────────────────
+
+async function loadDiscovered() {
+  const hosts = await api('GET', '/api/discovered-hosts');
+  const tbody = document.getElementById('discovered-table');
+  const noMsg = document.getElementById('no-discovered');
+  tbody.innerHTML = '';
+
+  if (!hosts || hosts.length === 0) {
+    noMsg.style.display = 'block';
+    document.getElementById('suggested-config-panel').style.display = 'none';
+    return;
+  }
+  noMsg.style.display = 'none';
+
+  for (const h of hosts) {
+    const tr = document.createElement('tr');
+    const authBadge = h.authType
+      ? `<span class="badge green">${esc(h.authType)}</span> <code style="font-size:11px">${esc(h.authHeader || '')}</code>`
+      : '<span class="badge" style="background:rgba(139,146,168,0.15);color:var(--text2)">unknown</span>';
+    const methods = (h.methods || []).map(m => `<span class="badge blue">${esc(m)}</span>`).join(' ');
+    tr.innerHTML = `
+      <td><code>${esc(h.hostname)}</code></td>
+      <td>${authBadge}</td>
+      <td>${methods || '-'}</td>
+      <td><span class="badge blue">${h.count}</span></td>
+      <td style="font-size:12px">${new Date(h.lastSeen).toLocaleString()}</td>
+      <td><button class="btn btn-primary btn-sm" onclick='showSuggestedConfig(${JSON.stringify(h)})'>YAML</button></td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
+
+function showSuggestedConfig(hostInfo) {
+  const hostname = hostInfo.hostname;
+  const svcName = hostname.replace(/\./g, '-').replace(/^https?-+/, '');
+
+  const detected = hostInfo.authHeader || null;
+  const detectedComment = detected ? `  # detected: ${detected}` : '';
+
+  let authBlock;
+  if (hostInfo.authType === 'bearer') {
+    authBlock = `      type: bearer
+      token: "YOUR_REAL_BEARER_TOKEN"${detectedComment}`;
+  } else if (hostInfo.authType === 'key') {
+    authBlock = `      type: header
+      headerName: authorization
+      token: "Key YOUR_REAL_API_KEY"${detectedComment}`;
+  } else if (hostInfo.authType === 'basic') {
+    authBlock = `      type: header
+      headerName: authorization
+      token: "Basic YOUR_BASE64_CREDENTIALS"${detectedComment}`;
+  } else if (hostInfo.authType === 'header' && hostInfo.authHeaderName) {
+    authBlock = `      type: header
+      headerName: "${hostInfo.authHeaderName}"
+      token: "YOUR_REAL_API_KEY"${detectedComment}`;
+  } else if (hostInfo.authType === 'query' && hostInfo.authHeaderName) {
+    authBlock = `      type: query
+      paramName: "${hostInfo.authHeaderName}"
+      token: "YOUR_REAL_TOKEN"${detectedComment}`;
+  } else if (hostInfo.authType === 'custom' && detected) {
+    // e.g. "Bot MTQ3****4-QE" — extract prefix for the token template
+    const parts = detected.split(' ');
+    const prefix = parts.length > 1 ? parts[0] + ' ' : '';
+    authBlock = `      type: header
+      headerName: "${hostInfo.authHeaderName || 'authorization'}"
+      token: "${prefix}YOUR_REAL_TOKEN"${detectedComment}`;
+  } else {
+    authBlock = `      type: bearer
+      token: "YOUR_REAL_API_KEY"${detectedComment}`;
+  }
+
+  const methods = hostInfo.methods || [];
+  let rulesBlock = '';
+  if (methods.includes('GET')) {
+    rulesBlock += `\n        - match: { method: GET }
+          action: auto_approve`;
+  }
+
+  const pathsComment = (hostInfo.paths || []).length > 0
+    ? '\n  # Observed paths: ' + hostInfo.paths.slice(0, 5).join(', ')
+    : '';
+
+  const yaml = `# Add to services: in clawguard.yaml${pathsComment}
+  ${svcName}:
+    upstream: https://${hostname}
+    auth:
+${authBlock}
+    policy:
+      default: require_approval${rulesBlock ? '\n      rules:' + rulesBlock : ''}
+
+# Add to security.allowedUpstreams:
+#   - ${hostname}`;
+
+  document.getElementById('suggested-config-host').textContent = hostname;
+  document.getElementById('suggested-config-yaml').textContent = yaml;
+  document.getElementById('suggested-config-panel').style.display = 'block';
 }
 
 // ─── Telegram ────────────────────────────────────

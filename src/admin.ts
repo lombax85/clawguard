@@ -5,6 +5,7 @@ import { Config, ServiceConfig } from './types';
 import { ApprovalManager } from './approval';
 import { AuditLogger } from './audit';
 import { validateUpstreamUrl } from './security';
+import { getPassthroughHosts } from './mitm-proxy';
 
 /**
  * Check if an IP matches an allowed entry.
@@ -56,6 +57,7 @@ export function createAdminRouter(
     const allowed = config.admin.allowedIPs;
 
     if (!allowed.some((entry) => ipMatchesEntry(clientIp, entry))) {
+      console.warn(`⛔ Admin access denied for IP: ${clientIp} (allowed: ${allowed.join(', ')})`);
       res.status(403).json({ error: 'Admin panel is not accessible from your IP' });
       return;
     }
@@ -113,13 +115,20 @@ export function createAdminRouter(
   router.get('/api/services', pinAuth, (_req: Request, res: Response) => {
     const services: Record<string, unknown> = {};
     for (const [name, svc] of Object.entries(config.services)) {
+      const authInfo: Record<string, unknown> = {
+        type: svc.auth.type,
+        token: maskToken(svc.auth.token),
+        headerName: svc.auth.headerName,
+        paramName: svc.auth.paramName,
+      };
+      if (svc.auth.type === 'oauth2_client_credentials') {
+        authInfo.tokenPath = svc.auth.tokenPath;
+        authInfo.clientId = svc.auth.clientId ? maskToken(svc.auth.clientId) : undefined;
+        authInfo.clientSecret = svc.auth.clientSecret ? maskToken(svc.auth.clientSecret) : undefined;
+      }
       services[name] = {
         upstream: svc.upstream,
-        auth: {
-          type: svc.auth.type,
-          token: maskToken(svc.auth.token),
-          headerName: svc.auth.headerName,
-        },
+        auth: authInfo,
         policy: svc.policy,
       };
     }
@@ -252,6 +261,12 @@ export function createAdminRouter(
       allowedUpstreams: config.security.allowedUpstreams,
       blockPrivateIPs: config.security.blockPrivateIPs,
     });
+  });
+
+  // ─── Discovered hosts (proxy passthrough) ────────────────
+
+  router.get('/api/discovered-hosts', pinAuth, (_req: Request, res: Response) => {
+    res.json(getPassthroughHosts());
   });
 
   // ─── Telegram pairing info ────────────────────────────────

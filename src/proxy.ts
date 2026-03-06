@@ -7,6 +7,7 @@ import { ApprovalManager } from './approval';
 import { AuditLogger } from './audit';
 import { createAdminRouter } from './admin';
 import { validateRuntimeUrl } from './security';
+import { rewriteRequestAuth } from './auth-rewrite';
 
 export function createProxy(
   config: Config,
@@ -157,20 +158,28 @@ function handleHostProxy(
         else if (Array.isArray(value)) forwardHeaders[key] = value.join(', ');
       }
 
-      if (serviceConfig.auth.type === 'bearer') {
-        forwardHeaders['authorization'] = `Bearer ${serviceConfig.auth.token}`;
-      } else if (serviceConfig.auth.type === 'header' && serviceConfig.auth.headerName) {
-        forwardHeaders[serviceConfig.auth.headerName] = serviceConfig.auth.token;
-      } else if (serviceConfig.auth.type === 'query' && serviceConfig.auth.paramName) {
-        upstreamUrl.searchParams.set(serviceConfig.auth.paramName, serviceConfig.auth.token);
+      // Rewrite body for oauth2_client_credentials
+      let requestBody = (req.body && Buffer.isBuffer(req.body)) ? req.body : Buffer.alloc(0);
+      const rewritten = rewriteRequestAuth(serviceConfig, req.method, upstreamPath, requestBody, forwardHeaders);
+      requestBody = rewritten.body;
+      Object.assign(forwardHeaders, rewritten.headers);
+
+      if (!rewritten.skipAuthInjection) {
+        if (serviceConfig.auth.type === 'bearer') {
+          forwardHeaders['authorization'] = `Bearer ${serviceConfig.auth.token}`;
+        } else if (serviceConfig.auth.type === 'header' && serviceConfig.auth.headerName) {
+          forwardHeaders[serviceConfig.auth.headerName] = serviceConfig.auth.token;
+        } else if (serviceConfig.auth.type === 'query' && serviceConfig.auth.paramName) {
+          upstreamUrl.searchParams.set(serviceConfig.auth.paramName, serviceConfig.auth.token);
+        }
       }
 
       forwardHeaders['host'] = upstreamUrl.host;
 
       let requestBodyLog: string | null = null;
-      if (config.audit.logPayload && req.body && Buffer.isBuffer(req.body) && req.body.length > 0) {
+      if (config.audit.logPayload && requestBody.length > 0) {
         const maxSize = config.security.maxPayloadLogSize || 10240;
-        const bodyStr = req.body.toString('utf-8');
+        const bodyStr = requestBody.toString('utf-8');
         requestBodyLog = bodyStr.length > maxSize
           ? bodyStr.substring(0, maxSize) + `... [truncated]` : bodyStr;
       }
@@ -215,8 +224,8 @@ function handleHostProxy(
         res.status(502).json({ error: `Upstream error: ${err.message}` });
       });
 
-      if (req.body && Buffer.isBuffer(req.body) && req.body.length > 0) {
-        proxyReq.write(req.body);
+      if (requestBody.length > 0) {
+        proxyReq.write(requestBody);
       }
       proxyReq.end();
     } catch (err) {
@@ -323,24 +332,32 @@ function handleProxy(
         }
       }
 
-      // Inject auth
-      if (serviceConfig.auth.type === 'bearer') {
-        forwardHeaders['authorization'] = `Bearer ${serviceConfig.auth.token}`;
-      } else if (serviceConfig.auth.type === 'header' && serviceConfig.auth.headerName) {
-        forwardHeaders[serviceConfig.auth.headerName] = serviceConfig.auth.token;
-      } else if (serviceConfig.auth.type === 'query' && serviceConfig.auth.paramName) {
-        upstreamUrl.searchParams.set(serviceConfig.auth.paramName, serviceConfig.auth.token);
+      // Rewrite body for oauth2_client_credentials (replaces dummy secrets with real ones)
+      let requestBody = (req.body && Buffer.isBuffer(req.body)) ? req.body : Buffer.alloc(0);
+      const rewritten = rewriteRequestAuth(serviceConfig, req.method, upstreamPath, requestBody, forwardHeaders);
+      requestBody = rewritten.body;
+      Object.assign(forwardHeaders, rewritten.headers);
+
+      // Inject auth (skipped for oauth2_client_credentials — script manages its own Bearer token)
+      if (!rewritten.skipAuthInjection) {
+        if (serviceConfig.auth.type === 'bearer') {
+          forwardHeaders['authorization'] = `Bearer ${serviceConfig.auth.token}`;
+        } else if (serviceConfig.auth.type === 'header' && serviceConfig.auth.headerName) {
+          forwardHeaders[serviceConfig.auth.headerName] = serviceConfig.auth.token;
+        } else if (serviceConfig.auth.type === 'query' && serviceConfig.auth.paramName) {
+          upstreamUrl.searchParams.set(serviceConfig.auth.paramName, serviceConfig.auth.token);
+        }
       }
 
       forwardHeaders['host'] = upstreamUrl.host;
 
       // Capture request body for audit
       let requestBodyLog: string | null = null;
-      if (config.audit.logPayload && req.body && Buffer.isBuffer(req.body) && req.body.length > 0) {
+      if (config.audit.logPayload && requestBody.length > 0) {
         const maxSize = config.security.maxPayloadLogSize || 10240;
-        const bodyStr = req.body.toString('utf-8');
+        const bodyStr = requestBody.toString('utf-8');
         requestBodyLog = bodyStr.length > maxSize
-          ? bodyStr.substring(0, maxSize) + `... [truncated, ${bodyStr.length} bytes total]`
+          ? bodyStr.substring(0, maxSize) + `... [truncated, ${requestBody.length} bytes total]`
           : bodyStr;
       }
 
@@ -434,8 +451,8 @@ function handleProxy(
       });
 
       // Forward body
-      if (req.body && Buffer.isBuffer(req.body) && req.body.length > 0) {
-        proxyReq.write(req.body);
+      if (requestBody.length > 0) {
+        proxyReq.write(requestBody);
       }
       proxyReq.end();
 
