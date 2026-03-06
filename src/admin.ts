@@ -58,7 +58,11 @@ export function createAdminRouter(
 
     if (!allowed.some((entry) => ipMatchesEntry(clientIp, entry))) {
       console.warn(`⛔ Admin access denied for IP: ${clientIp} (allowed: ${allowed.join(', ')})`);
-      res.status(403).json({ error: 'Admin panel is not accessible from your IP' });
+      res.status(403).json({
+        error: 'Admin panel is not accessible from your IP',
+        clientIp,
+        hint: 'Add this IP/CIDR to admin.allowedIPs if expected',
+      });
       return;
     }
     next();

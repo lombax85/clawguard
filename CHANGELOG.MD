@@ -15,6 +15,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - README section explaining functional differences between Mode C (`HTTPS_PROXY`) and `/etc/hosts` + forwarder setup.
 - Hardening guidance for proxy mode (agent key strength, network/IP restrictions, private IP blocking, conservative discovery defaults).
 - Roadmap note for planned policy scope selector: `method` only, or `service + method + path prefix`, or `service + method + exact path`.
+- TODO roadmap item: introduce a **service-scoped client access secret** (fake per-service key) as an alternative/complement to global `X-ClawGuard-Key`, so ClawGuard can validate legitimacy per service/account (including same-domain multi-account cases, e.g. two GitHub identities), with default-deny + explicit enablement and optional source-IP restrictions.
+- Admin deny response now includes `clientIp` + hint when access is blocked by `admin.allowedIPs`, to speed up network/debug setup.
 
 ### Changed
 - Unknown/unconfigured hosts are now default-deny in discovery flows unless `proxy.discoveryPolicy: silent_allow` is explicitly set.

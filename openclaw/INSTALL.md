@@ -41,7 +41,7 @@ The forwarder is a standalone Node.js script with zero dependencies. No npm inst
 
 ## How to make API calls
 
-There are two modes. Ask the human operator which one is configured.
+There are three modes. Ask the human operator which one is configured.
 
 ### Mode A: Custom base URL
 
@@ -86,6 +86,53 @@ ps aux | grep forwarder.js
 # Check if /etc/hosts has the redirects
 grep -E "api\.(github|todoist|openweathermap)" /etc/hosts
 ```
+
+### Mode C: HTTPS_PROXY (MITM transparent proxy)
+
+Use this when the client supports proxies but cannot easily add custom headers like `X-ClawGuard-Key`.
+
+Set environment variables:
+```bash
+export HTTPS_PROXY="http://THE-AGENT-KEY:x@CLAWGUARD-IP:9090"
+export NO_PROXY="localhost,127.0.0.1,::1"
+```
+
+Important:
+- Authentication happens via `Proxy-Authorization` generated from the proxy URL.
+- You still call normal HTTPS endpoints (e.g., `https://api.github.com/user`).
+- ClawGuard must run in proxy mode (`proxy.enabled: true`).
+
+#### Trusting ClawGuard CA on Linux (required for MITM)
+
+ClawGuard generates a CA cert at `<caDir>/ca.crt` (for example `./data/ca/ca.crt`).
+You must trust this CA on the client host:
+
+**Debian/Ubuntu:**
+```bash
+sudo cp ./data/ca/ca.crt /usr/local/share/ca-certificates/clawguard.crt
+sudo update-ca-certificates
+```
+
+**RHEL/CentOS/Fedora:**
+```bash
+sudo cp ./data/ca/ca.crt /etc/pki/ca-trust/source/anchors/clawguard.crt
+sudo update-ca-trust extract
+```
+
+If system trust is not possible, set per-runtime CA env vars:
+```bash
+export NODE_EXTRA_CA_CERTS="/path/to/ca.crt"
+export REQUESTS_CA_BUNDLE="/path/to/ca.crt"
+export CURL_CA_BUNDLE="/path/to/ca.crt"
+```
+
+#### Discovery policy defaults (security)
+
+For unknown/unconfigured hosts in MITM mode:
+- `proxy.discoveryPolicy: block` (recommended default)
+- `proxy.discoveryPolicy: silent_allow` only if explicitly needed
+
+Never leave unknown services silently allowed by default in production.
 
 ## What to expect
 
