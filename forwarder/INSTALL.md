@@ -69,22 +69,42 @@ sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keyc
 
 > **macOS GUI prompt:** This command will trigger a macOS authorization dialog (username/password popup) on the desktop. If you are an AI agent running this command, **tell the human operator to look at their screen and approve the popup**. The command will hang until the popup is approved or dismissed. If there is no response, the command will appear stuck — it is not frozen, it is waiting for GUI authorization.
 
-#### Step 3b: Set environment variables for your runtime
+#### Step 3b: Create a combined CA bundle and set environment variables
 
-Many tools (Homebrew curl, Python, Node.js) do NOT read the OS Keychain/trust store. You must tell them where to find the CA cert explicitly.
+Many tools (Homebrew curl, Python, Node.js, npm) do NOT read the OS Keychain/trust store. You must tell them where to find the CA cert explicitly.
+
+**Important:** Pointing these variables to the ClawGuard CA cert alone will break SSL for domains that are NOT routed through ClawGuard (e.g. `registry.npmjs.org`, `pypi.org`). You need a **combined bundle** that includes both the ClawGuard CA and the system root CAs.
+
+**Create the combined CA bundle:**
+
+```bash
+cd ~/clawguard-forwarder
+
+# macOS: merge ClawGuard CA + system root CAs
+cat certs/ca.crt > certs/ca-combined.pem
+echo "" >> certs/ca-combined.pem
+security find-certificate -a -p \
+  /System/Library/Keychains/SystemRootCertificates.keychain \
+  /Library/Keychains/System.keychain >> certs/ca-combined.pem
+
+# Linux: merge ClawGuard CA + system root CAs
+cat certs/ca.crt > certs/ca-combined.pem
+echo "" >> certs/ca-combined.pem
+cat /etc/ssl/certs/ca-certificates.crt >> certs/ca-combined.pem
+```
 
 Add these to your shell profile (`~/.bashrc`, `~/.zshrc`, or equivalent):
 
 ```bash
 # For Node.js (OpenClaw, npm packages, etc.)
-export NODE_EXTRA_CA_CERTS=~/clawguard-forwarder/certs/ca.crt
+export NODE_EXTRA_CA_CERTS=~/clawguard-forwarder/certs/ca-combined.pem
 
 # For Python (requests, httpx, etc.)
-export REQUESTS_CA_BUNDLE=~/clawguard-forwarder/certs/ca.crt
-export SSL_CERT_FILE=~/clawguard-forwarder/certs/ca.crt
+export REQUESTS_CA_BUNDLE=~/clawguard-forwarder/certs/ca-combined.pem
+export SSL_CERT_FILE=~/clawguard-forwarder/certs/ca-combined.pem
 
 # For curl (if installed via Homebrew on macOS)
-export CURL_CA_BUNDLE=~/clawguard-forwarder/certs/ca.crt
+export CURL_CA_BUNDLE=~/clawguard-forwarder/certs/ca-combined.pem
 ```
 
 Then reload your shell:
@@ -92,11 +112,14 @@ Then reload your shell:
 source ~/.zshrc   # or ~/.bashrc
 ```
 
-**Quick test** — after setting these, verify the cert is trusted:
+**Quick test** — after setting these, verify the cert is trusted for both intercepted and non-intercepted domains:
 ```bash
+# Non-intercepted domain (must work via system CAs)
+curl -s https://registry.npmjs.org/ 2>&1 | head -1
+# Intercepted domain (must work via ClawGuard CA)
 curl -s https://api.github.com 2>&1 | head -5
-# If you see JSON, the cert is trusted.
-# If you see "SSL certificate problem", the env vars are not set correctly.
+# If you see valid responses, the combined bundle is working.
+# If you see "SSL certificate problem", check that ca-combined.pem was generated correctly.
 ```
 
 ### Step 4: Configure the forwarder
@@ -206,7 +229,7 @@ ExecStart=/usr/bin/node /home/YOUR_USER/clawguard-forwarder/forwarder.js
 WorkingDirectory=/home/YOUR_USER/clawguard-forwarder
 Restart=always
 RestartSec=5
-Environment=NODE_EXTRA_CA_CERTS=/home/YOUR_USER/clawguard-forwarder/certs/ca.crt
+Environment=NODE_EXTRA_CA_CERTS=/home/YOUR_USER/clawguard-forwarder/certs/ca-combined.pem
 
 [Install]
 WantedBy=multi-user.target
@@ -257,7 +280,7 @@ sudo tee /Library/LaunchDaemons/com.clawguard.forwarder.plist > /dev/null <<'EOF
     <key>EnvironmentVariables</key>
     <dict>
         <key>NODE_EXTRA_CA_CERTS</key>
-        <string>/Users/YOUR_USER/clawguard-forwarder/certs/ca.crt</string>
+        <string>/Users/YOUR_USER/clawguard-forwarder/certs/ca-combined.pem</string>
     </dict>
 </dict>
 </plist>
@@ -327,13 +350,12 @@ Run with `sudo`: `sudo node forwarder.js`
 ### "SSL certificate problem" or "certificate verify failed"
 This is the most common issue. The CA cert is not trusted by the tool making the request.
 
-1. **Check Step 3b** — make sure you set the env vars (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, etc.)
-2. **Verify they're set:** `echo $NODE_EXTRA_CA_CERTS` should print the cert path
-3. **Verify the cert file exists:** `ls -la ~/clawguard-forwarder/certs/ca.crt`
-4. **For Node.js specifically:** `export NODE_EXTRA_CA_CERTS=~/clawguard-forwarder/certs/ca.crt`
-5. **For Python specifically:** `export REQUESTS_CA_BUNDLE=~/clawguard-forwarder/certs/ca.crt`
-6. **For Homebrew curl on macOS:** `export CURL_CA_BUNDLE=~/clawguard-forwarder/certs/ca.crt`
-7. **As a last resort** (testing only): `export NODE_TLS_REJECT_UNAUTHORIZED=0`
+1. **Check Step 3b** — make sure you created the combined CA bundle and set the env vars
+2. **Verify they're set:** `echo $NODE_EXTRA_CA_CERTS` should print the path to `ca-combined.pem`
+3. **Verify the cert file exists:** `ls -la ~/clawguard-forwarder/certs/ca-combined.pem`
+4. **Common mistake:** pointing env vars to `ca.crt` (ClawGuard CA only) instead of `ca-combined.pem` (combined bundle). This breaks SSL for non-intercepted domains like `registry.npmjs.org`.
+5. **Regenerate the bundle** if it seems stale: re-run the `cat` + `security find-certificate` commands from Step 3b.
+6. **As a last resort** (testing only): `export NODE_TLS_REJECT_UNAUTHORIZED=0`
 
 Note: the macOS system `curl` (`/usr/bin/curl`) uses the Keychain and should work with Step 3a alone. But Homebrew curl (`/opt/homebrew/bin/curl`) uses OpenSSL and needs the env var.
 
