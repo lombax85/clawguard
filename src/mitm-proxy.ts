@@ -220,7 +220,7 @@ export function attachMitmProxy(
     // Validate agent key from Proxy-Authorization
     const proxyAuthHeader = req.headers['proxy-authorization'];
     let agentKey = extractAgentKey(proxyAuthHeader);
-    console.log(`   🔍 MITM auth debug: header=${proxyAuthHeader ? proxyAuthHeader.substring(0, 20) + '...' : 'NONE'} extracted=${agentKey ? agentKey.substring(0, 8) + '...' : 'NULL'}`);
+    console.log(`   🔍 MITM auth debug: header=${proxyAuthHeader ? 'Basic ****' : 'NONE'} extracted=${agentKey ? agentKey.substring(0, 8) + '...' : 'NULL'}`);
     
     // If no auth or wrong auth, send 407 and wait for retry
     if (agentKey !== config.server.agentKey) {

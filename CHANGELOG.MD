@@ -7,6 +7,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 ## [Unreleased]
 
 ### Added
+- **Git HTTPS clone/pull/push support**: ClawGuard now handles the HTTP 407 authentication retry flow required by git clients, which send credentials only after receiving a `407 Proxy Authentication Required` challenge.
+- `auth.type: url` for services that require credentials embedded in the URL (`https://user:pass@host`) instead of an Authorization header — needed for Bitbucket git operations.
+- `auth.type: basic` for services that accept standard HTTP Basic Authentication (`Authorization: Basic <base64>`).
+- Debug logging for auth injection (`🔑 Auth injected` / `⚠️ Auth NOT injected`) to help troubleshoot credential issues.
+
+### Changed
+- MITM proxy now keeps the TCP connection open after sending 407, waits for client retry with `Proxy-Authorization`, and validates credentials from the retry request before establishing the TLS tunnel.
+
+### Added (continued)
 - Discovery policy control for unknown hosts in HTTPS proxy mode: `proxy.discoveryPolicy` with values `block` (default) and `silent_allow` (explicit opt-in).
 - Runtime SSRF validation in discovery MITM forwarding path (allowlist/protocol validation + DNS private-IP check).
 - Discovery `silent_allow` requests now generate audit entries (status + path/method/client IP) like other proxy paths.
