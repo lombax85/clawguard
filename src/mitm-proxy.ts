@@ -367,14 +367,22 @@ function handleMitmRequest(
     if (!rewritten.skipAuthInjection) {
       if (serviceConfig.auth.type === 'bearer') {
         forwardHeaders['authorization'] = `Bearer ${serviceConfig.auth.token}`;
+        console.log(`   🔑 Auth injected: type=bearer token=${serviceConfig.auth.token.substring(0, 4)}****`);
       } else if (serviceConfig.auth.type === 'basic' && serviceConfig.auth.username && serviceConfig.auth.password) {
         const basicAuth = Buffer.from(`${serviceConfig.auth.username}:${serviceConfig.auth.password}`).toString('base64');
         forwardHeaders['authorization'] = `Basic ${basicAuth}`;
+        console.log(`   🔑 Auth injected: type=basic user=${serviceConfig.auth.username} pass=${serviceConfig.auth.password.substring(0, 4)}****`);
       } else if (serviceConfig.auth.type === 'header' && serviceConfig.auth.headerName) {
         forwardHeaders[serviceConfig.auth.headerName] = serviceConfig.auth.token;
+        console.log(`   🔑 Auth injected: type=header name=${serviceConfig.auth.headerName} token=${serviceConfig.auth.token.substring(0, 8)}****`);
       } else if (serviceConfig.auth.type === 'query' && serviceConfig.auth.paramName) {
         upstreamUrl.searchParams.set(serviceConfig.auth.paramName, serviceConfig.auth.token);
+        console.log(`   🔑 Auth injected: type=query param=${serviceConfig.auth.paramName}`);
+      } else {
+        console.log(`   ⚠️  Auth NOT injected: type=${serviceConfig.auth.type} username=${serviceConfig.auth.username || 'N/A'} password=${serviceConfig.auth.password ? 'SET' : 'MISSING'}`);
       }
+    } else {
+      console.log(`   ⏭️  Auth skipped (skipAuthInjection=true)`);
     }
 
     forwardHeaders['host'] = upstreamUrl.host;
