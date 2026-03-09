@@ -218,9 +218,11 @@ export function attachMitmProxy(
     const clientIp = clientSocket.remoteAddress || 'unknown';
 
     // Validate agent key from Proxy-Authorization
-    const agentKey = extractAgentKey(req.headers['proxy-authorization']);
+    const proxyAuthHeader = req.headers['proxy-authorization'];
+    const agentKey = extractAgentKey(proxyAuthHeader);
+    console.log(`   🔍 MITM auth debug: header=${proxyAuthHeader ? proxyAuthHeader.substring(0, 20) + '...' : 'NONE'} extracted=${agentKey ? agentKey.substring(0, 8) + '...' : 'NULL'}`);
     if (agentKey !== config.server.agentKey) {
-      console.error(`🚫 MITM proxy: invalid agent key from ${clientIp} for ${hostname}`);
+      console.error(`🚫 MITM proxy: invalid agent key from ${clientIp} for ${hostname} (got: ${agentKey ? agentKey.substring(0, 8) + '...' : 'NULL'}, expected: ${config.server.agentKey.substring(0, 8)}...)`);
       clientSocket.write('HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="ClawGuard"\r\n\r\n');
       clientSocket.end();
       return;
