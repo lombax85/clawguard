@@ -11,7 +11,7 @@ export interface PolicyRule {
 export interface ServiceConfig {
   upstream: string;
   auth: {
-    type: 'bearer' | 'header' | 'query' | 'basic' | 'oauth2_client_credentials';
+    type: 'bearer' | 'header' | 'query' | 'basic' | 'url' | 'oauth2_client_credentials';
     token: string;
     headerName?: string;   // for type: 'header'
     paramName?: string;    // for type: 'query' (e.g. 'appid' for OpenWeatherMap)
