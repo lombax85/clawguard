@@ -345,6 +345,10 @@ function handleProxy(
         } else if (serviceConfig.auth.type === 'basic' && serviceConfig.auth.username && serviceConfig.auth.password) {
           const basicAuth = Buffer.from(`${serviceConfig.auth.username}:${serviceConfig.auth.password}`).toString('base64');
           forwardHeaders['authorization'] = `Basic ${basicAuth}`;
+        } else if (serviceConfig.auth.type === 'url' && serviceConfig.auth.username && serviceConfig.auth.password) {
+          // Inject credentials into URL (for services like Bitbucket that require user:pass@host)
+          upstreamUrl.username = serviceConfig.auth.username;
+          upstreamUrl.password = serviceConfig.auth.password;
         } else if (serviceConfig.auth.type === 'header' && serviceConfig.auth.headerName) {
           forwardHeaders[serviceConfig.auth.headerName] = serviceConfig.auth.token;
         } else if (serviceConfig.auth.type === 'query' && serviceConfig.auth.paramName) {

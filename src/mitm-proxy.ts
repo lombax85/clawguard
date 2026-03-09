@@ -372,6 +372,11 @@ function handleMitmRequest(
         const basicAuth = Buffer.from(`${serviceConfig.auth.username}:${serviceConfig.auth.password}`).toString('base64');
         forwardHeaders['authorization'] = `Basic ${basicAuth}`;
         console.log(`   🔑 Auth injected: type=basic user=${serviceConfig.auth.username} pass=${serviceConfig.auth.password.substring(0, 4)}****`);
+      } else if (serviceConfig.auth.type === 'url' && serviceConfig.auth.username && serviceConfig.auth.password) {
+        // Inject credentials into URL (for services like Bitbucket that require user:pass@host)
+        upstreamUrl.username = serviceConfig.auth.username;
+        upstreamUrl.password = serviceConfig.auth.password;
+        console.log(`   🔑 Auth injected: type=url user=${serviceConfig.auth.username} pass=${serviceConfig.auth.password.substring(0, 4)}****`);
       } else if (serviceConfig.auth.type === 'header' && serviceConfig.auth.headerName) {
         forwardHeaders[serviceConfig.auth.headerName] = serviceConfig.auth.token;
         console.log(`   🔑 Auth injected: type=header name=${serviceConfig.auth.headerName} token=${serviceConfig.auth.token.substring(0, 8)}****`);
