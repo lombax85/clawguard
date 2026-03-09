@@ -219,6 +219,43 @@ curl -s -X POST 'https://api.github.com/repos/OWNER/REPO/pulls' \
 
 Every one of these API calls goes through ClawGuard → the human sees and approves each one via Telegram. No code reaches GitHub without human approval.
 
+### Native Git clone/pull/push via HTTPS proxy (Mode C)
+
+For repositories where API-based push is impractical (many files, large repos), you can use native `git` commands through ClawGuard's HTTPS proxy mode:
+
+```bash
+# Set up proxy (use agent key as username, 'x' as password)
+export HTTPS_PROXY="http://THE-AGENT-KEY:x@CLAWGUARD-IP:9090"
+export GIT_SSL_NO_VERIFY=1  # or trust the CA cert
+
+# Clone, pull, push work normally
+git clone https://github.com/owner/repo.git
+git clone https://bitbucket.org/workspace/repo.git
+cd repo
+git pull
+git push
+```
+
+**Important for Bitbucket:** Git operations on `bitbucket.org` require `auth.type: url` in the ClawGuard service config (not `basic` or `bearer`). This injects credentials into the upstream URL (`https://user:pass@bitbucket.org`), which is what Bitbucket expects.
+
+Example ClawGuard config for Bitbucket git:
+```yaml
+services:
+  bitbucket-web:
+    upstream: https://bitbucket.org
+    auth:
+      type: url           # NOT basic or bearer!
+      username: your-username
+      password: app-password
+      token: "dummy"      # required field, ignored for type: url
+    policy:
+      default: auto_approve
+    hostnames:
+      - bitbucket.org
+```
+
+**Note:** Git clients send `CONNECT` without credentials first, then retry with `Proxy-Authorization` after receiving 407. ClawGuard handles this flow automatically since version 0.2.2.
+
 ### Why not SSH?
 
 SSH keys authenticate directly with GitHub, completely bypassing ClawGuard. If a prompt injection tricks the agent into running `git push` via SSH, the code goes to GitHub with **zero human oversight**. Using the API ensures ClawGuard intercepts every interaction.
