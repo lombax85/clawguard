@@ -210,7 +210,7 @@ export function attachMitmProxy(
   certManager: CertManager,
   telegram: TelegramNotifier
 ): void {
-  server.on('connect', (req: http.IncomingMessage, clientSocket: net.Socket, head: Buffer) => {
+  server.on('connect', async (req: http.IncomingMessage, clientSocket: net.Socket, head: Buffer) => {
     const target = req.url || '';
     const [hostname, portStr] = target.split(':');
     const port = parseInt(portStr) || 443;
@@ -219,13 +219,46 @@ export function attachMitmProxy(
 
     // Validate agent key from Proxy-Authorization
     const proxyAuthHeader = req.headers['proxy-authorization'];
-    const agentKey = extractAgentKey(proxyAuthHeader);
+    let agentKey = extractAgentKey(proxyAuthHeader);
     console.log(`   🔍 MITM auth debug: header=${proxyAuthHeader ? proxyAuthHeader.substring(0, 20) + '...' : 'NONE'} extracted=${agentKey ? agentKey.substring(0, 8) + '...' : 'NULL'}`);
+    
+    // If no auth or wrong auth, send 407 and wait for retry
     if (agentKey !== config.server.agentKey) {
-      console.error(`🚫 MITM proxy: invalid agent key from ${clientIp} for ${hostname} (got: ${agentKey ? agentKey.substring(0, 8) + '...' : 'NULL'}, expected: ${config.server.agentKey.substring(0, 8)}...)`);
-      clientSocket.write('HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="ClawGuard"\r\n\r\n');
-      clientSocket.end();
-      return;
+      console.log(`   ⏳ MITM: sending 407, waiting for client retry with auth...`);
+      clientSocket.write('HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="ClawGuard"\r\nProxy-Connection: keep-alive\r\n\r\n');
+      
+      // Wait for retry with a promise
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          clientSocket.removeAllListeners('data');
+          clientSocket.end();
+          reject(new Error('Auth retry timeout'));
+        }, 10000);
+        
+        clientSocket.once('data', (data: Buffer) => {
+          clearTimeout(timeout);
+          const retryRequest = data.toString('utf-8');
+          console.log(`   🔍 MITM retry received (${data.length} bytes)`);
+          
+          // Parse Proxy-Authorization from retry
+          const authMatch = retryRequest.match(/Proxy-Authorization:\s*(.+?)(?:\r\n|\r|\n)/i);
+          if (authMatch) {
+            const retryAgentKey = extractAgentKey(authMatch[1].trim());
+            console.log(`   🔍 MITM retry auth: extracted=${retryAgentKey ? retryAgentKey.substring(0, 8) + '...' : 'NULL'}`);
+            if (retryAgentKey === config.server.agentKey) {
+              agentKey = retryAgentKey;
+              resolve();
+              return;
+            }
+          }
+          
+          console.error(`🚫 MITM retry auth failed for ${hostname}`);
+          clientSocket.write('HTTP/1.1 407 Proxy Authentication Required\r\n\r\n');
+          clientSocket.end();
+          reject(new Error('Invalid retry auth'));
+        });
+      });
+      console.log(`   ✅ MITM retry auth successful, continuing...`);
     }
 
     // Resolve hostname to a configured service
