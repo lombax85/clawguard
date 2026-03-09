@@ -342,6 +342,9 @@ function handleProxy(
       if (!rewritten.skipAuthInjection) {
         if (serviceConfig.auth.type === 'bearer') {
           forwardHeaders['authorization'] = `Bearer ${serviceConfig.auth.token}`;
+        } else if (serviceConfig.auth.type === 'basic' && serviceConfig.auth.username && serviceConfig.auth.password) {
+          const basicAuth = Buffer.from(`${serviceConfig.auth.username}:${serviceConfig.auth.password}`).toString('base64');
+          forwardHeaders['authorization'] = `Basic ${basicAuth}`;
         } else if (serviceConfig.auth.type === 'header' && serviceConfig.auth.headerName) {
           forwardHeaders[serviceConfig.auth.headerName] = serviceConfig.auth.token;
         } else if (serviceConfig.auth.type === 'query' && serviceConfig.auth.paramName) {

@@ -11,10 +11,12 @@ export interface PolicyRule {
 export interface ServiceConfig {
   upstream: string;
   auth: {
-    type: 'bearer' | 'header' | 'query' | 'oauth2_client_credentials';
+    type: 'bearer' | 'header' | 'query' | 'basic' | 'oauth2_client_credentials';
     token: string;
     headerName?: string;   // for type: 'header'
     paramName?: string;    // for type: 'query' (e.g. 'appid' for OpenWeatherMap)
+    username?: string;     // for type: 'basic'
+    password?: string;     // for type: 'basic'
     // for type: 'oauth2_client_credentials'
     tokenPath?: string;    // e.g. '/token' — the path where client sends credentials
     clientId?: string;
