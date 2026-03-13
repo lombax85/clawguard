@@ -1,0 +1,5 @@
+FROM node:20-alpine
+COPY server.js /server.js
+WORKDIR /data
+EXPOSE 3000
+CMD ["node", "/server.js"]

@@ -14,11 +14,11 @@ export class ApprovalManager {
   private approvalKey(service: string, method: string): string {
     return `${service}::${method.toUpperCase()}`;
   }
-  private telegram: TelegramNotifier;
+  private telegram: TelegramNotifier | undefined;
   private audit: AuditLogger;
   private approvalTimeout: number;
 
-  constructor(telegram: TelegramNotifier, audit: AuditLogger, approvalTimeoutMs: number = 120000) {
+  constructor(telegram: TelegramNotifier | undefined, audit: AuditLogger, approvalTimeoutMs: number = 120000) {
     this.telegram = telegram;
     this.audit = audit;
     this.approvalTimeout = approvalTimeoutMs;
@@ -102,6 +102,23 @@ export class ApprovalManager {
 
     // Request new approval
     console.log(`🔔 Requesting approval for: ${method} ${service}${path}`);
+
+    // No Telegram configured — auto-approve (test/dev mode)
+    if (!this.telegram) {
+      console.log(`✅ Auto-approved (no Telegram): ${method} ${service}${path}`);
+      const approval: Approval = {
+        service,
+        method: method.toUpperCase(),
+        approvedAt: Date.now(),
+        expiresAt: Date.now() + 3600 * 1000, // 1h default
+        approvedBy: 'auto (no telegram)',
+      };
+      const key = this.approvalKey(service, method);
+      this.activeApprovals.set(key, approval);
+      this.audit.logApproval(service, method, 'auto (no telegram)', 3600);
+      return true;
+    }
+
     const requestId = generateRequestId();
 
     const timeoutPromise = new Promise<{ approved: boolean; ttlSeconds: number; approvedBy: string }>((resolve) => {

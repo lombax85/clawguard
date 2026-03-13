@@ -19,11 +19,21 @@ export class CertManager {
 
     const caCertPath = path.join(caDir, 'ca.crt');
     const caKeyPath = path.join(caDir, 'ca.key');
+    const tlsCertPath = path.join(caDir, 'tls.crt');
+    const tlsKeyPath = path.join(caDir, 'tls.key');
 
-    if (fs.existsSync(caCertPath) && fs.existsSync(caKeyPath)) {
-      this.caCert = forge.pki.certificateFromPem(fs.readFileSync(caCertPath, 'utf-8'));
-      this.caKey = forge.pki.privateKeyFromPem(fs.readFileSync(caKeyPath, 'utf-8'));
-      console.log(`   ✓ CA loaded from ${caDir}`);
+    const certPath = fs.existsSync(tlsCertPath) ? tlsCertPath : caCertPath;
+    const keyPath = fs.existsSync(tlsKeyPath) ? tlsKeyPath : caKeyPath;
+
+    if (fs.existsSync(certPath) && fs.existsSync(keyPath)) {
+      try {
+        this.caCert = forge.pki.certificateFromPem(fs.readFileSync(certPath, 'utf-8'));
+        this.caKey = forge.pki.privateKeyFromPem(fs.readFileSync(keyPath, 'utf-8'));
+        console.log(`   ✓ CA loaded from ${certPath}`);
+      } catch (err) {
+        console.error(`❌ Failed to parse existing CA certificate from ${certPath}: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
     } else {
       const ca = this.generateCA();
       this.caCert = ca.cert;

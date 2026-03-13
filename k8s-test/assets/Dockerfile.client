@@ -1,0 +1,7 @@
+FROM alpine:latest
+RUN apk add curl bash
+WORKDIR /data
+COPY entrypoint.sh /
+COPY test-auth.sh /test-auth.sh
+RUN chmod +x /test-auth.sh
+CMD ["/bin/sh", "-c", "/entrypoint.sh"]

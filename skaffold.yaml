@@ -1,0 +1,57 @@
+apiVersion: skaffold/v4beta11
+kind: Config
+metadata:
+  name: cert-manager
+deploy:
+  helm:
+    releases:
+      # Dipendenza Esterna: cert-manager
+      - name: cert-manager
+        remoteChart: cert-manager
+        repo: https://charts.jetstack.io
+        namespace: cert-manager
+        version: v1.20.0 # Specifica sempre la versione per stabilità
+        createNamespace: true
+        setValues:
+          crds:
+            enabled: true
+        wait: true
+      - name: trust-manager
+        remoteChart: trust-manager
+        repo: https://charts.jetstack.io
+        namespace: cert-manager
+        version: v0.22.0 # Specifica sempre la versione per stabilità
+        createNamespace: true
+        setValues:
+          crds:
+            enabled: true
+        wait: true
+---
+apiVersion: skaffold/v4beta11
+kind: Config
+metadata:
+  name: clawguard
+requires:
+  - configs: ["cert-manager"]
+build:
+  artifacts:
+    - image: lombax85/clawguard
+      context: .
+      docker:
+        dockerfile: Dockerfile
+    - image: json-server
+      context: k8s-test/assets
+      docker:
+        dockerfile: Dockerfile.json-server
+    - image: client
+      context: k8s-test/assets
+      docker:
+        dockerfile: Dockerfile.client
+  local:
+    push: false
+manifests:
+  kustomize:
+    paths:
+      - k8s-test/
+deploy:
+  kubectl: {}

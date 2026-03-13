@@ -1,0 +1,31 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: json-server
+spec:
+  # Secret names are always required.
+  secretName: json-server-tls
+  privateKey:
+    algorithm: RSA
+    encoding: PKCS1
+    size: 2048
+  duration: 2160h # 90d
+  renewBefore: 360h # 15d
+  isCA: false
+  usages:
+    - server auth
+    - client auth
+
+  subject:
+    organizations:
+      - cert-manager
+  commonName: json-server
+  dnsNames:
+    - json-server
+    - json-server.svc
+    - json-server.clawguard.svc
+    - json-server.clawguard.svc.cluster.local
+  issuerRef:
+    name: json-server-ca-issuer
+    kind: Issuer
+    group: cert-manager.io

@@ -278,7 +278,7 @@ export function createAdminRouter(
   router.get('/api/telegram', pinAuth, (_req: Request, res: Response) => {
     res.json({
       pairedUsers: audit.getPairedUsers(),
-      pairingEnabled: config.notifications.telegram.pairing.enabled,
+      pairingEnabled: config.notifications?.telegram?.pairing?.enabled ?? false,
     });
   });
 
