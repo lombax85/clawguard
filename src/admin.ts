@@ -130,6 +130,13 @@ export function createAdminRouter(
         authInfo.clientId = svc.auth.clientId ? maskToken(svc.auth.clientId) : undefined;
         authInfo.clientSecret = svc.auth.clientSecret ? maskToken(svc.auth.clientSecret) : undefined;
       }
+      if (svc.auth.type === 'body_json' && svc.auth.fields) {
+        const maskedFields: Record<string, string> = {};
+        for (const [key, value] of Object.entries(svc.auth.fields)) {
+          maskedFields[key] = maskToken(value);
+        }
+        authInfo.fields = maskedFields;
+      }
       services[name] = {
         upstream: svc.upstream,
         auth: authInfo,
