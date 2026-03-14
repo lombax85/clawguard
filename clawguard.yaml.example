@@ -68,6 +68,22 @@ services:
   #       - match: { method: POST, path: /oauth/token }
   #         action: auto_approve               # let token exchange pass through
 
+  # ─── Body JSON injection (e.g. Bluesky/AT Protocol) ─────
+  # For APIs where credentials go in the JSON POST body, not headers.
+  # ClawGuard injects/overwrites the configured fields in any JSON body.
+  # bluesky:
+  #   upstream: https://bsky.social
+  #   auth:
+  #     type: body_json
+  #     token: "unused"
+  #     fields:
+  #       password: "your-bluesky-app-password"
+  #   policy:
+  #     default: require_approval
+  #     rules:
+  #       - match: { method: GET }
+  #         action: auto_approve
+
   # ─── Anthropic (Claude API) ─────────────────────────────
   anthropic:
     upstream: https://api.anthropic.com

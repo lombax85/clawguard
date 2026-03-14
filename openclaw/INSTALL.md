@@ -126,6 +126,25 @@ export REQUESTS_CA_BUNDLE="/path/to/ca.crt"
 export CURL_CA_BUNDLE="/path/to/ca.crt"
 ```
 
+#### Triggering service discovery
+
+When ClawGuard has `proxy.enabled: true` and `proxy.discovery: true`, you can trigger discovery for new services by making requests through the proxy to unconfigured hosts:
+
+```bash
+# Set proxy environment
+export HTTPS_PROXY="http://THE-AGENT-KEY:x@CLAWGUARD-IP:9090"
+export NO_PROXY="localhost,127.0.0.1,::1"
+
+# Make a request to the new service (use -k if CA cert not yet trusted)
+curl -k https://bsky.social/xrpc/com.atproto.server.createSession \
+  -H "Content-Type: application/json" \
+  -d '{"identifier":"user.bsky.social","password":"dummy"}'
+```
+
+ClawGuard will track the request and show it in the **Discovered** tab of the admin dashboard. The operator can then click **YAML** to get a ready-to-use config snippet.
+
+**Important:** Discovery only works via Mode C (HTTPS_PROXY). It does NOT work via Mode A (direct URL) or Mode B (forwarder) — those modes require the service to already be configured.
+
 #### Discovery policy defaults (security)
 
 For unknown/unconfigured hosts in MITM mode:
@@ -133,6 +152,49 @@ For unknown/unconfigured hosts in MITM mode:
 - `proxy.discoveryPolicy: silent_allow` only if explicitly needed
 
 Never leave unknown services silently allowed by default in production.
+
+## Auth types (how ClawGuard injects credentials)
+
+ClawGuard supports multiple auth injection methods. **You don't need to know which one is configured** — just make normal API calls and ClawGuard handles the rest. This section is for reference.
+
+| Type | How it works | Example use case |
+|------|-------------|-----------------|
+| `bearer` | Injects `Authorization: Bearer <token>` header | GitHub, OpenAI, Todoist |
+| `header` | Injects a custom header (e.g. `X-API-Key`) | APIs with non-standard auth headers |
+| `query` | Appends token as URL query parameter | OpenWeatherMap (`?appid=...`) |
+| `basic` | Injects `Authorization: Basic base64(user:pass)` | Legacy APIs |
+| `url` | Injects `user:pass` into the upstream URL | Bitbucket git operations |
+| `oauth2_client_credentials` | Rewrites `client_id`/`client_secret` in POST body | OAuth2 token endpoints |
+| `body_json` | Injects/overwrites fields in JSON request body | Bluesky/AT Protocol, any API with body-based auth |
+
+### `body_json` — for APIs with credentials in the request body
+
+Some APIs (like Bluesky/AT Protocol) don't use headers for authentication — instead, they expect credentials as fields in the JSON POST body (e.g. `{"identifier": "user", "password": "app-password"}`).
+
+With `body_json`, ClawGuard intercepts the JSON body and injects the configured fields. The agent sends dummy values; ClawGuard replaces them with the real credentials.
+
+Example ClawGuard config:
+```yaml
+bluesky:
+  upstream: https://bsky.social
+  auth:
+    type: body_json
+    token: "unused"
+    fields:
+      password: "real-app-password-here"
+  policy:
+    default: require_approval
+```
+
+The agent calls:
+```bash
+curl http://CLAWGUARD-IP:9090/bluesky/xrpc/com.atproto.server.createSession \
+  -H "Content-Type: application/json" \
+  -H "X-ClawGuard-Key: your-agent-key" \
+  -d '{"identifier": "user.bsky.social", "password": "dummy"}'
+```
+
+ClawGuard replaces `"password": "dummy"` with `"password": "real-app-password-here"` before forwarding to Bluesky.
 
 ## What to expect
 

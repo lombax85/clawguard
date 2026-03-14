@@ -395,7 +395,7 @@ security:
     # ... your other domains
 ```
 
-> ClawGuard supports four auth injection modes: `bearer` (Authorization header), `header` (custom header name), `query` (URL query parameter, e.g. `?access_token=...`), and `oauth2_client_credentials` (client_id/client_secret body rewriting).
+> ClawGuard supports five auth injection modes: `bearer` (Authorization header), `header` (custom header name), `query` (URL query parameter, e.g. `?access_token=...`), `oauth2_client_credentials` (client_id/client_secret body rewriting), and `body_json` (inject/overwrite arbitrary fields in JSON request bodies — useful for APIs like Bluesky/AT Protocol where credentials are sent in the POST body).
 
 Restart ClawGuard: `docker compose up -d --build`
 
@@ -576,6 +576,21 @@ services:
           action: auto_approve
         - match: { method: POST, path: /token }
           action: auto_approve           # let token exchange pass through
+
+  # Body JSON injection — for APIs where credentials go in the POST body (e.g. Bluesky/AT Protocol)
+  # ClawGuard injects/overwrites the specified fields in any JSON request body
+  bluesky:
+    upstream: https://bsky.social
+    auth:
+      type: body_json
+      token: "unused"
+      fields:
+        password: "your-app-password"    # injected into JSON body on every POST
+    policy:
+      default: require_approval
+      rules:
+        - match: { method: GET }
+          action: auto_approve
 
 notifications:
   telegram:

@@ -14,6 +14,37 @@ export function rewriteRequestAuth(
   body: Buffer,
   headers: Record<string, string>
 ): { body: Buffer; headers: Record<string, string>; skipAuthInjection: boolean } {
+  // ─── body_json: inject/overwrite fields in JSON body ──────
+  if (serviceConfig.auth.type === 'body_json') {
+    const fields = serviceConfig.auth.fields;
+    if (!fields || Object.keys(fields).length === 0) {
+      console.warn('⚠ body_json: no fields configured');
+      return { body, headers, skipAuthInjection: true };
+    }
+
+    const contentType = (headers['content-type'] || '').toLowerCase();
+    if (!contentType.includes('application/json')) {
+      // Not JSON — can't inject fields, pass through
+      return { body, headers, skipAuthInjection: true };
+    }
+
+    try {
+      const json = JSON.parse(body.toString('utf-8'));
+      for (const [key, value] of Object.entries(fields)) {
+        json[key] = value;
+      }
+      const newBody = Buffer.from(JSON.stringify(json), 'utf-8');
+      const newHeaders = { ...headers };
+      newHeaders['content-length'] = String(newBody.length);
+      const fieldNames = Object.keys(fields).join(', ');
+      console.log(`   🔑 Auth injected: type=body_json fields=[${fieldNames}]`);
+      return { body: newBody, headers: newHeaders, skipAuthInjection: true };
+    } catch {
+      console.warn('⚠ body_json: failed to parse request body as JSON');
+      return { body, headers, skipAuthInjection: true };
+    }
+  }
+
   if (serviceConfig.auth.type !== 'oauth2_client_credentials') {
     return { body, headers, skipAuthInjection: false };
   }

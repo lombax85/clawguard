@@ -11,7 +11,7 @@ export interface PolicyRule {
 export interface ServiceConfig {
   upstream: string;
   auth: {
-    type: 'bearer' | 'header' | 'query' | 'basic' | 'url' | 'oauth2_client_credentials';
+    type: 'bearer' | 'header' | 'query' | 'basic' | 'url' | 'oauth2_client_credentials' | 'body_json';
     token: string;
     dummyToken?: string;   // if set, client must send this dummy value; clawguard validates it before injecting the real token
     headerName?: string;   // for type: 'header'
@@ -22,6 +22,8 @@ export interface ServiceConfig {
     tokenPath?: string;    // e.g. '/token' — the path where client sends credentials
     clientId?: string;
     clientSecret?: string;
+    // for type: 'body_json' — inject/overwrite fields in the JSON request body
+    fields?: Record<string, string>;
   };
   policy: {
     default: 'auto_approve' | 'require_approval';
