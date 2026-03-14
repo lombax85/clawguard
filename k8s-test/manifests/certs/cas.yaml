@@ -1,0 +1,31 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: clawguard-ca
+spec:
+  isCA: true
+  commonName: clawguard-ca
+  secretName: clawguard-ca
+  issuerRef:
+    name: clawguard-issuer
+    kind: Issuer
+    group: cert-manager.io
+  secretTemplate:
+    labels:
+      clawguard-cas: 'true'
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: json-server-ca
+spec:
+  isCA: true
+  commonName: json-server-ca
+  secretName: json-server-ca
+  issuerRef:
+    name: json-server-issuer
+    kind: Issuer
+    group: cert-manager.io
+  secretTemplate:
+    labels:
+      clawguard-cas: 'true'

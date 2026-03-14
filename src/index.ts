@@ -7,6 +7,7 @@ import { createProxy } from './proxy';
 import { validateAllUpstreams, validateUpstreamUrl } from './security';
 import { CertManager } from './cert-manager';
 import { attachMitmProxy } from './mitm-proxy';
+import { startTransparentProxy } from './transparent-proxy';
 
 const CONFIG_PATH = process.env['CLAWGUARD_CONFIG'] || process.env['AGENTGATE_CONFIG'] || path.join(process.cwd(), 'clawguard.yaml');
 
@@ -44,8 +45,13 @@ for (const [name, svcConfig] of Object.entries(overrides)) {
   console.log(`   ↻ Service override loaded: ${name}`);
 }
 
-// Init Telegram
-const telegram = new TelegramNotifier(config.notifications.telegram, audit);
+// Init Telegram (optional — if not configured, approvals are auto-approved)
+let telegram: TelegramNotifier | undefined;
+if (config.notifications?.telegram?.botToken) {
+  telegram = new TelegramNotifier(config.notifications.telegram, audit);
+} else {
+  console.log('📱 Telegram: disabled (not configured)');
+}
 
 // Init approval manager (restores active approvals from SQLite)
 console.log(`🔑 Restoring approvals:`);
@@ -73,22 +79,35 @@ const server = app.listen(port, () => {
   console.log(`\n⏳ Waiting for requests...\n`);
 });
 
+// ─── Cert Manager ──────────────────────────────────────────────
+
+let certManager: CertManager | undefined;
+if (config.proxy.enabled || config.transparentProxy.enabled) {
+  const caDir = path.resolve(config.proxy.caDir);
+  certManager = new CertManager(caDir);
+}
+
 // ─── HTTPS_PROXY MITM mode ───────────────────────────────────
 
-if (config.proxy.enabled) {
+if (config.proxy.enabled && certManager) {
   console.log(`🔀 HTTPS_PROXY mode: ENABLED`);
-  const caDir = path.resolve(config.proxy.caDir);
-  const certManager = new CertManager(caDir);
   attachMitmProxy(server, config, approvalManager, audit, certManager, telegram);
   console.log(`   CA cert: ${certManager.getCaCertPath()}`);
   console.log(`   Usage:   export HTTPS_PROXY=http://AGENT_KEY:x@CLAWGUARD_HOST:${port}`);
   console.log(`   Trust:   NODE_EXTRA_CA_CERTS=${certManager.getCaCertPath()}`);
 }
 
+// ─── Transparent Proxy sidecar mode ──────────────────────────
+
+if (config.transparentProxy.enabled && certManager) {
+  console.log(`🔀 Transparent Proxy mode: ENABLED`);
+  startTransparentProxy(config, approvalManager, audit, certManager);
+}
+
 // Graceful shutdown
 function shutdown(): void {
   console.log('\n🛑 Shutting down ClawGuard...');
-  telegram.stop();
+  telegram?.stop();
   audit.close();
   server.close();
   process.exit(0);

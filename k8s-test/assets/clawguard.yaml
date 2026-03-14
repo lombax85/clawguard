@@ -1,0 +1,48 @@
+server:
+  port: 8000
+  agentKey: "dummy-key-for-local-dashboard"
+proxy:
+  enabled: false
+  caDir: "/app/data/ca"
+transparentProxy:
+  enabled: true
+  httpPort: 8080
+  httpsPort: 8443
+services:
+  bearer-test:
+    upstream: "https://json-server"
+    hostnames:
+      - "bearer-api"
+    auth:
+      type: "bearer"
+      token: "bearer-secret-token-123"
+      dummyToken: "dummy-bearer-placeholder"
+    policy:
+      default: "auto_approve"
+  header-test:
+    upstream: "https://json-server"
+    hostnames:
+      - "header-api"
+    auth:
+      type: "header"
+      headerName: "X-API-Key"
+      token: "header-secret-key-456"
+      dummyToken: "dummy-header-placeholder"
+    policy:
+      default: "auto_approve"
+  query-test:
+    upstream: "https://json-server"
+    hostnames:
+      - "query-api"
+    auth:
+      type: "query"
+      paramName: "api_key"
+      token: "query-secret-token-789"
+      dummyToken: "dummy-query-placeholder"
+    policy:
+      default: "auto_approve"
+admin:
+  enabled: false
+audit:
+  path: "/app/data/clawguard.db"
+  logPayload: true

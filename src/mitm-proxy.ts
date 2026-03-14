@@ -208,7 +208,7 @@ export function attachMitmProxy(
   approvalManager: ApprovalManager,
   audit: AuditLogger,
   certManager: CertManager,
-  telegram: TelegramNotifier
+  telegram?: TelegramNotifier
 ): void {
   server.on('connect', async (req: http.IncomingMessage, clientSocket: net.Socket, head: Buffer) => {
     const target = req.url || '';
@@ -272,7 +272,7 @@ export function attachMitmProxy(
         clientSocket.on('error', () => { /* ignore */ });
         // Notify via Telegram if this is a newly discovered host
         if (isNewHost) {
-          telegram.notifyDiscoveryBlocked(hostname, clientIp).catch(() => { /* ignore */ });
+          telegram?.notifyDiscoveryBlocked(hostname, clientIp).catch(() => { /* ignore */ });
         }
         // Default-safe behavior: block unknown services unless explicitly allowed.
         clientSocket.write('HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\n\r\n{"error":"Unknown service blocked by policy. Add service config or set proxy.discoveryPolicy=silent_allow."}');

@@ -1,0 +1,53 @@
+name: Transparent Proxy E2E Test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  test-k8s:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Start Minikube
+        uses: medyagh/setup-minikube@latest
+
+      - name: Install Skaffold
+        run: |
+          curl -Lo skaffold https://storage.googleapis.com/skaffold/releases/latest/skaffold-linux-amd64
+          sudo install skaffold /usr/local/bin/
+
+      - name: Build and Deploy with Skaffold
+        run: |
+          eval $(minikube docker-env)
+          skaffold run
+
+      - name: Wait for Deployments to be Ready
+        run: |
+          kubectl -n clawguard rollout status deployment/json-server --timeout=120s
+          kubectl -n clawguard rollout status deployment/client-with-clawguard --timeout=120s
+          # Give containers time to fully initialize
+          sleep 10
+
+      - name: Run Auth Injection Test Suite
+        run: |
+          kubectl -n clawguard exec deploy/client-with-clawguard -c client -- bash /test-auth.sh
+
+      - name: Dump ClawGuard Logs on Failure
+        if: failure()
+        run: |
+          echo "=== ClawGuard logs ==="
+          kubectl -n clawguard logs deploy/client-with-clawguard -c clawguard || true
+          echo ""
+          echo "=== json-server logs ==="
+          kubectl -n clawguard logs deploy/json-server || true
+          echo ""
+          echo "=== Pod status ==="
+          kubectl -n clawguard get pods -o wide || true
+          echo ""
+          echo "=== Events ==="
+          kubectl -n clawguard get events --sort-by='.lastTimestamp' || true

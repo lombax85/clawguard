@@ -9,6 +9,48 @@ import { createAdminRouter } from './admin';
 import { validateRuntimeUrl } from './security';
 import { rewriteRequestAuth } from './auth-rewrite';
 
+/**
+ * Validates that the client sent the correct dummy token.
+ * If dummyToken is not configured, validation is skipped (backwards compatible).
+ * Returns null if valid, or an error message if invalid.
+ */
+function validateDummyToken(req: Request, serviceConfig: ServiceConfig): string | null {
+  const { auth } = serviceConfig;
+  if (!auth.dummyToken) return null; // no dummy configured, skip validation
+
+  switch (auth.type) {
+    case 'bearer': {
+      const authHeader = req.headers['authorization'] as string | undefined;
+      const clientToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
+      if (clientToken !== auth.dummyToken) {
+        return 'Invalid or missing dummy token in Authorization header';
+      }
+      return null;
+    }
+    case 'header': {
+      const headerName = auth.headerName;
+      if (!headerName) return null;
+      const clientToken = req.headers[headerName.toLowerCase()] as string | undefined;
+      if (clientToken !== auth.dummyToken) {
+        return `Invalid or missing dummy token in ${headerName} header`;
+      }
+      return null;
+    }
+    case 'query': {
+      const paramName = auth.paramName;
+      if (!paramName) return null;
+      const url = new URL(req.originalUrl, `http://${req.headers.host}`);
+      const clientToken = url.searchParams.get(paramName);
+      if (clientToken !== auth.dummyToken) {
+        return `Invalid or missing dummy token in ${paramName} query param`;
+      }
+      return null;
+    }
+    default:
+      return null; // other auth types don't support dummy validation yet
+  }
+}
+
 export function createProxy(
   config: Config,
   approvalManager: ApprovalManager,
@@ -66,7 +108,7 @@ export function createProxy(
   // When traffic arrives with Host: api.openai.com (no service prefix),
   // match it against configured hostnames and route accordingly.
 
-  app.all('*', handleHostProxy(config, approvalManager, audit));
+  app.all('*', handleHostProxy(config, approvalManager, audit, { requireAgentKey: true }));
 
   return app;
 }
@@ -89,15 +131,61 @@ function resolveServiceByHost(
   return null;
 }
 
-function handleHostProxy(
+export function handleHostProxy(
   config: Config,
   approvalManager: ApprovalManager,
-  audit: AuditLogger
+  audit: AuditLogger,
+  options: { requireAgentKey: boolean; passthrough?: boolean } = { requireAgentKey: true }
 ) {
   return async (req: Request, res: Response): Promise<void> => {
     const match = resolveServiceByHost(req.headers.host, config.services);
 
     if (!match) {
+      // In transparent proxy mode, forward unknown hosts directly (passthrough)
+      if (options.passthrough) {
+        const host = req.headers.host || '';
+        const hostname = host.split(':')[0];
+        const port = host.includes(':') ? parseInt(host.split(':')[1]) : 80;
+        const upstreamPath = req.originalUrl || '/';
+        const upstreamUrl = `http://${hostname}:${port}${upstreamPath}`;
+
+        console.log(`🔀 Passthrough (no injection): ${req.method} ${upstreamUrl}`);
+
+        try {
+          const forwardHeaders: Record<string, string> = {};
+          for (const [key, value] of Object.entries(req.headers)) {
+            if (typeof value === 'string') forwardHeaders[key] = value;
+            else if (Array.isArray(value)) forwardHeaders[key] = value.join(', ');
+          }
+
+          const requestBody = (req.body && Buffer.isBuffer(req.body)) ? req.body : Buffer.alloc(0);
+
+          const proxyReq = http.request(upstreamUrl, {
+            method: req.method,
+            headers: forwardHeaders,
+          }, (proxyRes) => {
+            res.status(proxyRes.statusCode || 502);
+            for (const [key, value] of Object.entries(proxyRes.headers)) {
+              if (value) res.setHeader(key, value as string | string[]);
+            }
+            proxyRes.pipe(res);
+          });
+
+          proxyReq.on('error', (err) => {
+            console.error(`❌ Passthrough error for ${hostname}: ${err.message}`);
+            res.status(502).json({ error: `Upstream error: ${err.message}` });
+          });
+
+          if (requestBody.length > 0) proxyReq.write(requestBody);
+          proxyReq.end();
+        } catch (err) {
+          const message = err instanceof Error ? err.message : 'Unknown error';
+          console.error(`❌ Passthrough error: ${message}`);
+          res.status(500).json({ error: message });
+        }
+        return;
+      }
+
       res.status(404).json({ error: 'Unknown host. Configure hostnames in service config for host-based routing.' });
       return;
     }
@@ -105,10 +193,25 @@ function handleHostProxy(
     const serviceName = match.name;
     const serviceConfig = match.config;
 
-    // Validate agent key (check header, or skip if request comes from forwarder with key in X-Forwarded-Key)
-    const agentKey = (req.headers['x-clawguard-key'] || req.headers['x-agentgate-key']) as string | undefined;
-    if (agentKey !== config.server.agentKey) {
-      res.status(401).json({ error: 'Invalid or missing X-ClawGuard-Key' });
+    // Validate agent key if required
+    if (options.requireAgentKey) {
+      const agentKey = (req.headers['x-clawguard-key'] || req.headers['x-agentgate-key']) as string | undefined;
+      if (agentKey !== config.server.agentKey) {
+        res.status(401).json({ error: 'Invalid or missing X-ClawGuard-Key' });
+        return;
+      }
+    }
+
+    // ─── Validate dummy token ─────────────────────────────────
+    const dummyError = validateDummyToken(req, serviceConfig);
+    if (dummyError) {
+      console.error(`🚫 Dummy token validation failed for ${serviceName}: ${dummyError}`);
+      audit.logRequest({
+        timestamp: new Date().toISOString(), service: serviceName,
+        method: req.method, path: req.originalUrl || '/', approved: false,
+        responseStatus: 403, agentIp: (req.ip || req.socket.remoteAddress || 'unknown') as string,
+      });
+      res.status(403).json({ error: dummyError });
       return;
     }
 
@@ -261,6 +364,19 @@ function handleProxy(
     const agentKey = (req.headers['x-clawguard-key'] || req.headers['x-agentgate-key']) as string | undefined;
     if (agentKey !== config.server.agentKey) {
       res.status(401).json({ error: 'Invalid or missing X-ClawGuard-Key' });
+      return;
+    }
+
+    // ─── Validate dummy token ─────────────────────────────────
+    const dummyError = validateDummyToken(req, serviceConfig);
+    if (dummyError) {
+      console.error(`🚫 Dummy token validation failed for ${serviceName}: ${dummyError}`);
+      audit.logRequest({
+        timestamp: new Date().toISOString(), service: serviceName,
+        method: req.method, path: req.originalUrl || '/', approved: false,
+        responseStatus: 403, agentIp: (req.ip || req.socket.remoteAddress || 'unknown') as string,
+      });
+      res.status(403).json({ error: dummyError });
       return;
     }
 

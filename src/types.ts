@@ -13,6 +13,7 @@ export interface ServiceConfig {
   auth: {
     type: 'bearer' | 'header' | 'query' | 'basic' | 'url' | 'oauth2_client_credentials';
     token: string;
+    dummyToken?: string;   // if set, client must send this dummy value; clawguard validates it before injecting the real token
     headerName?: string;   // for type: 'header'
     paramName?: string;    // for type: 'query' (e.g. 'appid' for OpenWeatherMap)
     username?: string;     // for type: 'basic'
@@ -77,6 +78,14 @@ export interface ProxyConfig {
   discoveryPolicy: 'block' | 'silent_allow';
 }
 
+// ─── Transparent Proxy (L7 proxy for sidecars) ───────────────
+
+export interface TransparentProxyConfig {
+  enabled: boolean;
+  httpPort: number;
+  httpsPort: number;
+}
+
 // ─── Config (root) ──────────────────────────────────────────
 
 export interface Config {
@@ -85,13 +94,14 @@ export interface Config {
     agentKey: string;
   };
   services: Record<string, ServiceConfig>;
-  notifications: {
-    telegram: TelegramConfig;
+  notifications?: {
+    telegram?: TelegramConfig;
   };
   audit: AuditConfig;
   security: SecurityConfig;
   admin: AdminConfig;
   proxy: ProxyConfig;
+  transparentProxy: TransparentProxyConfig;
 }
 
 // ─── Runtime types ──────────────────────────────────────────

@@ -60,6 +60,12 @@ const DEFAULT_PROXY = {
   discoveryPolicy: 'block' as const,
 };
 
+const DEFAULT_TRANSPARENT_PROXY = {
+  enabled: false,
+  httpPort: 8080,
+  httpsPort: 8443,
+};
+
 const DEFAULT_TELEGRAM_PAIRING = {
   enabled: true,
   secret: '',
@@ -88,14 +94,17 @@ export function loadConfig(configPath: string): Config {
     process.exit(1);
   }
 
-  if (!config.notifications?.telegram?.botToken) {
-    console.error('❌ Missing notifications.telegram.botToken');
-    process.exit(1);
-  }
-
-  if (!config.notifications.telegram.chatId) {
-    console.error('❌ Missing notifications.telegram.chatId');
-    process.exit(1);
+  if (config.notifications?.telegram) {
+    if (!config.notifications.telegram.botToken) {
+      console.error('❌ Missing notifications.telegram.botToken');
+      process.exit(1);
+    }
+    if (!config.notifications.telegram.chatId) {
+      console.error('❌ Missing notifications.telegram.chatId');
+      process.exit(1);
+    }
+  } else {
+    console.log('⚠️  Telegram not configured — approval requests will be auto-approved');
   }
 
   // ─── Apply defaults ────────────────────────────────────────
@@ -104,14 +113,25 @@ export function loadConfig(configPath: string): Config {
   config.admin = { ...DEFAULT_ADMIN, ...(config.admin || {}) };
   config.audit = { ...DEFAULT_AUDIT, ...(config.audit || {}) };
   config.proxy = { ...DEFAULT_PROXY, ...(config.proxy || {}) };
+  config.transparentProxy = { ...DEFAULT_TRANSPARENT_PROXY, ...(config.transparentProxy || {}) };
 
   if (!['block', 'silent_allow'].includes(config.proxy.discoveryPolicy)) {
     console.error('❌ Invalid proxy.discoveryPolicy. Allowed values: block, silent_allow');
     process.exit(1);
   }
 
-  if (!config.notifications.telegram.pairing) {
-    config.notifications.telegram.pairing = { ...DEFAULT_TELEGRAM_PAIRING };
+  if (config.notifications?.telegram) {
+    if (!config.notifications.telegram.pairing) {
+      config.notifications.telegram.pairing = { ...DEFAULT_TELEGRAM_PAIRING };
+    }
+
+    // ─── Validate Telegram pairing ─────────────────────────────
+
+    if (config.notifications.telegram.pairing.enabled && !config.notifications.telegram.pairing.secret) {
+      console.error('❌ Telegram pairing is enabled but no secret is set.');
+      console.error('   Set notifications.telegram.pairing.secret in config');
+      process.exit(1);
+    }
   }
 
   // ─── Validate admin PIN ────────────────────────────────────
@@ -119,14 +139,6 @@ export function loadConfig(configPath: string): Config {
   if (config.admin.enabled && !config.admin.pin) {
     console.error('❌ Admin panel is enabled but no PIN is set.');
     console.error('   Set admin.pin in config or disable with admin.enabled: false');
-    process.exit(1);
-  }
-
-  // ─── Validate Telegram pairing ─────────────────────────────
-
-  if (config.notifications.telegram.pairing.enabled && !config.notifications.telegram.pairing.secret) {
-    console.error('❌ Telegram pairing is enabled but no secret is set.');
-    console.error('   Set notifications.telegram.pairing.secret in config');
     process.exit(1);
   }
 
