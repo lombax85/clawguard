@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: client-with-clawguard-vault-k8s
+  labels:
+    app: client-vault-k8s
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: client-vault-k8s
+  template:
+    metadata:
+      labels:
+        app: client-vault-k8s
+    spec:
+      serviceAccountName: clawguard-vault-sa
+      initContainers:
+        - name: wait-vault-seed
+          image: kubectl-wait
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              echo "Waiting for vault-seed job to complete..."
+              kubectl wait --for=condition=complete job/vault-seed -n clawguard --timeout=120s
+              echo "Vault secrets ready."
+        - name: iptables-init
+          image: iptables-init
+          securityContext:
+            capabilities:
+              add: ["NET_ADMIN"]
+          command: ["sh", "/scripts/iptables-init.sh"]
+          volumeMounts:
+            - name: iptables-init-script
+              mountPath: /scripts
+              readOnly: true
+      containers:
+        - name: clawguard
+          image: lombax85/clawguard
+          securityContext:
+            runAsUser: 1000
+          env:
+            - name: NODE_EXTRA_CA_CERTS
+              value: /trust/bundle.pem
+          volumeMounts:
+            - name: clawguard-ca
+              mountPath: /app/data/ca
+            - name: data
+              mountPath: /app/data
+            - name: config
+              mountPath: /app/clawguard.yaml
+              subPath: clawguard-vault-k8s.yaml
+            - name: trust-bundle
+              mountPath: /trust
+              readOnly: true
+        - name: client
+          image: client
+          command: ["sh", "-c", "sleep infinity"]
+          env:
+            - name: SSL_CERT_FILE
+              value: /trust/bundle.pem
+            - name: CURL_CA_BUNDLE
+              value: /trust/bundle.pem
+          volumeMounts:
+            - name: trust-bundle
+              mountPath: /trust
+              readOnly: true
+      volumes:
+        - name: iptables-init-script
+          configMap:
+            name: iptables-init-script
+        - name: data
+          emptyDir: {}
+        - name: clawguard-ca
+          secret:
+            secretName: clawguard-ca
+        - name: trust-bundle
+          configMap:
+            name: clawguard-trust-bundle
+        - name: config
+          configMap:
+            name: clawguard-vault-k8s-config

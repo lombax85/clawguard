@@ -5,34 +5,72 @@ metadata:
 deploy:
   helm:
     releases:
-      # Dipendenza Esterna: cert-manager
       - name: cert-manager
         remoteChart: cert-manager
         repo: https://charts.jetstack.io
         namespace: cert-manager
-        version: v1.20.0 # Specifica sempre la versione per stabilità
+        version: v1.20.0
         createNamespace: true
         setValues:
-          crds:
-            enabled: true
-        wait: true
-      - name: trust-manager
-        remoteChart: trust-manager
-        repo: https://charts.jetstack.io
-        namespace: cert-manager
-        version: v0.22.0 # Specifica sempre la versione per stabilità
-        createNamespace: true
-        setValues:
-          crds:
-            enabled: true
+          crds.enabled: true
         wait: true
 ---
 apiVersion: skaffold/v4beta11
 kind: Config
 metadata:
-  name: clawguard
+  name: namespace
 requires:
   - configs: ["cert-manager"]
+manifests:
+  rawYaml:
+    - k8s-test/certs/namespace.yaml
+deploy:
+  kubectl: {}
+---
+apiVersion: skaffold/v4beta11
+kind: Config
+metadata:
+  name: trust-manager
+requires:
+  - configs: ["namespace"]
+deploy:
+  helm:
+    releases:
+      - name: trust-manager
+        remoteChart: trust-manager
+        repo: https://charts.jetstack.io
+        namespace: cert-manager
+        version: v0.22.0
+        createNamespace: true
+        setValues:
+          crds.enabled: true
+          app.trust.namespace: clawguard
+        wait: true
+---
+apiVersion: skaffold/v4beta11
+kind: Config
+metadata:
+  name: certs
+requires:
+  - configs: ["trust-manager"]
+manifests:
+  kustomize:
+    paths:
+      - k8s-test/certs/
+deploy:
+  kubectl:
+    hooks:
+      after:
+        - host:
+            command: ["sh", "-c", "kubectl wait --for=condition=Ready certificate --all -n clawguard --timeout=120s && kubectl wait --for=condition=Synced bundle clawguard-trust-bundle --timeout=60s && sleep 3"]
+            os: [linux, darwin]
+---
+apiVersion: skaffold/v4beta11
+kind: Config
+metadata:
+  name: applications
+requires:
+  - configs: ["certs"]
 build:
   artifacts:
     - image: lombax85/clawguard
@@ -47,11 +85,17 @@ build:
       context: k8s-test/assets
       docker:
         dockerfile: Dockerfile.client
-  local:
-    push: false
+    - image: kubectl-wait
+      context: k8s-test/assets
+      docker:
+        dockerfile: Dockerfile.kubectl-wait
+    - image: iptables-init
+      context: k8s-test/assets
+      docker:
+        dockerfile: Dockerfile.iptables-init
 manifests:
   kustomize:
     paths:
-      - k8s-test/
+      - k8s-test/applications
 deploy:
   kubectl: {}

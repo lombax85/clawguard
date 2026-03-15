@@ -68,6 +68,28 @@ export interface AuditConfig {
   logPayload: boolean;
 }
 
+// ─── Secrets ─────────────────────────────────────────────────
+
+export interface VaultAuthConfig {
+  method: 'token' | 'kubernetes';
+  token?: string;           // for method: 'token'
+  role?: string;            // for method: 'kubernetes'
+  mountPath?: string;       // default: 'auth/kubernetes'
+}
+
+export interface VaultSecretsConfig {
+  address: string;          // e.g. https://vault.example.com
+  namespace?: string;       // Vault Enterprise namespace
+  auth: VaultAuthConfig;
+  tlsSkipVerify?: boolean;  // default: false
+  cacheTTL?: number;        // seconds, default: 300
+}
+
+export interface SecretsConfig {
+  vault?: VaultSecretsConfig;
+  // future: aws?, gcp?, azure?
+}
+
 // ─── Proxy (HTTPS_PROXY MITM mode) ─────────────────────────
 
 export interface ProxyConfig {
@@ -104,6 +126,7 @@ export interface Config {
   admin: AdminConfig;
   proxy: ProxyConfig;
   transparentProxy: TransparentProxyConfig;
+  secrets?: SecretsConfig;
 }
 
 // ─── Runtime types ──────────────────────────────────────────

@@ -1,0 +1,6 @@
+FROM alpine:3.20
+RUN apk add --no-cache iptables iptables-legacy \
+ && ln -sf /sbin/xtables-legacy-multi /sbin/iptables \
+ && ln -sf /sbin/xtables-legacy-multi /sbin/iptables-save \
+ && ln -sf /sbin/xtables-legacy-multi /sbin/iptables-restore
+ENTRYPOINT ["sh", "-c"]

@@ -1,0 +1,175 @@
+# ServiceAccount for Vault server — needs TokenReview access
+# so it can validate Kubernetes auth login requests
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault-sa
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vault-tokenreview-binding
+subjects:
+  - kind: ServiceAccount
+    name: vault-sa
+    namespace: clawguard
+roleRef:
+  kind: ClusterRole
+  name: system:auth-delegator
+  apiGroup: rbac.authorization.k8s.io
+---
+# ServiceAccount for ClawGuard pods that authenticate via Vault k8s auth
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: clawguard-vault-sa
+---
+# ServiceAccount + RBAC for init containers that wait on vault-seed job
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault-wait-sa
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vault-wait-role
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vault-wait-binding
+subjects:
+  - kind: ServiceAccount
+    name: vault-wait-sa
+  - kind: ServiceAccount
+    name: clawguard-vault-sa
+roleRef:
+  kind: Role
+  name: vault-wait-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vault
+  labels:
+    app: vault
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vault
+  template:
+    metadata:
+      labels:
+        app: vault
+    spec:
+      serviceAccountName: vault-sa
+      containers:
+        - name: vault
+          image: hashicorp/vault:1.15
+          args: ["server", "-dev", "-dev-root-token-id=e2e-test-root-token", "-dev-listen-address=0.0.0.0:8200"]
+          env:
+            - name: VAULT_DEV_ROOT_TOKEN_ID
+              value: "e2e-test-root-token"
+          ports:
+            - containerPort: 8200
+          readinessProbe:
+            httpGet:
+              path: /v1/sys/health
+              port: 8200
+            initialDelaySeconds: 3
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault
+spec:
+  selector:
+    app: vault
+  ports:
+    - protocol: TCP
+      port: 8200
+      targetPort: 8200
+---
+# Job to seed test secrets into Vault after it starts
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: vault-seed
+spec:
+  backoffLimit: 5
+  template:
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        - name: wait-vault
+          image: busybox:1.36
+          command: ["sh", "-c"]
+          args:
+            - |
+              echo "Waiting for Vault to be ready..."
+              until wget -T 1 -qO- http://vault:8200/v1/sys/health 2>/dev/null | grep -q '"initialized":true'; do
+                sleep 0.5
+              done
+              echo "Vault is ready."
+      containers:
+        - name: seed
+          image: hashicorp/vault:1.15
+          env:
+            - name: VAULT_ADDR
+              value: "http://vault:8200"
+            - name: VAULT_TOKEN
+              value: "e2e-test-root-token"
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              echo "=== Seeding test secrets into Vault KV v2 ==="
+
+              vault kv put secret/bearer-test \
+                token="bearer-secret-token-123"
+
+              vault kv put secret/header-test \
+                token="header-secret-key-456"
+
+              vault kv put secret/query-test \
+                token="query-secret-token-789"
+
+              echo "=== Configuring Kubernetes auth backend ==="
+
+              # Create a read-only policy for the test secrets
+              vault policy write clawguard-test - <<'POLICY'
+              path "secret/data/bearer-test" { capabilities = ["read"] }
+              path "secret/data/header-test" { capabilities = ["read"] }
+              path "secret/data/query-test"  { capabilities = ["read"] }
+              POLICY
+
+              # Enable Kubernetes auth
+              vault auth enable kubernetes || true
+
+              # Configure it to talk to the in-cluster API server
+              # Pass the cluster CA so Vault can verify the API server TLS
+              vault write auth/kubernetes/config \
+                kubernetes_host="https://kubernetes.default.svc" \
+                kubernetes_ca_cert=@/var/run/secrets/kubernetes.io/serviceaccount/ca.crt \
+                disable_iss_validation=true
+
+              # Bind the clawguard-vault-sa ServiceAccount to the policy
+              vault write auth/kubernetes/role/clawguard \
+                bound_service_account_names=clawguard-vault-sa \
+                bound_service_account_namespaces=clawguard \
+                policies=clawguard-test \
+                ttl=1h
+
+              echo "=== Vault seed complete ==="
+              vault kv get secret/bearer-test
+              vault kv get secret/header-test
+              vault kv get secret/query-test
+              vault read auth/kubernetes/role/clawguard

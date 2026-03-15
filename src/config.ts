@@ -1,6 +1,7 @@
 import fs from 'fs';
 import yaml from 'js-yaml';
-import { Config } from './types';
+import { Config, ServiceConfig } from './types';
+import { createSecretProviders, resolveSecretValue, SecretProvider } from './secrets/provider';
 
 function substituteEnvVars(str: string): string {
   return str.replace(/\$\{(\w+)\}/g, (match, varName) => {
@@ -71,7 +72,7 @@ const DEFAULT_TELEGRAM_PAIRING = {
   secret: '',
 };
 
-export function loadConfig(configPath: string): Config {
+export async function loadConfig(configPath: string): Promise<Config> {
   if (!fs.existsSync(configPath)) {
     console.error(`❌ Config file not found: ${configPath}`);
     console.error(`   Create one from clawguard.yaml.example`);
@@ -142,7 +143,55 @@ export function loadConfig(configPath: string): Config {
     process.exit(1);
   }
 
+  // ─── Resolve secret references ───────────────────────────────
+
+  await resolveServiceSecrets(config);
+
   return config;
+}
+
+/**
+ * Resolves secret references (e.g. "vault:secret/data/github#token")
+ * in all service auth fields.
+ */
+async function resolveServiceSecrets(config: Config): Promise<void> {
+  const providers = await createSecretProviders(config.secrets);
+
+  if (providers.size <= 1) {
+    // Only static provider — no secret backends configured, skip resolution
+    // unless some token values actually use a provider prefix
+    const hasRefs = Object.values(config.services).some(svc => hasSecretRef(svc));
+    if (!hasRefs) return;
+  }
+
+  console.log('🔐 Resolving secret references...');
+
+  for (const [name, svc] of Object.entries(config.services)) {
+    try {
+      svc.auth.token = await resolveSecretValue(svc.auth.token, providers);
+      if (svc.auth.clientId) {
+        svc.auth.clientId = await resolveSecretValue(svc.auth.clientId, providers);
+      }
+      if (svc.auth.clientSecret) {
+        svc.auth.clientSecret = await resolveSecretValue(svc.auth.clientSecret, providers);
+      }
+      if (svc.auth.password) {
+        svc.auth.password = await resolveSecretValue(svc.auth.password, providers);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`❌ Failed to resolve secrets for service "${name}": ${message}`);
+      process.exit(1);
+    }
+  }
+}
+
+function hasSecretRef(svc: ServiceConfig): boolean {
+  const refPattern = /^\w+:.+#\w+$/;
+  return refPattern.test(svc.auth.token)
+    || (!!svc.auth.clientId && refPattern.test(svc.auth.clientId))
+    || (!!svc.auth.clientSecret && refPattern.test(svc.auth.clientSecret))
+    || (!!svc.auth.password && refPattern.test(svc.auth.password));
 }
 
 /**

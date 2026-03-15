@@ -1,0 +1,4 @@
+- Add capability to retrive secrets via AWS Secrets Manager.
+- Add capability to retrive secrets via GCP Secrets Manager.
+- Add capability to retrive secrets via Azure Key Vault.
+- ~~Add capability to retrive secrets via HashiCorp Vault.~~

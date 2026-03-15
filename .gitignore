@@ -11,3 +11,4 @@ tokens.enc
 data/
 .DS_Store
 .claude/
+DEBUG.md

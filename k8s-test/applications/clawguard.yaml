@@ -17,21 +17,15 @@ spec:
       # ─── Init container: iptables redirect ───────────────────
       initContainers:
         - name: iptables-init
-          image: alpine:latest
+          image: iptables-init
           securityContext:
             capabilities:
               add: ["NET_ADMIN"]
-          command:
-            - sh
-            - -c
-            - |
-              apk add --no-cache iptables
-              # Redirect outbound HTTP/HTTPS to ClawGuard transparent proxy
-              # Exclude traffic from UID 1000 (clawguard) to prevent loops
-              iptables -t nat -A OUTPUT -p tcp --dport 80 -m owner ! --uid-owner 1000 -j REDIRECT --to-port 8080
-              iptables -t nat -A OUTPUT -p tcp --dport 443 -m owner ! --uid-owner 1000 -j REDIRECT --to-port 8443
-              echo "iptables rules applied:"
-              iptables -t nat -L OUTPUT -n -v
+          command: ["sh", "/scripts/iptables-init.sh"]
+          volumeMounts:
+            - name: iptables-init-script
+              mountPath: /scripts
+              readOnly: true
 
       containers:
         # ─── ClawGuard sidecar ─────────────────────────────────
@@ -44,7 +38,7 @@ spec:
             - name: CLAWGUARD_CONFIG
               value: /config/clawguard.yaml
             - name: NODE_EXTRA_CA_CERTS
-              value: /certs/ca.crt
+              value: /trust/bundle.pem
           ports:
             - containerPort: 8000
               name: api
@@ -60,7 +54,7 @@ spec:
               mountPath: /app/data/ca
               readOnly: true
             - name: trust-bundle
-              mountPath: /certs
+              mountPath: /trust
               readOnly: true
             - name: data
               mountPath: /app/data
@@ -69,14 +63,13 @@ spec:
         - name: client
           image: client
           env:
-            # Client trusts the ClawGuard CA (for MITM certs)
             - name: SSL_CERT_FILE
-              value: /certs/ca.crt
+              value: /trust/bundle.pem
             - name: CURL_CA_BUNDLE
-              value: /certs/ca.crt
+              value: /trust/bundle.pem
           volumeMounts:
-            - name: client-ca
-              mountPath: /certs
+            - name: trust-bundle
+              mountPath: /trust
               readOnly: true
           command:
             - /bin/sh
@@ -87,7 +80,6 @@ spec:
         - name: clawguard-config
           configMap:
             name: clawguard-config
-        # ClawGuard CA keypair for forging certs
         - name: clawguard-ca
           secret:
             secretName: clawguard-ca
@@ -96,19 +88,11 @@ spec:
                 path: ca.crt
               - key: tls.key
                 path: ca.key
-        # ClawGuard trusts json-server CA for upstream connections
         - name: trust-bundle
-          secret:
-            secretName: json-server-ca
-            items:
-              - key: tls.crt
-                path: ca.crt
-        # Client trusts ClawGuard CA (the proxy's MITM CA)
-        - name: client-ca
-          secret:
-            secretName: clawguard-ca
-            items:
-              - key: tls.crt
-                path: ca.crt
+          configMap:
+            name: clawguard-trust-bundle
+        - name: iptables-init-script
+          configMap:
+            name: iptables-init-script
         - name: data
           emptyDir: {}
