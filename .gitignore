@@ -3,7 +3,7 @@ dist/
 *.db
 *.db-wal
 *.db-shm
-clawguard.yaml
+/clawguard.yaml
 agentgate.yaml
 tokens.enc
 .env
