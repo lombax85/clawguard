@@ -33,6 +33,30 @@ jobs:
           # Give containers time to fully initialize
           sleep 10
 
+      - name: Debug - Check cluster state
+        run: |
+          echo "=== Pods ==="
+          kubectl -n clawguard get pods -o wide
+          echo ""
+          echo "=== Services ==="
+          kubectl -n clawguard get svc
+          echo ""
+          echo "=== ConfigMaps ==="
+          kubectl -n clawguard get configmaps
+          echo ""
+          echo "=== Secrets ==="
+          kubectl -n clawguard get secrets
+          echo ""
+          echo "=== ClawGuard logs (last 50 lines) ==="
+          kubectl -n clawguard logs deploy/client-with-clawguard -c clawguard --tail=50 || true
+          echo ""
+          echo "=== Test DNS resolution from client ==="
+          kubectl -n clawguard exec deploy/client-with-clawguard -c client -- nslookup bearer-api || true
+          kubectl -n clawguard exec deploy/client-with-clawguard -c client -- nslookup json-server || true
+          echo ""
+          echo "=== Test basic curl from client ==="
+          kubectl -n clawguard exec deploy/client-with-clawguard -c client -- curl -v --max-time 5 https://bearer-api/resource -H "Authorization: Bearer dummy-bearer-placeholder" 2>&1 || true
+
       - name: Run Auth Injection Test Suite
         run: |
           kubectl -n clawguard exec deploy/client-with-clawguard -c client -- bash /test-auth.sh
