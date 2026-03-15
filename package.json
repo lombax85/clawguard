@@ -3,6 +3,9 @@
   "version": "0.2.0",
   "description": "Security gateway for OpenClaw agents — CIBA-based auth with Telegram approval",
   "main": "dist/index.js",
+  "bin": {
+    "clawguard": "./dist/cli/index.js"
+  },
   "scripts": {
     "build": "tsc",
     "test": "npm run build && node --test tests/**/*.test.js",
