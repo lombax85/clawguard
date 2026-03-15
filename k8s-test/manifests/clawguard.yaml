@@ -69,13 +69,13 @@ spec:
         - name: client
           image: client
           env:
-            # Client trusts the ClawGuard CA
+            # Client trusts the ClawGuard CA (for MITM certs)
             - name: SSL_CERT_FILE
               value: /certs/ca.crt
             - name: CURL_CA_BUNDLE
               value: /certs/ca.crt
           volumeMounts:
-            - name: trust-bundle
+            - name: client-ca
               mountPath: /certs
               readOnly: true
           command:
@@ -87,6 +87,7 @@ spec:
         - name: clawguard-config
           configMap:
             name: clawguard-config
+        # ClawGuard CA keypair for forging certs
         - name: clawguard-ca
           secret:
             secretName: clawguard-ca
@@ -95,11 +96,19 @@ spec:
                 path: ca.crt
               - key: tls.key
                 path: ca.key
+        # ClawGuard trusts json-server CA for upstream connections
         - name: trust-bundle
-          configMap:
-            name: clawguard-certs
+          secret:
+            secretName: json-server-ca
             items:
-              - key: clawguard-certs.pem
+              - key: tls.crt
+                path: ca.crt
+        # Client trusts ClawGuard CA (the proxy's MITM CA)
+        - name: client-ca
+          secret:
+            secretName: clawguard-ca
+            items:
+              - key: tls.crt
                 path: ca.crt
         - name: data
           emptyDir: {}
