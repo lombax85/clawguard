@@ -8,6 +8,7 @@ import { AuditLogger } from './audit';
 import { createAdminRouter } from './admin';
 import { validateRuntimeUrl } from './security';
 import { rewriteRequestAuth } from './auth-rewrite';
+import { applyPlugin } from './auth-plugins/apply';
 
 /**
  * Validates that the client sent the correct dummy token.
@@ -261,19 +262,41 @@ export function handleHostProxy(
         else if (Array.isArray(value)) forwardHeaders[key] = value.join(', ');
       }
 
-      // Rewrite body for oauth2_client_credentials
       let requestBody = (req.body && Buffer.isBuffer(req.body)) ? req.body : Buffer.alloc(0);
-      const rewritten = rewriteRequestAuth(serviceConfig, req.method, upstreamPath, requestBody, forwardHeaders);
-      requestBody = rewritten.body;
-      Object.assign(forwardHeaders, rewritten.headers);
 
-      if (!rewritten.skipAuthInjection) {
-        if (serviceConfig.auth.type === 'bearer') {
-          forwardHeaders['authorization'] = `Bearer ${serviceConfig.auth.token}`;
-        } else if (serviceConfig.auth.type === 'header' && serviceConfig.auth.headerName) {
-          forwardHeaders[serviceConfig.auth.headerName] = serviceConfig.auth.token;
-        } else if (serviceConfig.auth.type === 'query' && serviceConfig.auth.paramName) {
-          upstreamUrl.searchParams.set(serviceConfig.auth.paramName, serviceConfig.auth.token);
+      // ─── Plugin auth ─────────────────────────────────────────
+      if (serviceConfig.auth.type === 'plugin') {
+        try {
+          const pluginResult = await applyPlugin(
+            serviceName, serviceConfig, forwardHeaders, requestBody,
+            upstreamUrl, req.method, upstreamPath, config.security, serviceConfig.upstream
+          );
+          requestBody = pluginResult.body;
+        } catch (err) {
+          const message = err instanceof Error ? err.message : 'Unknown plugin error';
+          console.error(`❌ Plugin error (host-mode) for ${serviceName}: ${message}`);
+          audit.logRequest({
+            timestamp: new Date().toISOString(), service: serviceName,
+            method: req.method, path: upstreamPath, approved: true,
+            responseStatus: 500, agentIp,
+          });
+          res.status(500).json({ error: `Auth plugin error: ${message}` });
+          return;
+        }
+      } else {
+        // Rewrite body for oauth2_client_credentials
+        const rewritten = rewriteRequestAuth(serviceConfig, req.method, upstreamPath, requestBody, forwardHeaders);
+        requestBody = rewritten.body;
+        Object.assign(forwardHeaders, rewritten.headers);
+
+        if (!rewritten.skipAuthInjection) {
+          if (serviceConfig.auth.type === 'bearer') {
+            forwardHeaders['authorization'] = `Bearer ${serviceConfig.auth.token}`;
+          } else if (serviceConfig.auth.type === 'header' && serviceConfig.auth.headerName) {
+            forwardHeaders[serviceConfig.auth.headerName] = serviceConfig.auth.token;
+          } else if (serviceConfig.auth.type === 'query' && serviceConfig.auth.paramName) {
+            upstreamUrl.searchParams.set(serviceConfig.auth.paramName, serviceConfig.auth.token);
+          }
         }
       }
 
@@ -450,25 +473,46 @@ function handleProxy(
 
       // Rewrite body for oauth2_client_credentials (replaces dummy secrets with real ones)
       let requestBody = (req.body && Buffer.isBuffer(req.body)) ? req.body : Buffer.alloc(0);
-      const rewritten = rewriteRequestAuth(serviceConfig, req.method, upstreamPath, requestBody, forwardHeaders);
-      requestBody = rewritten.body;
-      Object.assign(forwardHeaders, rewritten.headers);
 
-      // Inject auth (skipped for oauth2_client_credentials — script manages its own Bearer token)
-      if (!rewritten.skipAuthInjection) {
-        if (serviceConfig.auth.type === 'bearer') {
-          forwardHeaders['authorization'] = `Bearer ${serviceConfig.auth.token}`;
-        } else if (serviceConfig.auth.type === 'basic' && serviceConfig.auth.username && serviceConfig.auth.password) {
-          const basicAuth = Buffer.from(`${serviceConfig.auth.username}:${serviceConfig.auth.password}`).toString('base64');
-          forwardHeaders['authorization'] = `Basic ${basicAuth}`;
-        } else if (serviceConfig.auth.type === 'url' && serviceConfig.auth.username && serviceConfig.auth.password) {
-          // Inject credentials into URL (for services like Bitbucket that require user:pass@host)
-          upstreamUrl.username = serviceConfig.auth.username;
-          upstreamUrl.password = serviceConfig.auth.password;
-        } else if (serviceConfig.auth.type === 'header' && serviceConfig.auth.headerName) {
-          forwardHeaders[serviceConfig.auth.headerName] = serviceConfig.auth.token;
-        } else if (serviceConfig.auth.type === 'query' && serviceConfig.auth.paramName) {
-          upstreamUrl.searchParams.set(serviceConfig.auth.paramName, serviceConfig.auth.token);
+      // ─── Plugin auth ─────────────────────────────────────────
+      if (serviceConfig.auth.type === 'plugin') {
+        try {
+          const pluginResult = await applyPlugin(
+            serviceName, serviceConfig, forwardHeaders, requestBody,
+            upstreamUrl, req.method, upstreamPath, config.security, serviceConfig.upstream
+          );
+          requestBody = pluginResult.body;
+        } catch (err) {
+          const message = err instanceof Error ? err.message : 'Unknown plugin error';
+          console.error(`❌ Plugin error for ${serviceName}: ${message}`);
+          audit.logRequest({
+            timestamp: new Date().toISOString(), service: serviceName,
+            method: req.method, path: upstreamPath, approved: true,
+            responseStatus: 500, agentIp,
+          });
+          res.status(500).json({ error: `Auth plugin error: ${message}` });
+          return;
+        }
+      } else {
+        const rewritten = rewriteRequestAuth(serviceConfig, req.method, upstreamPath, requestBody, forwardHeaders);
+        requestBody = rewritten.body;
+        Object.assign(forwardHeaders, rewritten.headers);
+
+        // Inject auth (skipped for oauth2_client_credentials — script manages its own Bearer token)
+        if (!rewritten.skipAuthInjection) {
+          if (serviceConfig.auth.type === 'bearer') {
+            forwardHeaders['authorization'] = `Bearer ${serviceConfig.auth.token}`;
+          } else if (serviceConfig.auth.type === 'basic' && serviceConfig.auth.username && serviceConfig.auth.password) {
+            const basicAuth = Buffer.from(`${serviceConfig.auth.username}:${serviceConfig.auth.password}`).toString('base64');
+            forwardHeaders['authorization'] = `Basic ${basicAuth}`;
+          } else if (serviceConfig.auth.type === 'url' && serviceConfig.auth.username && serviceConfig.auth.password) {
+            upstreamUrl.username = serviceConfig.auth.username;
+            upstreamUrl.password = serviceConfig.auth.password;
+          } else if (serviceConfig.auth.type === 'header' && serviceConfig.auth.headerName) {
+            forwardHeaders[serviceConfig.auth.headerName] = serviceConfig.auth.token;
+          } else if (serviceConfig.auth.type === 'query' && serviceConfig.auth.paramName) {
+            upstreamUrl.searchParams.set(serviceConfig.auth.paramName, serviceConfig.auth.token);
+          }
         }
       }
 

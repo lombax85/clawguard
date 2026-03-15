@@ -89,6 +89,63 @@ services:
   #       - match: { method: GET }
   #         action: auto_approve
 
+  # ─── Auth Plugin (custom auth logic) ───────────────────
+  # For APIs that need custom auth flows (token refresh, HMAC signing, etc.)
+  # Plugins can modify headers, body, and even override the upstream URL.
+  # Built-in: 'echo' (logs and passes through, for testing)
+  # Custom: point to a .js file that exports createPlugin()
+  # echo-test:
+  #   upstream: https://httpbin.org
+  #   auth:
+  #     type: plugin
+  #     token: "unused"
+  #     pluginPath: echo                          # built-in plugin name
+  #     pluginConfig:                             # arbitrary config passed to plugin
+  #       injectHeader: x-custom-auth
+  #       injectValue: "my-secret-value"
+  #   policy:
+  #     default: auto_approve
+  #
+  # custom-service:
+  #   upstream: https://api.example.com
+  #   auth:
+  #     type: plugin
+  #     token: "unused"
+  #     pluginPath: ./my-plugins/custom-auth.js   # path to custom plugin module
+  #     pluginConfig:
+  #       apiKey: "your-api-key"
+  #       refreshUrl: "https://auth.example.com/token"
+  #   policy:
+  #     default: require_approval
+
+  # ─── OAuth2 Authorization Code (e.g. Microsoft Graph) ──
+  # For APIs using OAuth2 Authorization Code Flow with PKCE.
+  # Tokens are stored in data/plugins/oauth2-authcode/tokens.json
+  # Run `clawguard auth msgraph` to complete the initial authorization.
+  # msgraph:
+  #   upstream: https://graph.microsoft.com
+  #   auth:
+  #     type: plugin
+  #     token: "unused"
+  #     pluginPath: oauth2-authcode
+  #     pluginConfig:
+  #       authorizeUrl: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+  #       tokenUrl: "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+  #       clientId: "your-app-client-id"
+  #       # clientSecret: "your-client-secret"   # omit for public clients with PKCE
+  #       redirectUri: "http://localhost:9999/callback"
+  #       scopes:
+  #         - openid
+  #         - profile
+  #         - User.Read
+  #         - Mail.Read
+  #       usePkce: true
+  #   policy:
+  #     default: require_approval
+  #     rules:
+  #       - match: { method: GET }
+  #         action: auto_approve
+
   # ─── Anthropic (Claude API) ─────────────────────────────
   anthropic:
     upstream: https://api.anthropic.com
@@ -128,6 +185,7 @@ security:
     - api.openai.com
     - api.anthropic.com
     - api.stripe.com
+    - graph.microsoft.com
     - slack.com
   blockPrivateIPs: true
   followRedirects: false

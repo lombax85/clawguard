@@ -8,6 +8,7 @@ import { validateAllUpstreams, validateUpstreamUrl } from './security';
 import { CertManager } from './cert-manager';
 import { attachMitmProxy } from './mitm-proxy';
 import { startTransparentProxy } from './transparent-proxy';
+import { loadPlugin } from './auth-plugins/loader';
 
 const CONFIG_PATH = process.env['CLAWGUARD_CONFIG'] || process.env['AGENTGATE_CONFIG'] || path.join(process.cwd(), 'clawguard.yaml');
 
@@ -61,6 +62,20 @@ async function main() {
   // Create and start proxy
   const app = createProxy(config, approvalManager, audit);
   const port = config.server.port;
+
+  // Load auth plugins BEFORE accepting requests
+  const PLUGIN_DATA_DIR = path.resolve('data/plugins');
+  for (const [name, svc] of Object.entries(config.services)) {
+    if (svc.auth.type === 'plugin' && svc.auth.pluginPath) {
+      try {
+        await loadPlugin(name, svc.auth.pluginPath, svc.auth.pluginConfig || {}, PLUGIN_DATA_DIR);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Unknown error';
+        console.error(`❌ Failed to load plugin for ${name}: ${message}`);
+        process.exit(1);
+      }
+    }
+  }
 
   const server = app.listen(port, () => {
     console.log(`\n🚀 ClawGuard proxy running on http://localhost:${port}`);
