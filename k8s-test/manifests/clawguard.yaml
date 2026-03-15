@@ -1,0 +1,105 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: client-with-clawguard
+  labels:
+    app: client-with-clawguard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: client-with-clawguard
+  template:
+    metadata:
+      labels:
+        app: client-with-clawguard
+    spec:
+      # ─── Init container: iptables redirect ───────────────────
+      initContainers:
+        - name: iptables-init
+          image: alpine:latest
+          securityContext:
+            capabilities:
+              add: ["NET_ADMIN"]
+          command:
+            - sh
+            - -c
+            - |
+              apk add --no-cache iptables
+              # Redirect outbound HTTP/HTTPS to ClawGuard transparent proxy
+              # Exclude traffic from UID 1000 (clawguard) to prevent loops
+              iptables -t nat -A OUTPUT -p tcp --dport 80 -m owner ! --uid-owner 1000 -j REDIRECT --to-port 8080
+              iptables -t nat -A OUTPUT -p tcp --dport 443 -m owner ! --uid-owner 1000 -j REDIRECT --to-port 8443
+              echo "iptables rules applied:"
+              iptables -t nat -L OUTPUT -n -v
+
+      containers:
+        # ─── ClawGuard sidecar ─────────────────────────────────
+        - name: clawguard
+          image: lombax85/clawguard
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+          env:
+            - name: CLAWGUARD_CONFIG
+              value: /config/clawguard.yaml
+            - name: NODE_EXTRA_CA_CERTS
+              value: /certs/ca.crt
+          ports:
+            - containerPort: 8000
+              name: api
+            - containerPort: 8080
+              name: http-proxy
+            - containerPort: 8443
+              name: https-proxy
+          volumeMounts:
+            - name: clawguard-config
+              mountPath: /config
+              readOnly: true
+            - name: clawguard-ca
+              mountPath: /app/data/ca
+              readOnly: true
+            - name: trust-bundle
+              mountPath: /certs
+              readOnly: true
+            - name: data
+              mountPath: /app/data
+
+        # ─── Client container (for tests) ──────────────────────
+        - name: client
+          image: client
+          env:
+            # Client trusts the ClawGuard CA
+            - name: SSL_CERT_FILE
+              value: /certs/ca.crt
+            - name: CURL_CA_BUNDLE
+              value: /certs/ca.crt
+          volumeMounts:
+            - name: trust-bundle
+              mountPath: /certs
+              readOnly: true
+          command:
+            - /bin/sh
+            - -c
+            - /entrypoint.sh
+
+      volumes:
+        - name: clawguard-config
+          configMap:
+            name: clawguard-config
+        - name: clawguard-ca
+          secret:
+            secretName: clawguard-ca
+            items:
+              - key: tls.crt
+                path: ca.crt
+              - key: tls.key
+                path: ca.key
+        - name: trust-bundle
+          configMap:
+            name: clawguard-certs
+            items:
+              - key: clawguard-certs.pem
+                path: ca.crt
+        - name: data
+          emptyDir: {}
