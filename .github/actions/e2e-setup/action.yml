@@ -1,0 +1,40 @@
+name: "E2E Cluster Setup"
+description: "Set up Minikube + Skaffold and deploy the clawguard stack"
+inputs:
+  wait_deployments:
+    description: "Deployments to wait for (space-separated)"
+    required: true
+  wait_jobs:
+    description: "Jobs to wait for (space-separated)"
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Start Minikube
+      uses: medyagh/setup-minikube@latest
+
+    - name: Install Skaffold
+      shell: bash
+      run: |
+        curl -Lo skaffold https://storage.googleapis.com/skaffold/releases/latest/skaffold-linux-amd64
+        sudo install skaffold /usr/local/bin/
+
+    - name: Build and Deploy with Skaffold
+      shell: bash
+      run: |
+        eval $(minikube docker-env)
+        skaffold run
+
+    - name: Wait for Deployments
+      shell: bash
+      run: |
+        for job in ${{ inputs.wait_jobs }}; do
+          echo "Waiting for job/$job..."
+          kubectl -n clawguard wait --for=condition=complete job/$job --timeout=120s
+        done
+        for deploy in ${{ inputs.wait_deployments }}; do
+          echo "Waiting for deployment/$deploy..."
+          kubectl -n clawguard rollout status deployment/$deploy --timeout=180s
+        done
+        sleep 10
