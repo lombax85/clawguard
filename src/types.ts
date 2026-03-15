@@ -11,7 +11,7 @@ export interface PolicyRule {
 export interface ServiceConfig {
   upstream: string;
   auth: {
-    type: 'bearer' | 'header' | 'query' | 'basic' | 'url' | 'oauth2_client_credentials' | 'body_json' | 'plugin';
+    type: 'bearer' | 'header' | 'query' | 'basic' | 'url' | 'oauth2_client_credentials' | 'oauth2_authorization_code' | 'body_json' | 'plugin';
     token: string;
     dummyToken?: string;   // if set, client must send this dummy value; clawguard validates it before injecting the real token
     headerName?: string;   // for type: 'header'
@@ -22,6 +22,12 @@ export interface ServiceConfig {
     tokenPath?: string;    // e.g. '/token' — the path where client sends credentials
     clientId?: string;
     clientSecret?: string;
+    // for type: 'oauth2_authorization_code'
+    authorizeUrl?: string;   // e.g. 'https://login.microsoftonline.com/.../authorize'
+    tokenUrl?: string;       // e.g. 'https://login.microsoftonline.com/.../token'
+    redirectUri?: string;    // e.g. 'http://localhost:9999/callback'
+    scopes?: string[];       // e.g. ['openid', 'profile', 'User.Read']
+    usePkce?: boolean;       // enable PKCE for public clients (no clientSecret)
     // for type: 'body_json' — inject/overwrite fields in the JSON request body
     fields?: Record<string, string>;
     // for type: 'plugin' — delegate auth to a custom plugin

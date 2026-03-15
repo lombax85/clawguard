@@ -385,3 +385,211 @@ test('applyPlugin defensive copy prevents side-channel mutation', async () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+// ─── oauth2-authcode.ts tests ────────────────────────────────
+
+const {
+  createPlugin: createOAuth2Plugin,
+} = require('../dist/auth-plugins/oauth2-authcode');
+
+test('oauth2-authcode createPlugin returns valid IAuthPlugin', () => {
+  const plugin = createOAuth2Plugin();
+  assert.equal(plugin.name, 'oauth2-authcode');
+  assert.equal(typeof plugin.init, 'function');
+  assert.equal(typeof plugin.rewriteRequest, 'function');
+});
+
+test('oauth2-authcode throws when no tokens exist', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-test-'));
+  try {
+    const plugin = createOAuth2Plugin();
+    await plugin.init(tmpDir, {});
+
+    const ctx = {
+      serviceName: 'test',
+      method: 'GET',
+      path: '/me',
+      headers: {},
+      body: Buffer.alloc(0),
+      upstreamUrl: 'https://graph.microsoft.com/v1.0/me',
+      dataDir: tmpDir,
+      config: {},
+    };
+
+    await assert.rejects(
+      () => plugin.rewriteRequest(ctx),
+      /Run clawguard auth/
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('oauth2-authcode injects Bearer token when tokens are valid', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-test-'));
+  try {
+    // Write a valid token file
+    const tokens = {
+      access_token: 'my-access-token',
+      refresh_token: 'my-refresh-token',
+      expires_at: Math.floor(Date.now() / 1000) + 3600, // 1 hour from now
+      token_type: 'Bearer',
+    };
+    fs.writeFileSync(path.join(tmpDir, 'tokens.json'), JSON.stringify(tokens));
+
+    const plugin = createOAuth2Plugin();
+    await plugin.init(tmpDir, {});
+
+    const ctx = {
+      serviceName: 'test',
+      method: 'GET',
+      path: '/me',
+      headers: { 'content-type': 'application/json' },
+      body: Buffer.alloc(0),
+      upstreamUrl: 'https://graph.microsoft.com/v1.0/me',
+      dataDir: tmpDir,
+      config: {},
+    };
+
+    const result = await plugin.rewriteRequest(ctx);
+    assert.equal(result.headers['authorization'], 'Bearer my-access-token');
+    assert.equal(result.headers['content-type'], 'application/json');
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('oauth2-authcode preserves custom token_type', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-test-'));
+  try {
+    const tokens = {
+      access_token: 'my-token',
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+      token_type: 'DPoP',
+    };
+    fs.writeFileSync(path.join(tmpDir, 'tokens.json'), JSON.stringify(tokens));
+
+    const plugin = createOAuth2Plugin();
+    await plugin.init(tmpDir, {});
+
+    const ctx = {
+      serviceName: 'test',
+      method: 'GET',
+      path: '/me',
+      headers: {},
+      body: Buffer.alloc(0),
+      upstreamUrl: 'https://example.com/me',
+      dataDir: tmpDir,
+      config: {},
+    };
+
+    const result = await plugin.rewriteRequest(ctx);
+    assert.equal(result.headers['authorization'], 'DPoP my-token');
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('oauth2-authcode throws when token expired and no refresh_token', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-test-'));
+  try {
+    const tokens = {
+      access_token: 'expired-token',
+      expires_at: Math.floor(Date.now() / 1000) - 120, // expired 2 min ago
+    };
+    fs.writeFileSync(path.join(tmpDir, 'tokens.json'), JSON.stringify(tokens));
+
+    const plugin = createOAuth2Plugin();
+    await plugin.init(tmpDir, {});
+
+    const ctx = {
+      serviceName: 'test',
+      method: 'GET',
+      path: '/me',
+      headers: {},
+      body: Buffer.alloc(0),
+      upstreamUrl: 'https://example.com/me',
+      dataDir: tmpDir,
+      config: {},
+    };
+
+    await assert.rejects(
+      () => plugin.rewriteRequest(ctx),
+      /no refresh token available/
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('oauth2-authcode treats token without expires_at as valid', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-test-'));
+  try {
+    const tokens = {
+      access_token: 'no-expiry-token',
+    };
+    fs.writeFileSync(path.join(tmpDir, 'tokens.json'), JSON.stringify(tokens));
+
+    const plugin = createOAuth2Plugin();
+    await plugin.init(tmpDir, {});
+
+    const ctx = {
+      serviceName: 'test',
+      method: 'GET',
+      path: '/me',
+      headers: {},
+      body: Buffer.alloc(0),
+      upstreamUrl: 'https://example.com/me',
+      dataDir: tmpDir,
+      config: {},
+    };
+
+    const result = await plugin.rewriteRequest(ctx);
+    assert.equal(result.headers['authorization'], 'Bearer no-expiry-token');
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('oauth2-authcode handles corrupt tokens.json gracefully', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-test-'));
+  try {
+    fs.writeFileSync(path.join(tmpDir, 'tokens.json'), 'not valid json!!!');
+
+    const plugin = createOAuth2Plugin();
+    await plugin.init(tmpDir, {});
+
+    const ctx = {
+      serviceName: 'test',
+      method: 'GET',
+      path: '/me',
+      headers: {},
+      body: Buffer.alloc(0),
+      upstreamUrl: 'https://example.com/me',
+      dataDir: tmpDir,
+      config: {},
+    };
+
+    // Should throw "no tokens" error since parsing failed
+    await assert.rejects(
+      () => plugin.rewriteRequest(ctx),
+      /Run clawguard auth/
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('oauth2-authcode loads via plugin loader as built-in', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-test-'));
+  try {
+    const plugin = await loadPlugin('test-oauth2', 'oauth2-authcode', {}, tmpDir);
+    assert.equal(plugin.name, 'oauth2-authcode');
+    assert.equal(typeof plugin.rewriteRequest, 'function');
+
+    const retrieved = getPlugin('test-oauth2');
+    assert.equal(retrieved, plugin);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
