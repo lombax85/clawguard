@@ -10,6 +10,7 @@ import { CertManager } from './cert-manager';
 import { validateRuntimeUrl, validateUpstreamUrl, resolveAndCheckPrivateIP } from './security';
 import { rewriteRequestAuth } from './auth-rewrite';
 import { TelegramNotifier } from './telegram';
+import { applyPlugin } from './auth-plugins/apply';
 
 // ─── Discovery host tracking ─────────────────────────────────
 
@@ -392,37 +393,59 @@ function handleMitmRequest(
       else if (Array.isArray(value)) forwardHeaders[key] = value.join(', ');
     }
 
-    // Rewrite body for oauth2_client_credentials
     let requestBody: Buffer = body;
-    const rewritten = rewriteRequestAuth(serviceConfig, method, requestPath, requestBody, forwardHeaders);
-    requestBody = rewritten.body as Buffer;
-    Object.assign(forwardHeaders, rewritten.headers);
 
-    // Inject auth (skipped for oauth2_client_credentials)
-    if (!rewritten.skipAuthInjection) {
-      if (serviceConfig.auth.type === 'bearer') {
-        forwardHeaders['authorization'] = `Bearer ${serviceConfig.auth.token}`;
-        console.log(`   🔑 Auth injected: type=bearer token=${serviceConfig.auth.token.substring(0, 4)}****`);
-      } else if (serviceConfig.auth.type === 'basic' && serviceConfig.auth.username && serviceConfig.auth.password) {
-        const basicAuth = Buffer.from(`${serviceConfig.auth.username}:${serviceConfig.auth.password}`).toString('base64');
-        forwardHeaders['authorization'] = `Basic ${basicAuth}`;
-        console.log(`   🔑 Auth injected: type=basic user=${serviceConfig.auth.username} pass=${serviceConfig.auth.password.substring(0, 4)}****`);
-      } else if (serviceConfig.auth.type === 'url' && serviceConfig.auth.username && serviceConfig.auth.password) {
-        // Inject credentials into URL (for services like Bitbucket that require user:pass@host)
-        upstreamUrl.username = serviceConfig.auth.username;
-        upstreamUrl.password = serviceConfig.auth.password;
-        console.log(`   🔑 Auth injected: type=url user=${serviceConfig.auth.username} pass=${serviceConfig.auth.password.substring(0, 4)}****`);
-      } else if (serviceConfig.auth.type === 'header' && serviceConfig.auth.headerName) {
-        forwardHeaders[serviceConfig.auth.headerName] = serviceConfig.auth.token;
-        console.log(`   🔑 Auth injected: type=header name=${serviceConfig.auth.headerName} token=${serviceConfig.auth.token.substring(0, 8)}****`);
-      } else if (serviceConfig.auth.type === 'query' && serviceConfig.auth.paramName) {
-        upstreamUrl.searchParams.set(serviceConfig.auth.paramName, serviceConfig.auth.token);
-        console.log(`   🔑 Auth injected: type=query param=${serviceConfig.auth.paramName}`);
-      } else {
-        console.log(`   ⚠️  Auth NOT injected: type=${serviceConfig.auth.type} username=${serviceConfig.auth.username || 'N/A'} password=${serviceConfig.auth.password ? 'SET' : 'MISSING'}`);
+    // ─── Plugin auth ─────────────────────────────────────────
+    if (serviceConfig.auth.type === 'plugin') {
+      try {
+        const pluginResult = await applyPlugin(
+          serviceName, serviceConfig, forwardHeaders, requestBody,
+          upstreamUrl, method, requestPath, config.security, serviceConfig.upstream
+        );
+        requestBody = pluginResult.body;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Unknown plugin error';
+        console.error(`❌ Plugin error (MITM) for ${serviceName}: ${message}`);
+        audit.logRequest({
+          timestamp: new Date().toISOString(), service: serviceName,
+          method, path: requestPath, approved: true,
+          responseStatus: 500, agentIp: clientIp,
+        });
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: `Auth plugin error: ${message}` }));
+        return;
       }
     } else {
-      console.log(`   ⏭️  Auth skipped (skipAuthInjection=true)`);
+      // Rewrite body for oauth2_client_credentials
+      const rewritten = rewriteRequestAuth(serviceConfig, method, requestPath, requestBody, forwardHeaders);
+      requestBody = rewritten.body as Buffer;
+      Object.assign(forwardHeaders, rewritten.headers);
+
+      // Inject auth (skipped for oauth2_client_credentials)
+      if (!rewritten.skipAuthInjection) {
+        if (serviceConfig.auth.type === 'bearer') {
+          forwardHeaders['authorization'] = `Bearer ${serviceConfig.auth.token}`;
+          console.log(`   🔑 Auth injected: type=bearer token=${serviceConfig.auth.token.substring(0, 4)}****`);
+        } else if (serviceConfig.auth.type === 'basic' && serviceConfig.auth.username && serviceConfig.auth.password) {
+          const basicAuth = Buffer.from(`${serviceConfig.auth.username}:${serviceConfig.auth.password}`).toString('base64');
+          forwardHeaders['authorization'] = `Basic ${basicAuth}`;
+          console.log(`   🔑 Auth injected: type=basic user=${serviceConfig.auth.username} pass=${serviceConfig.auth.password.substring(0, 4)}****`);
+        } else if (serviceConfig.auth.type === 'url' && serviceConfig.auth.username && serviceConfig.auth.password) {
+          upstreamUrl.username = serviceConfig.auth.username;
+          upstreamUrl.password = serviceConfig.auth.password;
+          console.log(`   🔑 Auth injected: type=url user=${serviceConfig.auth.username} pass=${serviceConfig.auth.password.substring(0, 4)}****`);
+        } else if (serviceConfig.auth.type === 'header' && serviceConfig.auth.headerName) {
+          forwardHeaders[serviceConfig.auth.headerName] = serviceConfig.auth.token;
+          console.log(`   🔑 Auth injected: type=header name=${serviceConfig.auth.headerName} token=${serviceConfig.auth.token.substring(0, 8)}****`);
+        } else if (serviceConfig.auth.type === 'query' && serviceConfig.auth.paramName) {
+          upstreamUrl.searchParams.set(serviceConfig.auth.paramName, serviceConfig.auth.token);
+          console.log(`   🔑 Auth injected: type=query param=${serviceConfig.auth.paramName}`);
+        } else {
+          console.log(`   ⚠️  Auth NOT injected: type=${serviceConfig.auth.type} username=${serviceConfig.auth.username || 'N/A'} password=${serviceConfig.auth.password ? 'SET' : 'MISSING'}`);
+        }
+      } else {
+        console.log(`   ⏭️  Auth skipped (skipAuthInjection=true)`);
+      }
     }
 
     forwardHeaders['host'] = upstreamUrl.host;

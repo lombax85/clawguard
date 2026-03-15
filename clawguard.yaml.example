@@ -84,6 +84,35 @@ services:
   #       - match: { method: GET }
   #         action: auto_approve
 
+  # ─── Auth Plugin (custom auth logic) ───────────────────
+  # For APIs that need custom auth flows (token refresh, HMAC signing, etc.)
+  # Plugins can modify headers, body, and even override the upstream URL.
+  # Built-in: 'echo' (logs and passes through, for testing)
+  # Custom: point to a .js file that exports createPlugin()
+  # echo-test:
+  #   upstream: https://httpbin.org
+  #   auth:
+  #     type: plugin
+  #     token: "unused"
+  #     pluginPath: echo                          # built-in plugin name
+  #     pluginConfig:                             # arbitrary config passed to plugin
+  #       injectHeader: x-custom-auth
+  #       injectValue: "my-secret-value"
+  #   policy:
+  #     default: auto_approve
+  #
+  # custom-service:
+  #   upstream: https://api.example.com
+  #   auth:
+  #     type: plugin
+  #     token: "unused"
+  #     pluginPath: ./my-plugins/custom-auth.js   # path to custom plugin module
+  #     pluginConfig:
+  #       apiKey: "your-api-key"
+  #       refreshUrl: "https://auth.example.com/token"
+  #   policy:
+  #     default: require_approval
+
   # ─── Anthropic (Claude API) ─────────────────────────────
   anthropic:
     upstream: https://api.anthropic.com
