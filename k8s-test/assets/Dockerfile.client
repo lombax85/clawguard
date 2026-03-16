@@ -3,5 +3,6 @@ RUN apk add curl bash
 WORKDIR /data
 COPY entrypoint.sh /
 COPY test-auth.sh /test-auth.sh
-RUN chmod +x /test-auth.sh
+COPY test-vault.sh /test-vault.sh
+RUN chmod +x /test-auth.sh /test-vault.sh
 CMD ["/bin/sh", "-c", "/entrypoint.sh"]

@@ -1,0 +1,20 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: clawguard
+configMapGenerator:
+  - name: clawguard-config
+    files:
+      - clawguard.yaml
+  - name: clawguard-vault-config
+    files:
+      - clawguard-vault.yaml
+  - name: clawguard-vault-k8s-config
+    files:
+      - clawguard-vault-k8s.yaml
+  - name: iptables-init-script
+    files:
+      - iptables-init.sh
+  - name: json-server-config
+    files:
+      - db.json
+      - routes.json

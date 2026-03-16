@@ -17,6 +17,11 @@ services:
   # ─── GitHub (the real reason you need ClawGuard) ────────
   # Imagine a prompt injection tries: DELETE /repos/you/important-repo
   # Without ClawGuard: repo deleted. With ClawGuard: you tap Deny.
+  #
+  # Token can be a plain string or a secret reference:
+  #   "ghp_your-github-token"                  -> static value
+  #   "vault:secret/data/github#token"         -> HashiCorp Vault KV v2
+  #   "vault:secret/github#token"              -> HashiCorp Vault KV v1
   github:
     upstream: https://api.github.com
     auth:
@@ -213,3 +218,29 @@ proxy:
   caDir: ./data/ca              # CA cert/key stored here (auto-generated on first run)
   discovery: false              # enable discovery handling for unknown hosts
   discoveryPolicy: block        # block (default) | silent_allow (explicit opt-in)
+
+# ─── Secret providers ────────────────────────────────────────
+# External secret backends for resolving token references.
+# Use "vault:path#field" syntax in service auth.token values.
+#
+# Environment variable overrides (useful for CI/CD and testing):
+#   VAULT_ADDR          -> secrets.vault.address
+#   VAULT_TOKEN         -> secrets.vault.auth.token (also forces method: token)
+#   VAULT_NAMESPACE     -> secrets.vault.namespace
+#   VAULT_SKIP_VERIFY   -> secrets.vault.tlsSkipVerify (set to "true")
+#   VAULT_K8S_ROLE      -> secrets.vault.auth.role
+#   VAULT_K8S_MOUNT_PATH -> secrets.vault.auth.mountPath
+#
+# secrets:
+#   vault:
+#     address: https://vault.example.com
+#     # namespace: admin/team1               # Vault Enterprise namespace (optional)
+#     # tlsSkipVerify: false                 # skip TLS verification (default: false)
+#     # cacheTTL: 300                        # seconds to cache secrets (default: 300)
+#     auth:
+#       method: token                        # "token" or "kubernetes"
+#       token: "${VAULT_TOKEN}"              # for method: token
+#       # For Kubernetes auth (in-pod):
+#       # method: kubernetes
+#       # role: clawguard                    # Vault role bound to the SA
+#       # mountPath: auth/kubernetes          # default

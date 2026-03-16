@@ -1,0 +1,39 @@
+name: "E2E: Transparent Proxy"
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  e2e-transparent-proxy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Setup E2E Cluster
+        uses: ./.github/actions/e2e-setup
+        with:
+          wait_deployments: "json-server client-with-clawguard"
+
+      - name: "Test: Transparent Proxy Auth Injection"
+        run: |
+          kubectl -n clawguard exec deploy/client-with-clawguard -c client -- bash /test-auth.sh
+
+      - name: Dump Logs on Failure
+        if: failure()
+        run: |
+          echo "=== ClawGuard logs ==="
+          kubectl -n clawguard logs deploy/client-with-clawguard -c clawguard || true
+          echo ""
+          echo "=== json-server logs ==="
+          kubectl -n clawguard logs deploy/json-server || true
+          echo ""
+          echo "=== Pod status ==="
+          kubectl -n clawguard get pods -o wide || true
+          echo ""
+          echo "=== Events ==="
+          kubectl -n clawguard get events --sort-by='.lastTimestamp' || true

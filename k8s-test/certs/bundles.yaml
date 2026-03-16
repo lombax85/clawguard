@@ -1,0 +1,17 @@
+apiVersion: trust.cert-manager.io/v1alpha1
+kind: Bundle
+metadata:
+  name: clawguard-trust-bundle
+spec:
+  sources:
+    # ClawGuard MITM CA — clients trust this to accept forged certs
+    - secret:
+        name: clawguard-ca
+        key: tls.crt
+    # json-server CA — ClawGuard trusts this for upstream TLS
+    - secret:
+        name: json-server-ca
+        key: tls.crt
+  target:
+    configMap:
+      key: bundle.pem
