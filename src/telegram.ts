@@ -11,13 +11,22 @@ export class TelegramNotifier {
   private pendingCallbacks: Map<string, ApprovalCallback> = new Map();
   private pendingTexts: Map<string, string> = new Map(); // requestId → original message text
   private paired: boolean = false;
+  private restartingPolling = false;
 
   constructor(config: TelegramConfig, audit: AuditLogger) {
     this.config = config;
     this.audit = audit;
-    this.bot = new TelegramBot(config.botToken, { polling: true });
+    this.bot = new TelegramBot(config.botToken, {
+      polling: {
+        autoStart: true,
+        interval: 1000,
+        params: { timeout: 10 },
+      },
+    });
+    this.setupPollingDiagnostics();
     this.setupCallbackHandler();
     this.setupPairingHandler();
+    this.startPollingWatchdog();
 
     // Check if the configured chatId is already paired
     if (config.pairing.enabled) {
@@ -32,6 +41,74 @@ export class TelegramNotifier {
       this.paired = true; // pairing disabled = always paired
       console.log('📱 Telegram notifier started (pairing disabled)');
     }
+  }
+
+  // ─── Polling diagnostics & watchdog ──────────────────────
+
+  private setupPollingDiagnostics(): void {
+    this.bot.on('polling_error', (err) => {
+      console.error('❌ Telegram polling_error:', err instanceof Error ? err.stack || err.message : err);
+    });
+    this.bot.on('error', (err) => {
+      console.error('❌ Telegram error:', err instanceof Error ? err.stack || err.message : err);
+    });
+    this.bot.on('webhook_error', (err) => {
+      console.error('❌ Telegram webhook_error:', err instanceof Error ? err.stack || err.message : err);
+    });
+  }
+
+  private startPollingWatchdog(): void {
+    // Watchdog based on polling_error count, not idle time
+    // Idle time is unreliable: no messages for 60s is perfectly normal
+    let consecutiveErrors = 0;
+    const MAX_CONSECUTIVE_ERRORS = 3;
+    const RESET_AFTER_MS = 60_000;
+    let lastErrorAt = 0;
+
+    this.bot.on('polling_error', async () => {
+      const now = Date.now();
+      // Reset counter if last error was long ago
+      if (now - lastErrorAt > RESET_AFTER_MS) {
+        consecutiveErrors = 0;
+      }
+      lastErrorAt = now;
+      consecutiveErrors++;
+
+      if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS && !this.restartingPolling) {
+        this.restartingPolling = true;
+        console.warn(`⚠️ ${consecutiveErrors} consecutive polling errors — restarting polling`);
+
+        try {
+          await this.bot.stopPolling({ cancel: true });
+        } catch (err) {
+          console.error('❌ Telegram stopPolling error:', err instanceof Error ? err.stack || err.message : err);
+        }
+
+        try {
+          await this.bot.startPolling({ restart: true });
+          consecutiveErrors = 0;
+          console.log('✅ Telegram polling restarted by watchdog');
+        } catch (err) {
+          console.error('❌ Telegram startPolling error:', err instanceof Error ? err.stack || err.message : err);
+        } finally {
+          this.restartingPolling = false;
+        }
+      }
+    });
+  }
+
+  clearPendingRequest(requestId: string): void {
+    this.pendingCallbacks.delete(requestId);
+    this.pendingTexts.delete(requestId);
+  }
+
+  private formatCallbackError(err: unknown): string {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Treat stale callback errors as benign (expected after restart or timeout)
+    if (msg.includes('query is too old') || msg.includes('query ID is invalid')) {
+      return `(stale callback, safe to ignore) ${msg}`;
+    }
+    return err instanceof Error ? err.stack || err.message : msg;
   }
 
   // ─── Pairing system ───────────────────────────────────────
@@ -87,78 +164,106 @@ export class TelegramNotifier {
 
       // Verify the user is paired
       if (this.config.pairing.enabled && !this.audit.isPairedUser(chatId)) {
-        await this.bot.answerCallbackQuery(query.id, { text: '❌ Not paired. Send /pair <secret> first.' });
+        try {
+          await this.bot.answerCallbackQuery(query.id, { text: '❌ Not paired. Send /pair <secret> first.' });
+        } catch (err) {
+          console.warn(`⚠️ Telegram callback ack error (not paired): ${this.formatCallbackError(err)}`);
+        }
         return;
       }
 
       const [action, requestId] = query.data.split(':');
       const callback = this.pendingCallbacks.get(requestId);
 
+      console.log(`📲 Telegram callback: action=${action} requestId=${requestId} chatId=${chatId}`);
+
       if (!callback) {
-        await this.bot.answerCallbackQuery(query.id, { text: '⏰ Request expired' });
+        try {
+          await this.bot.answerCallbackQuery(query.id, { text: '⏰ Request expired' });
+        } catch (err) {
+          console.warn(`⚠️ Telegram callback ack error (expired): ${this.formatCallbackError(err)}`);
+        }
         return;
       }
 
       const userName = query.from.first_name || query.from.username || 'unknown';
       const originalText = this.pendingTexts.get(requestId) || '';
       const editOpts = { chat_id: query.message.chat.id, message_id: query.message.message_id, parse_mode: 'Markdown' as const };
+      let approved = false;
+      let ttlSeconds = 0;
+      let ackText = '⚠️ Unknown action';
+      let finalText = `${originalText}\n\n⚠️ *Unknown action* by ${userName}`;
 
-      try {
-        switch (action) {
-          case 'approve_once':
-            callback(true, 1, userName);
-            await this.bot.answerCallbackQuery(query.id, { text: '✅ Approved once' });
-            await this.bot.editMessageText(`${originalText}\n\n✅ *Approved once* by ${userName}`, editOpts);
-            break;
-
-          case 'approve_15m':
-            callback(true, 900, userName);
-            await this.bot.answerCallbackQuery(query.id, { text: '✅ Approved for 15 minutes' });
-            await this.bot.editMessageText(`${originalText}\n\n✅ *Approved for 15min* by ${userName}`, editOpts);
-            break;
-
-          case 'approve_1h':
-            callback(true, 3600, userName);
-            await this.bot.answerCallbackQuery(query.id, { text: '✅ Approved for 1 hour' });
-            await this.bot.editMessageText(`${originalText}\n\n✅ *Approved for 1h* by ${userName}`, editOpts);
-            break;
-
-          case 'approve_8h':
-            callback(true, 28800, userName);
-            await this.bot.answerCallbackQuery(query.id, { text: '✅ Approved for 8 hours' });
-            await this.bot.editMessageText(`${originalText}\n\n✅ *Approved for 8h* by ${userName}`, editOpts);
-            break;
-
-          case 'approve_24h':
-            callback(true, 86400, userName);
-            await this.bot.answerCallbackQuery(query.id, { text: '✅ Approved for 24 hours' });
-            await this.bot.editMessageText(`${originalText}\n\n✅ *Approved for 24h* by ${userName}`, editOpts);
-            break;
-
-          case 'approve_1w':
-            callback(true, 604800, userName);
-            await this.bot.answerCallbackQuery(query.id, { text: '✅ Approved for 1 week' });
-            await this.bot.editMessageText(`${originalText}\n\n✅ *Approved for 1 week* by ${userName}`, editOpts);
-            break;
-
-          case 'approve_forever':
-            callback(true, 315360000, userName); // 10 years ≈ forever
-            await this.bot.answerCallbackQuery(query.id, { text: '✅ Approved forever' });
-            await this.bot.editMessageText(`${originalText}\n\n✅ *Approved forever* by ${userName}`, editOpts);
-            break;
-
-          case 'deny':
-            callback(false, 0, userName);
-            await this.bot.answerCallbackQuery(query.id, { text: '❌ Denied' });
-            await this.bot.editMessageText(`${originalText}\n\n❌ *Denied* by ${userName}`, editOpts);
-            break;
-        }
-      } catch (err) {
-        console.error(`❌ Telegram callback error: ${err instanceof Error ? err.message : err}`);
+      switch (action) {
+        case 'approve_once':
+          approved = true;
+          ttlSeconds = 1;
+          ackText = '✅ Approved once';
+          finalText = `${originalText}\n\n✅ *Approved once* by ${userName}`;
+          break;
+        case 'approve_15m':
+          approved = true;
+          ttlSeconds = 900;
+          ackText = '✅ Approved for 15 minutes';
+          finalText = `${originalText}\n\n✅ *Approved for 15min* by ${userName}`;
+          break;
+        case 'approve_1h':
+          approved = true;
+          ttlSeconds = 3600;
+          ackText = '✅ Approved for 1 hour';
+          finalText = `${originalText}\n\n✅ *Approved for 1h* by ${userName}`;
+          break;
+        case 'approve_8h':
+          approved = true;
+          ttlSeconds = 28800;
+          ackText = '✅ Approved for 8 hours';
+          finalText = `${originalText}\n\n✅ *Approved for 8h* by ${userName}`;
+          break;
+        case 'approve_24h':
+          approved = true;
+          ttlSeconds = 86400;
+          ackText = '✅ Approved for 24 hours';
+          finalText = `${originalText}\n\n✅ *Approved for 24h* by ${userName}`;
+          break;
+        case 'approve_1w':
+          approved = true;
+          ttlSeconds = 604800;
+          ackText = '✅ Approved for 1 week';
+          finalText = `${originalText}\n\n✅ *Approved for 1 week* by ${userName}`;
+          break;
+        case 'approve_forever':
+          approved = true;
+          ttlSeconds = 315360000; // 10 years ≈ forever
+          ackText = '✅ Approved forever';
+          finalText = `${originalText}\n\n✅ *Approved forever* by ${userName}`;
+          break;
+        case 'deny':
+          ackText = '❌ Denied';
+          finalText = `${originalText}\n\n❌ *Denied* by ${userName}`;
+          break;
+        default:
+          break;
       }
 
-      this.pendingCallbacks.delete(requestId);
-      this.pendingTexts.delete(requestId);
+      try {
+        await this.bot.answerCallbackQuery(query.id, { text: ackText });
+      } catch (err) {
+        console.warn(`⚠️ Telegram callback ack error: ${this.formatCallbackError(err)}`);
+      }
+
+      try {
+        callback(approved, ttlSeconds, userName);
+      } catch (err) {
+        console.error(`❌ Telegram approval resolve error: ${err instanceof Error ? err.stack || err.message : err}`);
+      }
+
+      try {
+        await this.bot.editMessageText(finalText, editOpts);
+      } catch (err) {
+        console.error(`❌ Telegram callback edit error: ${err instanceof Error ? err.stack || err.message : err}`);
+      } finally {
+        this.clearPendingRequest(requestId);
+      }
     });
   }
 
@@ -197,30 +302,39 @@ export class TelegramNotifier {
 
       this.pendingTexts.set(requestId, text);
 
-      this.safeSendMessage(this.config.chatId, text, {
-        parse_mode: 'Markdown',
-        reply_markup: {
-          inline_keyboard: [
-            [
-              { text: '✅ Once', callback_data: `approve_once:${requestId}` },
-              { text: '✅ 15m', callback_data: `approve_15m:${requestId}` },
-              { text: '✅ 1h', callback_data: `approve_1h:${requestId}` },
+      (async () => {
+        const sent = await this.safeSendMessage(this.config.chatId, text, {
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: '✅ Once', callback_data: `approve_once:${requestId}` },
+                { text: '✅ 15m', callback_data: `approve_15m:${requestId}` },
+                { text: '✅ 1h', callback_data: `approve_1h:${requestId}` },
+              ],
+              [
+                { text: '✅ 8h', callback_data: `approve_8h:${requestId}` },
+                { text: '✅ 24h', callback_data: `approve_24h:${requestId}` },
+                { text: '✅ 1w', callback_data: `approve_1w:${requestId}` },
+              ],
+              [
+                { text: '✅ Forever', callback_data: `approve_forever:${requestId}` },
+                { text: '❌ Deny', callback_data: `deny:${requestId}` },
+              ],
             ],
-            [
-              { text: '✅ 8h', callback_data: `approve_8h:${requestId}` },
-              { text: '✅ 24h', callback_data: `approve_24h:${requestId}` },
-              { text: '✅ 1w', callback_data: `approve_1w:${requestId}` },
-            ],
-            [
-              { text: '✅ Forever', callback_data: `approve_forever:${requestId}` },
-              { text: '❌ Deny', callback_data: `deny:${requestId}` },
-            ],
-          ],
-        },
-      }).catch(() => {
-        // If sending fails, deny the request
-        this.pendingCallbacks.delete(requestId);
-        this.pendingTexts.delete(requestId);
+          },
+        });
+
+        if (!sent) {
+          this.clearPendingRequest(requestId);
+          resolve({ approved: false, ttlSeconds: 0, approvedBy: 'telegram_error' });
+          return;
+        }
+
+        console.log(`📤 Telegram approval request sent: requestId=${requestId} service=${service} method=${method}`);
+      })().catch((err) => {
+        console.error(`❌ Telegram requestApproval error: ${err instanceof Error ? err.stack || err.message : err}`);
+        this.clearPendingRequest(requestId);
         resolve({ approved: false, ttlSeconds: 0, approvedBy: 'telegram_error' });
       });
     });

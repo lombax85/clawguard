@@ -123,6 +123,7 @@ export class ApprovalManager {
 
     const timeoutPromise = new Promise<{ approved: boolean; ttlSeconds: number; approvedBy: string }>((resolve) => {
       setTimeout(() => {
+        this.telegram?.clearPendingRequest(requestId);
         resolve({ approved: false, ttlSeconds: 0, approvedBy: 'timeout' });
       }, this.approvalTimeout);
     });
