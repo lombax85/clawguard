@@ -63,11 +63,14 @@ export class TelegramNotifier {
     this.restartingPolling = true;
     console.log(`🔄 Restarting Telegram polling (${reason})`);
     try {
-      await this.bot.stopPolling({ cancel: true });
-      // Wait for Telegram to release the getUpdates lock.
-      // Without this delay, the new poll races with the old one
-      // and triggers 409 Conflict errors.
-      await new Promise((r) => setTimeout(r, 3000));
+      // Graceful stop: do NOT pass { cancel: true }.
+      // This waits for the current long-poll HTTP request to complete
+      // naturally (up to polling.params.timeout seconds) instead of
+      // aborting it. Aborting leaves the getUpdates lock held on
+      // Telegram's side, causing 409 Conflict on the next poll.
+      await this.bot.stopPolling();
+      // Small buffer after the graceful stop, just in case.
+      await new Promise((r) => setTimeout(r, 2000));
       await this.bot.startPolling({ restart: true });
       console.log(`✅ Telegram polling restarted (${reason})`);
     } catch (err) {
