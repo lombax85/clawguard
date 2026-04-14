@@ -12,6 +12,7 @@ export class TelegramNotifier {
   private pendingTexts: Map<string, string> = new Map(); // requestId → original message text
   private paired: boolean = false;
   private restartingPolling = false;
+  private pollingRestartTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(config: TelegramConfig, audit: AuditLogger) {
     this.config = config;
@@ -95,6 +96,26 @@ export class TelegramNotifier {
         }
       }
     });
+
+    // ─── Proactive polling restart ─────────────────────────
+    // node-telegram-bot-api long-polling can silently die (TCP/NAT
+    // timeout) without emitting polling_error. Periodically cycle
+    // the connection to keep it fresh.
+    const PROACTIVE_RESTART_MS = 30 * 60 * 1000; // every 30 minutes
+    this.pollingRestartTimer = setInterval(async () => {
+      if (this.restartingPolling) return;
+      this.restartingPolling = true;
+      console.log('🔄 Proactive Telegram polling restart (scheduled)');
+      try {
+        await this.bot.stopPolling({ cancel: true });
+        await this.bot.startPolling({ restart: true });
+        console.log('✅ Telegram polling restarted (proactive)');
+      } catch (err) {
+        console.error('❌ Proactive polling restart failed:', err instanceof Error ? err.stack || err.message : err);
+      } finally {
+        this.restartingPolling = false;
+      }
+    }, PROACTIVE_RESTART_MS);
   }
 
   clearPendingRequest(requestId: string): void {
@@ -376,6 +397,7 @@ export class TelegramNotifier {
   // ─── Lifecycle ─────────────────────────────────────────────
 
   stop(): void {
+    if (this.pollingRestartTimer) clearInterval(this.pollingRestartTimer);
     this.bot.stopPolling();
   }
 }
