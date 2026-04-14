@@ -58,42 +58,49 @@ export class TelegramNotifier {
     });
   }
 
+  private async restartPolling(reason: string): Promise<void> {
+    if (this.restartingPolling) return;
+    this.restartingPolling = true;
+    console.log(`🔄 Restarting Telegram polling (${reason})`);
+    try {
+      await this.bot.stopPolling({ cancel: true });
+      // Wait for Telegram to release the getUpdates lock.
+      // Without this delay, the new poll races with the old one
+      // and triggers 409 Conflict errors.
+      await new Promise((r) => setTimeout(r, 3000));
+      await this.bot.startPolling({ restart: true });
+      console.log(`✅ Telegram polling restarted (${reason})`);
+    } catch (err) {
+      console.error(`❌ Polling restart failed (${reason}):`, err instanceof Error ? err.stack || err.message : err);
+    } finally {
+      this.restartingPolling = false;
+    }
+  }
+
   private startPollingWatchdog(): void {
-    // Watchdog based on polling_error count, not idle time
-    // Idle time is unreliable: no messages for 60s is perfectly normal
     let consecutiveErrors = 0;
     const MAX_CONSECUTIVE_ERRORS = 3;
     const RESET_AFTER_MS = 60_000;
     let lastErrorAt = 0;
 
-    this.bot.on('polling_error', async () => {
+    this.bot.on('polling_error', async (err) => {
+      // 409 Conflict is expected right after a restart cycle — ignore it
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('409 Conflict')) {
+        console.warn('⚠️ Telegram 409 Conflict (transient, ignoring)');
+        return;
+      }
+
       const now = Date.now();
-      // Reset counter if last error was long ago
       if (now - lastErrorAt > RESET_AFTER_MS) {
         consecutiveErrors = 0;
       }
       lastErrorAt = now;
       consecutiveErrors++;
 
-      if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS && !this.restartingPolling) {
-        this.restartingPolling = true;
-        console.warn(`⚠️ ${consecutiveErrors} consecutive polling errors — restarting polling`);
-
-        try {
-          await this.bot.stopPolling({ cancel: true });
-        } catch (err) {
-          console.error('❌ Telegram stopPolling error:', err instanceof Error ? err.stack || err.message : err);
-        }
-
-        try {
-          await this.bot.startPolling({ restart: true });
-          consecutiveErrors = 0;
-          console.log('✅ Telegram polling restarted by watchdog');
-        } catch (err) {
-          console.error('❌ Telegram startPolling error:', err instanceof Error ? err.stack || err.message : err);
-        } finally {
-          this.restartingPolling = false;
-        }
+      if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+        consecutiveErrors = 0;
+        await this.restartPolling('watchdog');
       }
     });
 
@@ -102,19 +109,8 @@ export class TelegramNotifier {
     // timeout) without emitting polling_error. Periodically cycle
     // the connection to keep it fresh.
     const PROACTIVE_RESTART_MS = 30 * 60 * 1000; // every 30 minutes
-    this.pollingRestartTimer = setInterval(async () => {
-      if (this.restartingPolling) return;
-      this.restartingPolling = true;
-      console.log('🔄 Proactive Telegram polling restart (scheduled)');
-      try {
-        await this.bot.stopPolling({ cancel: true });
-        await this.bot.startPolling({ restart: true });
-        console.log('✅ Telegram polling restarted (proactive)');
-      } catch (err) {
-        console.error('❌ Proactive polling restart failed:', err instanceof Error ? err.stack || err.message : err);
-      } finally {
-        this.restartingPolling = false;
-      }
+    this.pollingRestartTimer = setInterval(() => {
+      this.restartPolling('scheduled');
     }, PROACTIVE_RESTART_MS);
   }
 
