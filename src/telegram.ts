@@ -63,14 +63,23 @@ export class TelegramNotifier {
     this.restartingPolling = true;
     console.log(`🔄 Restarting Telegram polling (${reason})`);
     try {
-      // Graceful stop: do NOT pass { cancel: true }.
-      // This waits for the current long-poll HTTP request to complete
-      // naturally (up to polling.params.timeout seconds) instead of
-      // aborting it. Aborting leaves the getUpdates lock held on
-      // Telegram's side, causing 409 Conflict on the next poll.
+      // Graceful stop: waits for the current long-poll to finish.
       await this.bot.stopPolling();
-      // Small buffer after the graceful stop, just in case.
-      await new Promise((r) => setTimeout(r, 2000));
+
+      // Reclaim the Telegram getUpdates lock with a short-poll.
+      // Even after stopPolling(), Telegram may still hold the
+      // server-side lock for longer than our polling timeout.
+      // A getUpdates with timeout=0 forces Telegram to recognise
+      // this client as the active one, terminating any stale lock.
+      try {
+        const url = `https://api.telegram.org/bot${this.config.botToken}/getUpdates?timeout=0&limit=1&offset=-1`;
+        await fetch(url, { signal: AbortSignal.timeout(5000) });
+        console.log(`🔓 Telegram lock reclaimed (${reason})`);
+      } catch (err) {
+        // Non-fatal: worst case we get a transient 409 on next poll
+        console.warn(`⚠️ Lock reclaim failed (non-fatal):`, err instanceof Error ? err.message : err);
+      }
+
       await this.bot.startPolling({ restart: true });
       console.log(`✅ Telegram polling restarted (${reason})`);
     } catch (err) {
