@@ -143,6 +143,8 @@ export interface Config {
 export interface Approval {
   service: string;
   method: string;
+  // null/undefined = method-wide; non-empty string = path-scoped (exact match incl. querystring)
+  path?: string | null;
   approvedAt: number;
   expiresAt: number;
   approvedBy: string;

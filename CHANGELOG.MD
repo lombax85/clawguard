@@ -7,6 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 ## [Unreleased]
 
 ### Added
+- **Path-scoped approvals**: new Telegram buttons `15m-path`, `24h-path`, `forever-path` grant approval only for the exact request path (including querystring). Non-matching paths on the same service+method still trigger a fresh approval request. Persisted across restarts via new `approvals.path` column.
+- **`1month` approval duration** (30 days) added to the standard TTL set.
+- **`/showlog on|off` Telegram command**: when enabled, the paired chat receives info-only notifications for every auto-approved call (policy-based or via existing approval), with the reason surfaced. State persisted per chat (`telegram_paired_users.showlog`).
+- Admin dashboard: active approvals table now shows the scope (method-wide vs path-scoped) and the path; revoke action honors the specific scope. Recent approval history shows the method and path.
 - **Vault secrets provider**: credentials can now be fetched from HashiCorp Vault at startup, with support for both `token` and `kubernetes` auth methods. Secrets are resolved per-service via `secrets.provider: vault` configuration.
 - **Static secrets provider**: explicit `secrets.provider: static` for inline credentials (existing behavior, now formalized).
 - **Secrets provider abstraction** (`src/secrets/provider.ts`): pluggable interface for credential backends, making it easy to add new providers.
@@ -31,6 +35,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - Admin deny response now includes `clientIp` + hint when access is blocked by `admin.allowedIPs`, to speed up network/debug setup.
 
 ### Changed
+- **Telegram approval buttons reorganized**: removed `8h`, moved `Forever` out of the method-wide row (use `forever-path` for path-only approvals). New layout: row 1 `Once / 15m / 1h`, row 2 `24h / 1w / 1month`, row 3 `15m-path / 24h-path / forever-path`, row 4 `Deny`.
+- **Approval lookup order**: exact path match first, then method-wide approval, before requesting a new approval.
 - **Telegram notifications are now optional**: when unconfigured, approvals are auto-approved instead of failing.
 - **CI/CD restructured**: E2E workflows consolidated using a reusable composite action (`.github/actions/e2e-setup/`), duplicate workflow removed, GitHub Actions upgraded to v5 (Node.js 24).
 - CI workflow renamed to "CI: Unit Tests" for clarity; all workflows support manual trigger via `workflow_dispatch`.
