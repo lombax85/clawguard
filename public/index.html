@@ -188,14 +188,14 @@
       <div class="panel">
         <h3>Active approvals <button class="btn btn-danger btn-sm" onclick="revokeAll()">Revoke all</button></h3>
         <table>
-          <thead><tr><th>Service</th><th>Approved by</th><th>Expires</th><th>Remaining</th><th>Actions</th></tr></thead>
+          <thead><tr><th>Service</th><th>Scope</th><th>Approved by</th><th>Expires</th><th>Remaining</th><th>Actions</th></tr></thead>
           <tbody id="approvals-table"></tbody>
         </table>
       </div>
       <div class="panel">
         <h3>Recent approval history</h3>
         <table>
-          <thead><tr><th>Time</th><th>Service</th><th>Approved by</th><th>TTL</th></tr></thead>
+          <thead><tr><th>Time</th><th>Service</th><th>Method</th><th>Path</th><th>Approved by</th><th>TTL</th></tr></thead>
           <tbody id="approval-history"></tbody>
         </table>
       </div>
@@ -591,28 +591,38 @@ async function loadApprovals() {
   for (const [, info] of Object.entries(active)) {
     const service = info.service || 'unknown';
     const method = info.method || '*';
+    const path = info.path || null;
+    const scopeCell = path
+      ? `<span class="badge" style="background:#3d2b5f;color:#c5a3ff">path</span> <code style="font-size:12px">${esc(path)}</code>`
+      : `<span class="badge blue">method-wide</span>`;
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td><strong>${esc(service)}</strong> <span class="badge blue">${esc(method)}</span></td>
+      <td>${scopeCell}</td>
       <td>${esc(info.approvedBy)}</td>
       <td>${new Date(info.expiresAt).toLocaleString()}</td>
       <td><span class="badge green">${info.remainingMinutes} min</span></td>
-      <td><button class="btn btn-danger btn-sm" onclick="revokeApproval('${esc(service)}','${esc(method)}')">Revoke</button></td>
+      <td><button class="btn btn-danger btn-sm" data-service="${esc(service)}" data-method="${esc(method)}" data-path="${path === null ? '' : esc(path)}" data-pathscoped="${path === null ? '0' : '1'}" onclick="revokeApprovalFromBtn(this)">Revoke</button></td>
     `;
     tbody.appendChild(tr);
   }
   if (Object.keys(active).length === 0) {
-    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text2)">No active approvals</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text2)">No active approvals</td></tr>';
   }
 
   // History
   const histTbody = document.getElementById('approval-history');
   histTbody.innerHTML = '';
   for (const row of (data.recent || [])) {
+    const pathCell = row.path
+      ? `<code style="font-size:12px">${esc(row.path)}</code>`
+      : `<span style="color:var(--text2)">method-wide</span>`;
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td>${new Date(row.timestamp).toLocaleString()}</td>
       <td>${esc(row.service)}</td>
+      <td><span class="badge blue">${esc(row.method || '*')}</span></td>
+      <td>${pathCell}</td>
       <td>${esc(row.approved_by)}</td>
       <td>${Math.round(row.ttl_seconds / 3600)}h</td>
     `;
@@ -620,8 +630,20 @@ async function loadApprovals() {
   }
 }
 
-async function revokeApproval(service, method) {
-  const qs = method ? ('?method=' + encodeURIComponent(method)) : '';
+async function revokeApprovalFromBtn(btn) {
+  const service = btn.dataset.service;
+  const method = btn.dataset.method;
+  const pathScoped = btn.dataset.pathscoped === '1';
+  const path = btn.dataset.path;
+  const label = pathScoped
+    ? `${service} ${method} — path: ${path}`
+    : `${service} ${method} (method-wide)`;
+  if (!confirm(`Revoke approval for ${label}?`)) return;
+  const params = [];
+  if (method) params.push('method=' + encodeURIComponent(method));
+  if (pathScoped) params.push('path=' + encodeURIComponent(path));
+  else params.push('path=*');
+  const qs = '?' + params.join('&');
   await api('POST', '/api/revoke/' + encodeURIComponent(service) + qs);
   loadApprovals();
 }

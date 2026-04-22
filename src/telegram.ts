@@ -2,7 +2,7 @@ import TelegramBot from 'node-telegram-bot-api';
 import { TelegramConfig } from './types';
 import { AuditLogger } from './audit';
 
-export type ApprovalCallback = (approved: boolean, ttlSeconds: number, approvedBy: string) => void;
+export type ApprovalCallback = (approved: boolean, ttlSeconds: number, approvedBy: string, pathScoped: boolean) => void;
 
 export class TelegramNotifier {
   private bot: TelegramBot;
@@ -179,7 +179,37 @@ export class TelegramNotifier {
       const chatId = msg.chat.id.toString();
       const isPaired = this.audit.isPairedUser(chatId);
       const status = isPaired ? '✅ Paired' : '❌ Not paired';
-      await this.safeSendMessage(chatId, `🛡️ *ClawGuard Status*\n\nPairing: ${status}`, { parse_mode: 'Markdown' });
+      const showlog = isPaired && this.audit.isShowlogEnabled(chatId) ? 'on' : 'off';
+      await this.safeSendMessage(
+        chatId,
+        `🛡️ *ClawGuard Status*\n\nPairing: ${status}\nShowlog: ${showlog}`,
+        { parse_mode: 'Markdown' },
+      );
+    });
+
+    this.bot.onText(/^\/showlog(?:\s+(on|off))?/i, async (msg, match) => {
+      const chatId = msg.chat.id.toString();
+      if (this.config.pairing.enabled && !this.audit.isPairedUser(chatId)) {
+        await this.safeSendMessage(chatId, '❌ Not paired. Send /pair <secret> first.');
+        return;
+      }
+      const arg = match?.[1]?.toLowerCase();
+      if (arg !== 'on' && arg !== 'off') {
+        const current = this.audit.isShowlogEnabled(chatId) ? 'on' : 'off';
+        await this.safeSendMessage(
+          chatId,
+          `ℹ️ Showlog is currently *${current}*. Usage: \`/showlog on\` or \`/showlog off\`.`,
+          { parse_mode: 'Markdown' },
+        );
+        return;
+      }
+      this.audit.setShowlog(chatId, arg === 'on');
+      const icon = arg === 'on' ? '🔔' : '🔕';
+      await this.safeSendMessage(
+        chatId,
+        `${icon} Showlog *${arg}* — you will ${arg === 'on' ? 'now' : 'no longer'} receive info-only notifications for auto-approved calls.`,
+        { parse_mode: 'Markdown' },
+      );
     });
   }
 
@@ -220,6 +250,7 @@ export class TelegramNotifier {
       const editOpts = { chat_id: query.message.chat.id, message_id: query.message.message_id, parse_mode: 'Markdown' as const };
       let approved = false;
       let ttlSeconds = 0;
+      let pathScoped = false;
       let ackText = '⚠️ Unknown action';
       let finalText = `${originalText}\n\n⚠️ *Unknown action* by ${userName}`;
 
@@ -242,12 +273,6 @@ export class TelegramNotifier {
           ackText = '✅ Approved for 1 hour';
           finalText = `${originalText}\n\n✅ *Approved for 1h* by ${userName}`;
           break;
-        case 'approve_8h':
-          approved = true;
-          ttlSeconds = 28800;
-          ackText = '✅ Approved for 8 hours';
-          finalText = `${originalText}\n\n✅ *Approved for 8h* by ${userName}`;
-          break;
         case 'approve_24h':
           approved = true;
           ttlSeconds = 86400;
@@ -260,11 +285,32 @@ export class TelegramNotifier {
           ackText = '✅ Approved for 1 week';
           finalText = `${originalText}\n\n✅ *Approved for 1 week* by ${userName}`;
           break;
-        case 'approve_forever':
+        case 'approve_1month':
           approved = true;
+          ttlSeconds = 2592000; // 30 days
+          ackText = '✅ Approved for 1 month';
+          finalText = `${originalText}\n\n✅ *Approved for 1 month* by ${userName}`;
+          break;
+        case 'approve_15m_path':
+          approved = true;
+          pathScoped = true;
+          ttlSeconds = 900;
+          ackText = '✅ Approved for 15 minutes (this path only)';
+          finalText = `${originalText}\n\n✅ *Approved for 15min (path-only)* by ${userName}`;
+          break;
+        case 'approve_24h_path':
+          approved = true;
+          pathScoped = true;
+          ttlSeconds = 86400;
+          ackText = '✅ Approved for 24 hours (this path only)';
+          finalText = `${originalText}\n\n✅ *Approved for 24h (path-only)* by ${userName}`;
+          break;
+        case 'approve_forever_path':
+          approved = true;
+          pathScoped = true;
           ttlSeconds = 315360000; // 10 years ≈ forever
-          ackText = '✅ Approved forever';
-          finalText = `${originalText}\n\n✅ *Approved forever* by ${userName}`;
+          ackText = '✅ Approved forever (this path only)';
+          finalText = `${originalText}\n\n✅ *Approved forever (path-only)* by ${userName}`;
           break;
         case 'deny':
           ackText = '❌ Denied';
@@ -281,7 +327,7 @@ export class TelegramNotifier {
       }
 
       try {
-        callback(approved, ttlSeconds, userName);
+        callback(approved, ttlSeconds, userName, pathScoped);
       } catch (err) {
         console.error(`❌ Telegram approval resolve error: ${err instanceof Error ? err.stack || err.message : err}`);
       }
@@ -304,16 +350,16 @@ export class TelegramNotifier {
     method: string,
     path: string,
     agentIp: string
-  ): Promise<{ approved: boolean; ttlSeconds: number; approvedBy: string }> {
+  ): Promise<{ approved: boolean; ttlSeconds: number; approvedBy: string; pathScoped: boolean }> {
     // If not paired, deny immediately
     if (this.config.pairing.enabled && !this.paired) {
       console.log('❌ Cannot request approval: Telegram bot is not paired');
-      return { approved: false, ttlSeconds: 0, approvedBy: 'unpaired' };
+      return { approved: false, ttlSeconds: 0, approvedBy: 'unpaired', pathScoped: false };
     }
 
     return new Promise((resolve) => {
-      const callback: ApprovalCallback = (approved, ttlSeconds, approvedBy) => {
-        resolve({ approved, ttlSeconds, approvedBy });
+      const callback: ApprovalCallback = (approved, ttlSeconds, approvedBy, pathScoped) => {
+        resolve({ approved, ttlSeconds, approvedBy, pathScoped });
       };
 
       this.pendingCallbacks.set(requestId, callback);
@@ -342,12 +388,16 @@ export class TelegramNotifier {
                 { text: '✅ 1h', callback_data: `approve_1h:${requestId}` },
               ],
               [
-                { text: '✅ 8h', callback_data: `approve_8h:${requestId}` },
                 { text: '✅ 24h', callback_data: `approve_24h:${requestId}` },
                 { text: '✅ 1w', callback_data: `approve_1w:${requestId}` },
+                { text: '✅ 1month', callback_data: `approve_1month:${requestId}` },
               ],
               [
-                { text: '✅ Forever', callback_data: `approve_forever:${requestId}` },
+                { text: '🎯 15m-path', callback_data: `approve_15m_path:${requestId}` },
+                { text: '🎯 24h-path', callback_data: `approve_24h_path:${requestId}` },
+                { text: '🎯 forever-path', callback_data: `approve_forever_path:${requestId}` },
+              ],
+              [
                 { text: '❌ Deny', callback_data: `deny:${requestId}` },
               ],
             ],
@@ -356,7 +406,7 @@ export class TelegramNotifier {
 
         if (!sent) {
           this.clearPendingRequest(requestId);
-          resolve({ approved: false, ttlSeconds: 0, approvedBy: 'telegram_error' });
+          resolve({ approved: false, ttlSeconds: 0, approvedBy: 'telegram_error', pathScoped: false });
           return;
         }
 
@@ -364,9 +414,40 @@ export class TelegramNotifier {
       })().catch((err) => {
         console.error(`❌ Telegram requestApproval error: ${err instanceof Error ? err.stack || err.message : err}`);
         this.clearPendingRequest(requestId);
-        resolve({ approved: false, ttlSeconds: 0, approvedBy: 'telegram_error' });
+        resolve({ approved: false, ttlSeconds: 0, approvedBy: 'telegram_error', pathScoped: false });
       });
     });
+  }
+
+  /**
+   * Emit an info-only notification for a call that was auto-approved
+   * (by policy or an existing approval). Gated per-chat by /showlog.
+   */
+  notifyAutoApproved(
+    service: string,
+    method: string,
+    path: string,
+    agentIp: string,
+    reason: string,
+  ): void {
+    const chatIds = this.audit.getShowlogEnabledChatIds();
+    if (chatIds.length === 0) return;
+
+    const text = [
+      `ℹ️ *ClawGuard — Auto-approved call*`,
+      ``,
+      `🔹 Service: *${service}*`,
+      `🔹 Method: \`${method}\``,
+      `🔹 Path: \`${path}\``,
+      `🔹 Agent IP: \`${agentIp}\``,
+      `🔹 Time: ${new Date().toLocaleString('it-IT', { timeZone: 'Europe/Rome' })}`,
+      `🔹 Reason: _${reason}_`,
+    ].join('\n');
+
+    for (const chatId of chatIds) {
+      // fire-and-forget; errors surface via safeSendMessage logging
+      this.safeSendMessage(chatId, text, { parse_mode: 'Markdown' });
+    }
   }
 
   // ─── Safe send (with error handling) ──────────────────────

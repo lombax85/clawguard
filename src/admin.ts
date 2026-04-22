@@ -243,13 +243,24 @@ export function createAdminRouter(
   router.post('/api/revoke/:service', pinAuth, (req: Request, res: Response) => {
     const service = req.params['service'] as string;
     const method = (req.query['method'] as string | undefined)?.toUpperCase();
-    const revoked = approvalManager.revokeApproval(service, method);
+    // path query param: omitted → any scope for that method; "" or "*" → method-wide; string → exact path
+    const rawPath = req.query['path'] as string | undefined;
+    let path: string | null | undefined;
+    if (rawPath === undefined) path = undefined;
+    else if (rawPath === '' || rawPath === '*') path = null;
+    else path = rawPath;
+
+    const revoked = approvalManager.revokeApproval(service, method, path);
+    const describeScope = () => {
+      if (!method) return service;
+      if (path === undefined) return `${service} ${method}`;
+      if (path === null) return `${service} ${method} (method-wide)`;
+      return `${service} ${method} path=${path}`;
+    };
     if (revoked) {
-      const scope = method ? `${service} ${method}` : service;
-      res.json({ ok: true, message: `Approval for "${scope}" revoked` });
+      res.json({ ok: true, message: `Approval for "${describeScope()}" revoked` });
     } else {
-      const scope = method ? `${service} ${method}` : service;
-      res.status(404).json({ error: `No active approval for "${scope}"` });
+      res.status(404).json({ error: `No active approval for "${describeScope()}"` });
     }
   });
 

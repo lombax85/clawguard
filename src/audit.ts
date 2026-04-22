@@ -55,6 +55,9 @@ export class AuditLogger {
     try { this.db.exec('ALTER TABLE requests ADD COLUMN response_body TEXT'); } catch { /* already exists */ }
     try { this.db.exec('ALTER TABLE approvals ADD COLUMN revoked INTEGER NOT NULL DEFAULT 0'); } catch { /* already exists */ }
     try { this.db.exec("ALTER TABLE approvals ADD COLUMN method TEXT NOT NULL DEFAULT '*'"); } catch { /* already exists */ }
+    // NULL path = method-wide approval; non-null = path-scoped (exact match on pathname + querystring)
+    try { this.db.exec('ALTER TABLE approvals ADD COLUMN path TEXT'); } catch { /* already exists */ }
+    try { this.db.exec('ALTER TABLE telegram_paired_users ADD COLUMN showlog INTEGER NOT NULL DEFAULT 0'); } catch { /* already exists */ }
   }
 
   // ─── Request logging ──────────────────────────────────────
@@ -78,13 +81,13 @@ export class AuditLogger {
 
   // ─── Approval logging ─────────────────────────────────────
 
-  logApproval(service: string, method: string, approvedBy: string, ttlSeconds: number): void {
+  logApproval(service: string, method: string, approvedBy: string, ttlSeconds: number, path?: string | null): void {
     const now = new Date();
     const expiresAt = new Date(now.getTime() + ttlSeconds * 1000);
     this.db.prepare(`
-      INSERT INTO approvals (timestamp, service, method, approved_by, ttl_seconds, expires_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(now.toISOString(), service, method.toUpperCase(), approvedBy, ttlSeconds, expiresAt.toISOString());
+      INSERT INTO approvals (timestamp, service, method, path, approved_by, ttl_seconds, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(now.toISOString(), service, method.toUpperCase(), path ?? null, approvedBy, ttlSeconds, expiresAt.toISOString());
   }
 
   /**
@@ -98,23 +101,24 @@ export class AuditLogger {
     this.db.prepare(`DELETE FROM approvals WHERE expires_at <= ?`).run(now);
 
     const rows = this.db.prepare(`
-      SELECT service, method, approved_by, ttl_seconds, expires_at, timestamp
+      SELECT service, method, path, approved_by, ttl_seconds, expires_at, timestamp
       FROM approvals
       WHERE expires_at > ? AND revoked = 0
       ORDER BY id DESC
-    `).all(now) as { service: string; method: string; approved_by: string; ttl_seconds: number; expires_at: string; timestamp: string }[];
+    `).all(now) as { service: string; method: string; path: string | null; approved_by: string; ttl_seconds: number; expires_at: string; timestamp: string }[];
 
-    // Deduplicate — keep only the latest approval per service+method
+    // Deduplicate — keep only the latest approval per service+method+path
     const seen = new Set<string>();
     const approvals: Approval[] = [];
     for (const row of rows) {
       const method = (row.method || '*').toUpperCase();
-      const key = `${row.service}::${method}`;
+      const key = `${row.service}::${method}::${row.path ?? '*'}`;
       if (seen.has(key)) continue;
       seen.add(key);
       approvals.push({
         service: row.service,
         method,
+        path: row.path,
         approvedAt: new Date(row.timestamp).getTime(),
         expiresAt: new Date(row.expires_at).getTime(),
         approvedBy: row.approved_by,
@@ -125,8 +129,23 @@ export class AuditLogger {
 
   /**
    * Mark an approval as revoked in the database so it won't be restored on restart.
+   * - path=undefined: revoke all approvals for service+method (both method-wide and path-scoped)
+   * - path=null: revoke only the method-wide approval
+   * - path=string: revoke only the exact path-scoped approval
    */
-  revokeApprovalInDb(service: string, method?: string): void {
+  revokeApprovalInDb(service: string, method?: string, path?: string | null): void {
+    if (method && path === null) {
+      this.db.prepare(`
+        UPDATE approvals SET revoked = 1 WHERE service = ? AND method = ? AND path IS NULL AND revoked = 0
+      `).run(service, method.toUpperCase());
+      return;
+    }
+    if (method && typeof path === 'string') {
+      this.db.prepare(`
+        UPDATE approvals SET revoked = 1 WHERE service = ? AND method = ? AND path = ? AND revoked = 0
+      `).run(service, method.toUpperCase(), path);
+      return;
+    }
     if (method) {
       this.db.prepare(`
         UPDATE approvals SET revoked = 1 WHERE service = ? AND method = ? AND revoked = 0
@@ -158,6 +177,21 @@ export class AuditLogger {
 
   getPairedUsers(): { chatId: string; userName: string; pairedAt: string }[] {
     return this.db.prepare('SELECT chat_id as chatId, user_name as userName, paired_at as pairedAt FROM telegram_paired_users').all() as { chatId: string; userName: string; pairedAt: string }[];
+  }
+
+  setShowlog(chatId: string, enabled: boolean): void {
+    this.db.prepare('UPDATE telegram_paired_users SET showlog = ? WHERE chat_id = ?')
+      .run(enabled ? 1 : 0, chatId);
+  }
+
+  isShowlogEnabled(chatId: string): boolean {
+    const row = this.db.prepare('SELECT showlog FROM telegram_paired_users WHERE chat_id = ?').get(chatId) as { showlog: number } | undefined;
+    return !!row && row.showlog === 1;
+  }
+
+  getShowlogEnabledChatIds(): string[] {
+    const rows = this.db.prepare('SELECT chat_id as chatId FROM telegram_paired_users WHERE showlog = 1').all() as { chatId: string }[];
+    return rows.map(r => r.chatId);
   }
 
   // ─── Service overrides (admin API) ────────────────────────

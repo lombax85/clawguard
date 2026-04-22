@@ -9,10 +9,12 @@ function generateRequestId(): string {
 }
 
 export class ApprovalManager {
+  // Keyed by `${service}::${METHOD}::${path|*}` — `*` means method-wide
   private activeApprovals: Map<string, Approval> = new Map();
 
-  private approvalKey(service: string, method: string): string {
-    return `${service}::${method.toUpperCase()}`;
+  private approvalKey(service: string, method: string, path?: string | null): string {
+    const pathPart = (path === undefined || path === null) ? '*' : path;
+    return `${service}::${method.toUpperCase()}::${pathPart}`;
   }
   private telegram: TelegramNotifier | undefined;
   private audit: AuditLogger;
@@ -30,10 +32,11 @@ export class ApprovalManager {
   private restoreApprovals(): void {
     const saved = this.audit.getActiveApprovals();
     for (const approval of saved) {
-      const key = this.approvalKey(approval.service, approval.method);
+      const key = this.approvalKey(approval.service, approval.method, approval.path);
       this.activeApprovals.set(key, approval);
       const remaining = Math.round((approval.expiresAt - Date.now()) / 1000 / 60);
-      console.log(`   ↻ Restored approval for ${approval.service} ${approval.method} (${remaining}min remaining)`);
+      const scope = approval.path ? `path=${approval.path}` : 'method-wide';
+      console.log(`   ↻ Restored approval for ${approval.service} ${approval.method} (${scope}, ${remaining}min remaining)`);
     }
     if (saved.length > 0) {
       console.log(`   ✓ ${saved.length} approval(s) restored from database`);
@@ -61,19 +64,50 @@ export class ApprovalManager {
     return serviceConfig.policy.default;
   }
 
-  hasActiveApproval(service: string, method: string): boolean {
-    const key = this.approvalKey(service, method);
-    const approval = this.activeApprovals.get(key);
-    if (!approval) return false;
-
-    if (Date.now() > approval.expiresAt) {
-      this.activeApprovals.delete(key);
-      this.audit.revokeApprovalInDb(service, method);
-      console.log(`⏰ Approval expired for service+method: ${service} ${method.toUpperCase()}`);
-      return false;
+  /**
+   * Returns the matching approval (exact path first, then method-wide) or null.
+   * Removes it from the map if expired.
+   */
+  private findActiveApproval(service: string, method: string, path: string): Approval | null {
+    const exactKey = this.approvalKey(service, method, path);
+    const exact = this.activeApprovals.get(exactKey);
+    if (exact) {
+      if (Date.now() > exact.expiresAt) {
+        this.activeApprovals.delete(exactKey);
+        this.audit.revokeApprovalInDb(service, method, path);
+        console.log(`⏰ Approval expired for ${service} ${method.toUpperCase()} path=${path}`);
+      } else {
+        return exact;
+      }
     }
 
-    return true;
+    const wideKey = this.approvalKey(service, method, null);
+    const wide = this.activeApprovals.get(wideKey);
+    if (wide) {
+      if (Date.now() > wide.expiresAt) {
+        this.activeApprovals.delete(wideKey);
+        this.audit.revokeApprovalInDb(service, method, null);
+        console.log(`⏰ Approval expired for ${service} ${method.toUpperCase()} (method-wide)`);
+        return null;
+      }
+      return wide;
+    }
+
+    return null;
+  }
+
+  hasActiveApproval(service: string, method: string, path?: string): boolean {
+    if (path === undefined) {
+      const wide = this.activeApprovals.get(this.approvalKey(service, method, null));
+      if (!wide) return false;
+      if (Date.now() > wide.expiresAt) {
+        this.activeApprovals.delete(this.approvalKey(service, method, null));
+        this.audit.revokeApprovalInDb(service, method, null);
+        return false;
+      }
+      return true;
+    }
+    return this.findActiveApproval(service, method, path) !== null;
   }
 
   async checkApproval(
@@ -88,15 +122,20 @@ export class ApprovalManager {
     // Auto-approve based on policy
     if (action === 'auto_approve') {
       console.log(`✅ Auto-approved: ${method} ${service}${path}`);
+      this.telegram?.notifyAutoApproved(service, method, path, agentIp, 'policy:auto_approve');
       return true;
     }
 
-    // Check existing approval (scoped by service + HTTP method)
-    if (this.hasActiveApproval(service, method)) {
-      const key = this.approvalKey(service, method);
-      const approval = this.activeApprovals.get(key)!;
-      const remaining = Math.round((approval.expiresAt - Date.now()) / 1000 / 60);
-      console.log(`✅ Active approval for ${service} ${method.toUpperCase()} (${remaining}min remaining)`);
+    // Check existing approval (exact path first, then method-wide)
+    const existing = this.findActiveApproval(service, method, path);
+    if (existing) {
+      const remaining = Math.round((existing.expiresAt - Date.now()) / 1000 / 60);
+      const scope = existing.path ? `path=${existing.path}` : 'method-wide';
+      console.log(`✅ Active approval for ${service} ${method.toUpperCase()} (${scope}, ${remaining}min remaining)`);
+      const reason = existing.path
+        ? `approval:path (${remaining}min left)`
+        : `approval:method-wide (${remaining}min left)`;
+      this.telegram?.notifyAutoApproved(service, method, path, agentIp, reason);
       return true;
     }
 
@@ -109,22 +148,22 @@ export class ApprovalManager {
       const approval: Approval = {
         service,
         method: method.toUpperCase(),
+        path: null,
         approvedAt: Date.now(),
         expiresAt: Date.now() + 3600 * 1000, // 1h default
         approvedBy: 'auto (no telegram)',
       };
-      const key = this.approvalKey(service, method);
-      this.activeApprovals.set(key, approval);
-      this.audit.logApproval(service, method, 'auto (no telegram)', 3600);
+      this.activeApprovals.set(this.approvalKey(service, method, null), approval);
+      this.audit.logApproval(service, method, 'auto (no telegram)', 3600, null);
       return true;
     }
 
     const requestId = generateRequestId();
 
-    const timeoutPromise = new Promise<{ approved: boolean; ttlSeconds: number; approvedBy: string }>((resolve) => {
+    const timeoutPromise = new Promise<{ approved: boolean; ttlSeconds: number; approvedBy: string; pathScoped: boolean }>((resolve) => {
       setTimeout(() => {
         this.telegram?.clearPendingRequest(requestId);
-        resolve({ approved: false, ttlSeconds: 0, approvedBy: 'timeout' });
+        resolve({ approved: false, ttlSeconds: 0, approvedBy: 'timeout', pathScoped: false });
       }, this.approvalTimeout);
     });
 
@@ -134,17 +173,19 @@ export class ApprovalManager {
     ]);
 
     if (result.approved) {
+      const scopedPath = result.pathScoped ? path : null;
       const approval: Approval = {
         service,
         method: method.toUpperCase(),
+        path: scopedPath,
         approvedAt: Date.now(),
         expiresAt: Date.now() + result.ttlSeconds * 1000,
         approvedBy: result.approvedBy,
       };
-      const key = this.approvalKey(service, method);
-      this.activeApprovals.set(key, approval);
-      this.audit.logApproval(service, method, result.approvedBy, result.ttlSeconds);
-      console.log(`✅ Approved by ${result.approvedBy} for ${service} ${method.toUpperCase()} (${result.ttlSeconds / 3600}h)`);
+      this.activeApprovals.set(this.approvalKey(service, method, scopedPath), approval);
+      this.audit.logApproval(service, method, result.approvedBy, result.ttlSeconds, scopedPath);
+      const scope = scopedPath ? `path=${scopedPath}` : 'method-wide';
+      console.log(`✅ Approved by ${result.approvedBy} for ${service} ${method.toUpperCase()} (${scope}, ${result.ttlSeconds / 3600}h)`);
       return true;
     }
 
@@ -152,16 +193,36 @@ export class ApprovalManager {
     return false;
   }
 
-  revokeApproval(service: string, method?: string): boolean {
-    if (method) {
-      const key = this.approvalKey(service, method);
+  /**
+   * Revoke approvals.
+   * - method=undefined: revoke every approval for the service (all methods, all paths)
+   * - method set, path=undefined: revoke every approval for service+method (wide + all paths)
+   * - method set, path=null: revoke only the method-wide approval
+   * - method set, path=string: revoke only the exact path-scoped approval
+   */
+  revokeApproval(service: string, method?: string, path?: string | null): boolean {
+    if (method && path !== undefined) {
+      const key = this.approvalKey(service, method, path);
       if (this.activeApprovals.has(key)) {
         this.activeApprovals.delete(key);
-        this.audit.revokeApprovalInDb(service, method);
-        console.log(`🔒 Approval revoked for service+method: ${service} ${method.toUpperCase()}`);
+        this.audit.revokeApprovalInDb(service, method, path);
+        const scope = path === null ? 'method-wide' : `path=${path}`;
+        console.log(`🔒 Approval revoked for ${service} ${method.toUpperCase()} (${scope})`);
         return true;
       }
       return false;
+    }
+
+    if (method) {
+      const prefix = `${service}::${method.toUpperCase()}::`;
+      const keysToDelete = [...this.activeApprovals.keys()].filter((k) => k.startsWith(prefix));
+      if (keysToDelete.length === 0) return false;
+      for (const key of keysToDelete) {
+        this.activeApprovals.delete(key);
+      }
+      this.audit.revokeApprovalInDb(service, method);
+      console.log(`🔒 Approval revoked for service+method: ${service} ${method.toUpperCase()} (${keysToDelete.length} entr${keysToDelete.length === 1 ? 'y' : 'ies'})`);
+      return true;
     }
 
     // Revoke all methods for this service
@@ -172,7 +233,7 @@ export class ApprovalManager {
       this.activeApprovals.delete(key);
     }
     this.audit.revokeApprovalInDb(service);
-    console.log(`🔒 Approval revoked for service: ${service} (${keysToDelete.length} method(s))`);
+    console.log(`🔒 Approval revoked for service: ${service} (${keysToDelete.length} entr${keysToDelete.length === 1 ? 'y' : 'ies'})`);
     return true;
   }
 
@@ -181,8 +242,9 @@ export class ApprovalManager {
     const keys = [...this.activeApprovals.keys()];
     this.activeApprovals.clear();
     for (const key of keys) {
-      const [service, method] = key.split('::');
-      this.audit.revokeApprovalInDb(service, method);
+      const [service, method, pathPart] = key.split('::');
+      const path = pathPart === '*' ? null : pathPart;
+      this.audit.revokeApprovalInDb(service, method, path);
     }
     console.log(`🔒 All ${count} approvals revoked`);
     return count;
@@ -198,13 +260,14 @@ export class ApprovalManager {
     return this.activeApprovals.size;
   }
 
-  getStatus(): Record<string, { service: string; method: string; expiresAt: string; approvedBy: string; remainingMinutes: number }> {
-    const status: Record<string, { service: string; method: string; expiresAt: string; approvedBy: string; remainingMinutes: number }> = {};
+  getStatus(): Record<string, { service: string; method: string; path: string | null; expiresAt: string; approvedBy: string; remainingMinutes: number }> {
+    const status: Record<string, { service: string; method: string; path: string | null; expiresAt: string; approvedBy: string; remainingMinutes: number }> = {};
     for (const [key, approval] of this.activeApprovals) {
       if (Date.now() < approval.expiresAt) {
         status[key] = {
           service: approval.service,
           method: approval.method,
+          path: approval.path ?? null,
           expiresAt: new Date(approval.expiresAt).toISOString(),
           approvedBy: approval.approvedBy,
           remainingMinutes: Math.round((approval.expiresAt - Date.now()) / 1000 / 60),
