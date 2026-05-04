@@ -606,6 +606,14 @@ services:
         secretAccessKey: "..."           # or vault:secret/data/aws-cloudtrail#secretAccessKey
         region: eu-west-1
         service: cloudtrail
+        # Optional: assume a read-only role in a target AWS account before signing CloudTrail calls.
+        # Configure one ClawGuard service per target role/account when you need multi-account access.
+        assumeRole:
+          roleArn: "arn:aws:iam::123456789012:role/LogotelSecurityReadOnly"
+          sessionName: "clawguard-cyberpolpo"
+          # externalId: "..."             # optional, recommended for third-party/cross-account trust
+          stsRegion: eu-west-1
+          durationSeconds: 3600
     policy:
       default: require_approval
       rules:

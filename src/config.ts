@@ -179,11 +179,7 @@ async function resolveServiceSecrets(config: Config): Promise<void> {
         svc.auth.password = await resolveSecretValue(svc.auth.password, providers);
       }
       if (svc.auth.pluginConfig) {
-        for (const [key, value] of Object.entries(svc.auth.pluginConfig)) {
-          if (typeof value === 'string') {
-            svc.auth.pluginConfig[key] = await resolveSecretValue(value, providers);
-          }
-        }
+        svc.auth.pluginConfig = await resolvePluginConfigSecrets(svc.auth.pluginConfig, providers);
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -193,10 +189,39 @@ async function resolveServiceSecrets(config: Config): Promise<void> {
   }
 }
 
+async function resolvePluginConfigSecrets(
+  value: Record<string, unknown>,
+  providers: Map<string, SecretProvider>
+): Promise<Record<string, unknown>> {
+  const resolved: Record<string, unknown> = {};
+
+  for (const [key, item] of Object.entries(value)) {
+    if (typeof item === 'string') {
+      resolved[key] = await resolveSecretValue(item, providers);
+    } else if (item && typeof item === 'object' && !Array.isArray(item)) {
+      resolved[key] = await resolvePluginConfigSecrets(item as Record<string, unknown>, providers);
+    } else {
+      resolved[key] = item;
+    }
+  }
+
+  return resolved;
+}
+
+function objectHasSecretRef(value: Record<string, unknown>, refPattern: RegExp): boolean {
+  return Object.values(value).some((item) => {
+    if (typeof item === 'string') return refPattern.test(item);
+    if (item && typeof item === 'object' && !Array.isArray(item)) {
+      return objectHasSecretRef(item as Record<string, unknown>, refPattern);
+    }
+    return false;
+  });
+}
+
 function hasSecretRef(svc: ServiceConfig): boolean {
   const refPattern = /^\w+:.+#\w+$/;
   const pluginConfigHasRef = svc.auth.pluginConfig
-    ? Object.values(svc.auth.pluginConfig).some((value) => typeof value === 'string' && refPattern.test(value))
+    ? objectHasSecretRef(svc.auth.pluginConfig, refPattern)
     : false;
 
   return refPattern.test(svc.auth.token)

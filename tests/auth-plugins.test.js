@@ -669,3 +669,77 @@ test('aws-sigv4 plugin rejects incomplete config', async () => {
     /secretAccessKey/
   );
 });
+
+test('aws-sigv4 plugin can assume role via STS and cache temporary credentials', async () => {
+  const http = require('http');
+  let stsCalls = 0;
+  const server = http.createServer((req, res) => {
+    stsCalls += 1;
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      const body = Buffer.concat(chunks).toString('utf8');
+      assert.match(body, /Action=AssumeRole/);
+      assert.match(body, /RoleArn=arn%3Aaws%3Aiam%3A%3A123456789012%3Arole%2FLogotelSecurityReadOnly/);
+      assert.match(body, /RoleSessionName=clawguard-cyberpolpo/);
+      assert.match(req.headers.authorization, /^AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE\/20150830\/eu-west-1\/sts\/aws4_request/);
+      res.writeHead(200, { 'content-type': 'text/xml' });
+      res.end(`<?xml version="1.0" encoding="UTF-8"?>
+<AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <AssumeRoleResult>
+    <Credentials>
+      <AccessKeyId>ASIATEMPACCESSKEY</AccessKeyId>
+      <SecretAccessKey>TEMPSECRETKEY</SecretAccessKey>
+      <SessionToken>TEMPSESSIONTOKEN</SessionToken>
+      <Expiration>2015-08-30T13:36:00Z</Expiration>
+    </Credentials>
+  </AssumeRoleResult>
+</AssumeRoleResponse>`);
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = server.address();
+    const stsEndpoint = `http://127.0.0.1:${address.port}`;
+    const plugin = createAwsSigV4Plugin();
+    await plugin.init('/tmp/test', {
+      accessKeyId: 'AKIDEXAMPLE',
+      secretAccessKey: 'wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY',
+      region: 'eu-west-1',
+      service: 'cloudtrail',
+      fixedDate: '2015-08-30T12:36:00Z',
+      assumeRole: {
+        roleArn: 'arn:aws:iam::123456789012:role/LogotelSecurityReadOnly',
+        sessionName: 'clawguard-cyberpolpo',
+        stsRegion: 'eu-west-1',
+        stsEndpoint,
+        durationSeconds: 3600,
+      },
+    });
+
+    const ctx = {
+      serviceName: 'aws-cloudtrail-target',
+      method: 'POST',
+      path: '/',
+      headers: {
+        'content-type': 'application/x-amz-json-1.1',
+        'x-amz-target': 'com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.LookupEvents',
+      },
+      body: Buffer.from(JSON.stringify({ MaxResults: 1 })),
+      upstreamUrl: 'https://cloudtrail.eu-west-1.amazonaws.com/',
+      dataDir: '/tmp/test',
+      config: {},
+    };
+
+    const first = await plugin.rewriteRequest(ctx);
+    const second = await plugin.rewriteRequest(ctx);
+
+    assert.equal(stsCalls, 1);
+    assert.match(first.headers.authorization, /^AWS4-HMAC-SHA256 Credential=ASIATEMPACCESSKEY\/20150830\/eu-west-1\/cloudtrail\/aws4_request/);
+    assert.equal(first.headers['x-amz-security-token'], 'TEMPSESSIONTOKEN');
+    assert.match(second.headers.authorization, /^AWS4-HMAC-SHA256 Credential=ASIATEMPACCESSKEY\/20150830\/eu-west-1\/cloudtrail\/aws4_request/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
