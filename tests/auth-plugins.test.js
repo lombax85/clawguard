@@ -593,3 +593,79 @@ test('oauth2-authcode loads via plugin loader as built-in', async () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+// ─── aws-sigv4.ts tests ──────────────────────────────────────
+
+const { createPlugin: createAwsSigV4Plugin } = require('../dist/auth-plugins/aws-sigv4');
+
+test('aws-sigv4 plugin createPlugin returns valid IAuthPlugin', () => {
+  const plugin = createAwsSigV4Plugin();
+  assert.equal(plugin.name, 'aws-sigv4');
+  assert.equal(typeof plugin.init, 'function');
+  assert.equal(typeof plugin.rewriteRequest, 'function');
+});
+
+test('loadPlugin loads the built-in aws-sigv4 plugin', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-test-'));
+  try {
+    const plugin = await loadPlugin('test-aws', 'aws-sigv4', {
+      accessKeyId: 'AKIDEXAMPLE',
+      secretAccessKey: 'wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY',
+      region: 'eu-west-1',
+      service: 'cloudtrail',
+    }, tmpDir);
+    assert.equal(plugin.name, 'aws-sigv4');
+    assert.equal(getPlugin('test-aws'), plugin);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('aws-sigv4 plugin signs AWS JSON requests without leaking the secret key', async () => {
+  const plugin = createAwsSigV4Plugin();
+  await plugin.init('/tmp/test', {
+    accessKeyId: 'AKIDEXAMPLE',
+    secretAccessKey: 'wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY',
+    sessionToken: 'SESSIONTOKENEXAMPLE',
+    region: 'eu-west-1',
+    service: 'cloudtrail',
+    fixedDate: '2015-08-30T12:36:00Z',
+  });
+
+  const body = Buffer.from(JSON.stringify({ MaxResults: 1 }));
+  const ctx = {
+    serviceName: 'aws-cloudtrail',
+    method: 'POST',
+    path: '/',
+    headers: {
+      'content-type': 'application/x-amz-json-1.1',
+      'x-amz-target': 'com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.LookupEvents',
+      authorization: 'Bearer dummy',
+    },
+    body,
+    upstreamUrl: 'https://cloudtrail.eu-west-1.amazonaws.com/',
+    dataDir: '/tmp/test',
+    config: {},
+  };
+
+  const result = await plugin.rewriteRequest(ctx);
+  const auth = result.headers.authorization;
+
+  assert.equal(result.headers.host, 'cloudtrail.eu-west-1.amazonaws.com');
+  assert.equal(result.headers['x-amz-date'], '20150830T123600Z');
+  assert.equal(result.headers['x-amz-security-token'], 'SESSIONTOKENEXAMPLE');
+  assert.equal(result.headers['x-amz-content-sha256'], '5d327dabe3dd761d0a1fd5ac1ad275322fd6e1d88a5d361c1750ac453ec177b9');
+  assert.match(auth, /^AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE\/20150830\/eu-west-1\/cloudtrail\/aws4_request, SignedHeaders=/);
+  assert.match(auth, /SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;x-amz-security-token;x-amz-target/);
+  assert.match(auth, /Signature=[a-f0-9]{64}$/);
+  assert.equal(auth.includes('wJalrXUtnFEMI'), false);
+  assert.equal(result.body, body);
+});
+
+test('aws-sigv4 plugin rejects incomplete config', async () => {
+  const plugin = createAwsSigV4Plugin();
+  await assert.rejects(
+    () => plugin.init('/tmp/test', { accessKeyId: 'AKIDEXAMPLE', region: 'eu-west-1', service: 'cloudtrail' }),
+    /secretAccessKey/
+  );
+});

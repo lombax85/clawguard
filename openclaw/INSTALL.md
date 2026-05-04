@@ -166,6 +166,7 @@ ClawGuard supports multiple auth injection methods. **You don't need to know whi
 | `url` | Injects `user:pass` into the upstream URL | Bitbucket git operations |
 | `oauth2_client_credentials` | Rewrites `client_id`/`client_secret` in POST body | OAuth2 token endpoints |
 | `body_json` | Injects/overwrites fields in JSON request body | Bluesky/AT Protocol, any API with body-based auth |
+| `plugin` | Delegates request rewriting/signing to a built-in or custom plugin | OAuth2 auth-code, AWS SigV4 / CloudTrail |
 
 ### `body_json` — for APIs with credentials in the request body
 

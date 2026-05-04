@@ -118,6 +118,28 @@ services:
   #   policy:
   #     default: require_approval
 
+  # ─── AWS SigV4 (e.g. CloudTrail LookupEvents) ───────────
+  # Signs requests with AWS Signature Version 4. Keep these IAM keys read-only.
+  # aws-cloudtrail:
+  #   upstream: https://cloudtrail.eu-west-1.amazonaws.com
+  #   hostnames:
+  #     - cloudtrail.eu-west-1.amazonaws.com
+  #   auth:
+  #     type: plugin
+  #     token: "unused"
+  #     pluginPath: aws-sigv4
+  #     pluginConfig:
+  #       accessKeyId: "AKIA..."
+  #       secretAccessKey: "..."              # or vault:secret/data/aws-cloudtrail#secretAccessKey
+  #       # sessionToken: "..."               # optional for temporary credentials
+  #       region: eu-west-1
+  #       service: cloudtrail
+  #   policy:
+  #     default: require_approval
+  #     rules:
+  #       - match: { method: POST }
+  #         action: auto_approve
+
   # ─── OAuth2 Authorization Code (e.g. Microsoft Graph) ──
   # For APIs using OAuth2 Authorization Code Flow with PKCE.
   # Tokens are stored in data/plugins/oauth2-authcode/tokens.json
@@ -187,6 +209,7 @@ security:
     - api.stripe.com
     - graph.microsoft.com
     - slack.com
+    # - cloudtrail.eu-west-1.amazonaws.com   # needed for aws-cloudtrail example above
   blockPrivateIPs: true
   followRedirects: false
   maxPayloadLogSize: 10240

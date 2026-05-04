@@ -395,7 +395,7 @@ security:
     # ... your other domains
 ```
 
-> ClawGuard supports five auth injection modes: `bearer` (Authorization header), `header` (custom header name), `query` (URL query parameter, e.g. `?access_token=...`), `oauth2_client_credentials` (client_id/client_secret body rewriting), and `body_json` (inject/overwrite arbitrary fields in JSON request bodies — useful for APIs like Bluesky/AT Protocol where credentials are sent in the POST body).
+> ClawGuard supports several auth injection modes: `bearer`, `header`, `query`, `basic`, `url`, `oauth2_client_credentials`, `body_json`, and `plugin`. Built-in plugins include `oauth2-authcode` and `aws-sigv4` for APIs such as AWS CloudTrail.
 
 Restart ClawGuard: `docker compose up -d --build`
 
@@ -592,6 +592,26 @@ services:
         - match: { method: GET }
           action: auto_approve
 
+  # AWS Signature Version 4 plugin — e.g. CloudTrail LookupEvents
+  aws-cloudtrail:
+    upstream: https://cloudtrail.eu-west-1.amazonaws.com
+    hostnames:
+      - cloudtrail.eu-west-1.amazonaws.com
+    auth:
+      type: plugin
+      token: "unused"
+      pluginPath: aws-sigv4
+      pluginConfig:
+        accessKeyId: "AKIA..."
+        secretAccessKey: "..."           # or vault:secret/data/aws-cloudtrail#secretAccessKey
+        region: eu-west-1
+        service: cloudtrail
+    policy:
+      default: require_approval
+      rules:
+        - match: { method: POST }
+          action: auto_approve
+
 notifications:
   telegram:
     botToken: "${TELEGRAM_BOT_TOKEN}"
@@ -605,6 +625,7 @@ security:
     - httpbin.org
     - api.github.com
     - api.openai.com
+    - cloudtrail.eu-west-1.amazonaws.com
   blockPrivateIPs: true                  # prevent SSRF to internal network
   followRedirects: false                 # block open redirect attacks
 

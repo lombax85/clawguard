@@ -178,6 +178,13 @@ async function resolveServiceSecrets(config: Config): Promise<void> {
       if (svc.auth.password) {
         svc.auth.password = await resolveSecretValue(svc.auth.password, providers);
       }
+      if (svc.auth.pluginConfig) {
+        for (const [key, value] of Object.entries(svc.auth.pluginConfig)) {
+          if (typeof value === 'string') {
+            svc.auth.pluginConfig[key] = await resolveSecretValue(value, providers);
+          }
+        }
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`❌ Failed to resolve secrets for service "${name}": ${message}`);
@@ -188,10 +195,15 @@ async function resolveServiceSecrets(config: Config): Promise<void> {
 
 function hasSecretRef(svc: ServiceConfig): boolean {
   const refPattern = /^\w+:.+#\w+$/;
+  const pluginConfigHasRef = svc.auth.pluginConfig
+    ? Object.values(svc.auth.pluginConfig).some((value) => typeof value === 'string' && refPattern.test(value))
+    : false;
+
   return refPattern.test(svc.auth.token)
     || (!!svc.auth.clientId && refPattern.test(svc.auth.clientId))
     || (!!svc.auth.clientSecret && refPattern.test(svc.auth.clientSecret))
-    || (!!svc.auth.password && refPattern.test(svc.auth.password));
+    || (!!svc.auth.password && refPattern.test(svc.auth.password))
+    || pluginConfigHasRef;
 }
 
 /**
