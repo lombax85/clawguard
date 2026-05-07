@@ -69,6 +69,28 @@ export interface TelegramConfig {
   };
 }
 
+// ─── Web Push (browser push notifications, e.g. macOS native banners) ──
+
+export interface WebPushConfig {
+  enabled: boolean;
+  subject: string;             // mailto: or https URL — required by VAPID spec
+  keysPath?: string;           // where to persist auto-generated VAPID keys
+  vapidPublicKey?: string;     // optional: provide explicitly to skip auto-generation
+  vapidPrivateKey?: string;
+  ttl?: number;                // seconds the push service holds the message; default 120
+  urgency?: 'very-low' | 'low' | 'normal' | 'high'; // default 'high'
+  requireInteraction?: boolean; // notification stays visible until clicked; default true
+}
+
+export interface WebPushSubscriptionRecord {
+  id: number;
+  endpoint: string;
+  p256dh: string;
+  auth: string;
+  userAgent: string | null;
+  createdAt: string;
+}
+
 // ─── Audit ───────────────────────────────────────────────────
 
 export interface AuditConfig {
@@ -129,6 +151,7 @@ export interface Config {
   services: Record<string, ServiceConfig>;
   notifications?: {
     telegram?: TelegramConfig;
+    webpush?: WebPushConfig;
   };
   audit: AuditConfig;
   security: SecurityConfig;

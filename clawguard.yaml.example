@@ -208,6 +208,24 @@ notifications:
       enabled: true
       secret: "change-me-to-a-random-pairing-secret"  # IMPORTANT: openssl rand -hex 16
 
+  # ─── Web Push (browser native notifications, e.g. macOS banners) ──
+  # A second, independent notification channel. Useful when you miss
+  # Telegram pushes. Both channels race for approval — first response wins.
+  #
+  # 1. Enable below and restart ClawGuard (VAPID keys are auto-generated).
+  # 2. Open the dashboard, go to "Web Push", click "Enable on this browser".
+  # 3. On macOS: System Settings → Notifications → <browser> → Allow
+  #    Time-Sensitive (and optionally enable sounds) so pushes bypass Focus.
+  webpush:
+    enabled: false
+    subject: "mailto:you@example.com"   # required by VAPID spec
+    # keysPath: ./data/webpush-vapid.json
+    # ttl: 120                          # how long the push service holds the message
+    # urgency: high                     # very-low | low | normal | high (default: high)
+    # requireInteraction: true          # notification stays until clicked (default: true)
+    # vapidPublicKey: ""                # optional: provide explicitly to skip auto-generation
+    # vapidPrivateKey: ""
+
 security:
   allowedUpstreams:
     - httpbin.org

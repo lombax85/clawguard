@@ -65,7 +65,7 @@ export function createProxy(
   // ─── Admin panel ──────────────────────────────────────────
 
   if (config.admin.enabled) {
-    const adminRouter = createAdminRouter(config, approvalManager, audit);
+    const adminRouter = createAdminRouter(config, approvalManager, audit, approvalManager.getWebPush());
     app.use('/__admin', adminRouter);
   }
 

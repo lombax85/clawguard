@@ -2,6 +2,7 @@ import path from 'path';
 import { loadConfig } from './config';
 import { AuditLogger } from './audit';
 import { TelegramNotifier } from './telegram';
+import { WebPushNotifier } from './webpush';
 import { ApprovalManager } from './approval';
 import { createProxy } from './proxy';
 import { validateAllUpstreams, validateUpstreamUrl } from './security';
@@ -55,9 +56,17 @@ async function main() {
     console.log('📱 Telegram: disabled (not configured)');
   }
 
+  // Init Web Push (optional second notification channel)
+  let webpushNotifier: WebPushNotifier | undefined;
+  if (config.notifications?.webpush?.enabled) {
+    webpushNotifier = new WebPushNotifier(config.notifications.webpush, audit);
+  } else {
+    console.log('🔔 Web Push: disabled (not configured)');
+  }
+
   // Init approval manager (restores active approvals from SQLite)
   console.log(`🔑 Restoring approvals:`);
-  const approvalManager = new ApprovalManager(telegram, audit);
+  const approvalManager = new ApprovalManager(telegram, audit, undefined, webpushNotifier);
 
   // Create and start proxy
   const app = createProxy(config, approvalManager, audit);

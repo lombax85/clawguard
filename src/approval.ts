@@ -1,5 +1,6 @@
 import { Approval, ServiceConfig, PolicyRule } from './types';
 import { TelegramNotifier } from './telegram';
+import { WebPushNotifier } from './webpush';
 import { AuditLogger } from './audit';
 
 let requestCounter = 0;
@@ -17,16 +18,27 @@ export class ApprovalManager {
     return `${service}::${method.toUpperCase()}::${pathPart}`;
   }
   private telegram: TelegramNotifier | undefined;
+  private webpush: WebPushNotifier | undefined;
   private audit: AuditLogger;
   private approvalTimeout: number;
 
-  constructor(telegram: TelegramNotifier | undefined, audit: AuditLogger, approvalTimeoutMs: number = 120000) {
+  constructor(
+    telegram: TelegramNotifier | undefined,
+    audit: AuditLogger,
+    approvalTimeoutMs: number = 120000,
+    webpush?: WebPushNotifier
+  ) {
     this.telegram = telegram;
+    this.webpush = webpush;
     this.audit = audit;
     this.approvalTimeout = approvalTimeoutMs;
 
     // Restore active approvals from SQLite (survive restarts)
     this.restoreApprovals();
+  }
+
+  getWebPush(): WebPushNotifier | undefined {
+    return this.webpush;
   }
 
   private restoreApprovals(): void {
@@ -142,19 +154,19 @@ export class ApprovalManager {
     // Request new approval
     console.log(`🔔 Requesting approval for: ${method} ${service}${path}`);
 
-    // No Telegram configured — auto-approve (test/dev mode)
-    if (!this.telegram) {
-      console.log(`✅ Auto-approved (no Telegram): ${method} ${service}${path}`);
+    // No notification channel configured — auto-approve (test/dev mode)
+    if (!this.telegram && !this.webpush) {
+      console.log(`✅ Auto-approved (no notification channel): ${method} ${service}${path}`);
       const approval: Approval = {
         service,
         method: method.toUpperCase(),
         path: null,
         approvedAt: Date.now(),
         expiresAt: Date.now() + 3600 * 1000, // 1h default
-        approvedBy: 'auto (no telegram)',
+        approvedBy: 'auto (no channel)',
       };
       this.activeApprovals.set(this.approvalKey(service, method, null), approval);
-      this.audit.logApproval(service, method, 'auto (no telegram)', 3600, null);
+      this.audit.logApproval(service, method, 'auto (no channel)', 3600, null);
       return true;
     }
 
@@ -163,14 +175,24 @@ export class ApprovalManager {
     const timeoutPromise = new Promise<{ approved: boolean; ttlSeconds: number; approvedBy: string; pathScoped: boolean }>((resolve) => {
       setTimeout(() => {
         this.telegram?.clearPendingRequest(requestId);
+        this.webpush?.clearPendingRequest(requestId);
         resolve({ approved: false, ttlSeconds: 0, approvedBy: 'timeout', pathScoped: false });
       }, this.approvalTimeout);
     });
 
-    const result = await Promise.race([
-      this.telegram.requestApproval(requestId, service, method, path, agentIp),
-      timeoutPromise,
-    ]);
+    const channelPromises: Promise<{ approved: boolean; ttlSeconds: number; approvedBy: string; pathScoped: boolean }>[] = [];
+    if (this.telegram) {
+      channelPromises.push(this.telegram.requestApproval(requestId, service, method, path, agentIp));
+    }
+    if (this.webpush) {
+      channelPromises.push(this.webpush.requestApproval(requestId, service, method, path, agentIp));
+    }
+
+    const result = await Promise.race([...channelPromises, timeoutPromise]);
+
+    // First channel won — clear the others so any later button click is a no-op
+    this.telegram?.clearPendingRequest(requestId);
+    this.webpush?.clearPendingRequest(requestId);
 
     if (result.approved) {
       const scopedPath = result.pathScoped ? path : null;

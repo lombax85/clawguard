@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 ## [Unreleased]
 
 ### Added
+- **Web Push notification channel**: a second, independent approval channel that delivers requests as native browser/OS notifications. Runs in parallel with Telegram — both channels race for approval, first response wins. Uses standard VAPID + RFC 8291 (no third-party push service or app). Auto-generates and persists VAPID keys at first start; subscriptions are stored in SQLite. Service worker at `/__admin/sw.js`, opt-in from the dashboard "Web Push" tab. Approve/Deny actions are signed with HMAC so the service worker can call back without the dashboard PIN. Designed to bypass macOS Focus modes via the browser's Time-Sensitive Notification setting. Configure via `notifications.webpush` in `clawguard.yaml`.
 - **Path-scoped approvals**: new Telegram buttons `15m-path`, `24h-path`, `forever-path` grant approval only for the exact request path (including querystring). Non-matching paths on the same service+method still trigger a fresh approval request. Persisted across restarts via new `approvals.path` column.
 - **`1month` approval duration** (30 days) added to the standard TTL set.
 - **`/showlog on|off` Telegram command**: when enabled, the paired chat receives info-only notifications for every auto-approved call (policy-based or via existing approval), with the reason surfaced. State persisted per chat (`telegram_paired_users.showlog`).

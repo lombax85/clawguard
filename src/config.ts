@@ -1,7 +1,9 @@
 import fs from 'fs';
+import path from 'path';
 import yaml from 'js-yaml';
 import { Config, ServiceConfig } from './types';
 import { createSecretProviders, resolveSecretValue, SecretProvider } from './secrets/provider';
+import { ensureVapidKeys } from './webpush';
 
 function substituteEnvVars(str: string): string {
   return str.replace(/\$\{(\w+)\}/g, (match, varName) => {
@@ -133,6 +135,28 @@ export async function loadConfig(configPath: string): Promise<Config> {
       console.error('   Set notifications.telegram.pairing.secret in config');
       process.exit(1);
     }
+  }
+
+  // ─── Web Push ──────────────────────────────────────────────
+
+  if (config.notifications?.webpush?.enabled) {
+    const wp = config.notifications.webpush;
+    if (!wp.subject) {
+      console.error('❌ Web Push enabled but notifications.webpush.subject is missing.');
+      console.error('   Set it to a mailto: address (e.g. "mailto:you@example.com")');
+      process.exit(1);
+    }
+    if (!wp.subject.startsWith('mailto:') && !wp.subject.startsWith('https://')) {
+      console.error('❌ notifications.webpush.subject must start with "mailto:" or "https://" (VAPID requirement)');
+      process.exit(1);
+    }
+    const keysPath = path.resolve(wp.keysPath || './data/webpush-vapid.json');
+    const keys = ensureVapidKeys(keysPath, wp.vapidPublicKey, wp.vapidPrivateKey);
+    wp.vapidPublicKey = keys.publicKey;
+    wp.vapidPrivateKey = keys.privateKey;
+    wp.ttl = wp.ttl ?? 120;
+    wp.urgency = wp.urgency ?? 'high';
+    wp.requireInteraction = wp.requireInteraction ?? true;
   }
 
   // ─── Validate admin PIN ────────────────────────────────────
