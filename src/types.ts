@@ -88,6 +88,11 @@ export interface WebhookConfig {
   timeoutMs?: number;                   // default 5000
   cancelOnResolve?: boolean;            // also POST a follow-up event when the approval resolves; default true
   dashboardUrl?: string;                // optional, included in the payload so the receiver can deep-link
+  // Delay (seconds) before firing approval_required. Useful as an escalation:
+  // Telegram fires immediately, the webhook only fires if the user hasn't approved
+  // within this window. If the approval resolves first, neither event is sent.
+  // Default 0 = fire immediately (parallel to Telegram).
+  escalateAfterSeconds?: number;
 }
 
 // ─── Audit ───────────────────────────────────────────────────

@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 - **Outbound webhook side channel**: fire-and-forget notification to a user-defined URL whenever an approval is requested, and (optionally) when it's resolved. Generic by design — any external alerting or automation system that can ingest a JSON POST is supported. Does not participate in the approval decision; Telegram is still the decider. Configure via `notifications.webhook` in `clawguard.yaml` (URL, method, headers, timeout, `cancelOnResolve`).
+  - **Escalation delay** (`escalateAfterSeconds`, default 0): when set, the `approval_required` event is deferred by N seconds and only fires if the request is still pending. If the user approves/denies within the window, neither `approval_required` nor `approval_resolved` is sent. Useful to keep the webhook (and any urgent alerts it triggers) reserved for cases where Telegram was missed.
 - **Admin HTTPS listener**: optional second listener (`admin.https.enabled`, default port 9443) that serves the dashboard over TLS using a leaf cert auto-issued by the existing MITM CA. Cert SAN includes `localhost` + `127.0.0.1` plus any user-configured hostnames/IPs. Files persisted under `data/ca/admin.{crt,key,json}`; cert is regenerated when the SAN list changes.
 
 ### Removed

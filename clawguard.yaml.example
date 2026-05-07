@@ -234,6 +234,13 @@ notifications:
   #   dashboardUrl: "https://clawguard.example.com/__admin/"   # optional, included in payload
   #   headers:                                        # optional custom headers
   #     X-My-Token: "${MY_HOOK_TOKEN}"
+  #
+  #   # Escalation delay (seconds): if > 0, the approval_required event is
+  #   # deferred by this interval and only fires when the request is still
+  #   # pending. Useful to reserve the webhook for missed Telegram approvals.
+  #   # If the request resolves first, neither event is sent.
+  #   # Default: 0 (fire immediately, in parallel with Telegram).
+  #   # escalateAfterSeconds: 60
 
 security:
   allowedUpstreams:

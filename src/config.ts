@@ -165,6 +165,11 @@ export async function loadConfig(configPath: string): Promise<Config> {
     wh.method = wh.method ?? 'POST';
     wh.timeoutMs = wh.timeoutMs ?? 5000;
     wh.cancelOnResolve = wh.cancelOnResolve ?? true;
+    wh.escalateAfterSeconds = wh.escalateAfterSeconds ?? 0;
+    if (wh.escalateAfterSeconds < 0) {
+      console.error('❌ notifications.webhook.escalateAfterSeconds must be >= 0');
+      process.exit(1);
+    }
   }
 
   // ─── Validate admin PIN ────────────────────────────────────
