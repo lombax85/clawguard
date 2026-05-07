@@ -251,6 +251,25 @@ admin:
     # - "172.17.0.1"                        # Docker: host IP on default bridge network
     # - "172.16.0.0/12"                     # Docker: allow all Docker networks (172.16-31.x.x)
 
+  # ─── Admin HTTPS listener ─────────────────────────────────
+  # Required if you want to use Web Push notifications from a browser
+  # accessing the dashboard from a non-localhost address. Service Workers
+  # and the Push API are gated to "secure contexts" (https or http://localhost),
+  # so a plain http://LAN-IP:9090 dashboard cannot enable Web Push.
+  #
+  # When enabled, a second listener serves the admin UI only over TLS.
+  # The leaf cert is signed by the same CA in `data/ca/` that ClawGuard
+  # uses for MITM mode — trust this CA once in your Keychain (macOS) or
+  # browser to avoid TLS warnings.
+  #
+  # https:
+  #   enabled: true
+  #   port: 9443
+  #   hostnames:                       # SAN entries on the leaf cert
+  #     - 192.168.1.50                # add the LAN IP/hostname you connect from
+  #     - clawguard.local
+  # localhost and 127.0.0.1 are always added automatically.
+
 audit:
   type: sqlite
   path: ./data/clawguard.db    # use ./data/ for Docker volume persistence

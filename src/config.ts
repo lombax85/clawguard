@@ -50,6 +50,12 @@ const DEFAULT_ADMIN = {
   allowedIPs: ['127.0.0.1', '::1', '::ffff:127.0.0.1', '172.16.0.0/12'],
 };
 
+const DEFAULT_ADMIN_HTTPS = {
+  enabled: false,
+  port: 9443,
+  hostnames: [] as string[],
+};
+
 const DEFAULT_AUDIT = {
   type: 'sqlite' as const,
   path: './clawguard.db',
@@ -114,6 +120,9 @@ export async function loadConfig(configPath: string): Promise<Config> {
 
   config.security = { ...DEFAULT_SECURITY, ...(config.security || {}) };
   config.admin = { ...DEFAULT_ADMIN, ...(config.admin || {}) };
+  if (config.admin.https) {
+    config.admin.https = { ...DEFAULT_ADMIN_HTTPS, ...config.admin.https };
+  }
   config.audit = { ...DEFAULT_AUDIT, ...(config.audit || {}) };
   config.proxy = { ...DEFAULT_PROXY, ...(config.proxy || {}) };
   config.transparentProxy = { ...DEFAULT_TRANSPARENT_PROXY, ...(config.transparentProxy || {}) };

@@ -1,4 +1,6 @@
 import path from 'path';
+import https from 'https';
+import express from 'express';
 import { loadConfig } from './config';
 import { AuditLogger } from './audit';
 import { TelegramNotifier } from './telegram';
@@ -10,6 +12,7 @@ import { CertManager } from './cert-manager';
 import { attachMitmProxy } from './mitm-proxy';
 import { startTransparentProxy } from './transparent-proxy';
 import { loadPlugin } from './auth-plugins/loader';
+import { createAdminRouter } from './admin';
 
 const CONFIG_PATH = process.env['CLAWGUARD_CONFIG'] || process.env['AGENTGATE_CONFIG'] || path.join(process.cwd(), 'clawguard.yaml');
 
@@ -107,9 +110,35 @@ async function main() {
   // ─── Cert Manager ──────────────────────────────────────────────
 
   let certManager: CertManager | undefined;
-  if (config.proxy.enabled || config.transparentProxy.enabled) {
+  if (config.proxy.enabled || config.transparentProxy.enabled || config.admin.https?.enabled) {
     const caDir = path.resolve(config.proxy.caDir);
     certManager = new CertManager(caDir);
+  }
+
+  // ─── Admin HTTPS listener ────────────────────────────────────
+  // A second listener that serves only the admin dashboard over TLS.
+  // Required to enable Web Push / Service Workers in the browser
+  // (those APIs are gated to secure contexts: https or http://localhost).
+
+  let httpsServer: https.Server | undefined;
+  if (config.admin.enabled && config.admin.https?.enabled && certManager) {
+    const httpsCfg = config.admin.https;
+    const userHostnames = httpsCfg.hostnames || [];
+    const dnsNames = ['localhost', ...userHostnames.filter((h) => !/^\d+\.\d+\.\d+\.\d+$/.test(h) && h !== 'localhost')];
+    const ips = ['127.0.0.1', ...userHostnames.filter((h) => /^\d+\.\d+\.\d+\.\d+$/.test(h) && h !== '127.0.0.1')];
+
+    const pair = certManager.getServerCert('admin', dnsNames, ips);
+
+    const adminApp = express();
+    adminApp.use(express.raw({ type: '*/*', limit: '10mb' }));
+    adminApp.use('/__admin', createAdminRouter(config, approvalManager, audit, webpushNotifier));
+
+    httpsServer = https.createServer({ cert: pair.cert, key: pair.key }, adminApp);
+    httpsServer.listen(httpsCfg.port, () => {
+      console.log(`\n🔐 Admin HTTPS listener: https://localhost:${httpsCfg.port}/__admin`);
+      console.log(`   Certificate SAN: DNS=[${dnsNames.join(', ')}] IP=[${ips.join(', ')}]`);
+      console.log(`   Trust this CA in your browser/Keychain: ${certManager!.getCaCertPath()}`);
+    });
   }
 
   // ─── HTTPS_PROXY MITM mode ───────────────────────────────────
@@ -135,6 +164,7 @@ async function main() {
     telegram?.stop();
     audit.close();
     server.close();
+    httpsServer?.close();
     process.exit(0);
   }
 

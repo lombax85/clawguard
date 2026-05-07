@@ -52,10 +52,19 @@ export interface SecurityConfig {
 
 // ─── Admin ───────────────────────────────────────────────────
 
+export interface AdminHttpsConfig {
+  enabled: boolean;
+  port: number;
+  // DNS names + IPs to embed as SAN in the leaf cert. localhost/127.0.0.1 are
+  // always added so SSH-tunnel access keeps working.
+  hostnames?: string[];
+}
+
 export interface AdminConfig {
   enabled: boolean;
   pin: string;
   allowedIPs: string[];
+  https?: AdminHttpsConfig;
 }
 
 // ─── Telegram ────────────────────────────────────────────────

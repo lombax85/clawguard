@@ -4,6 +4,7 @@ services:
     container_name: clawguard
     ports:
       - "9090:9090"
+      - "9443:9443"   # admin HTTPS — only used when admin.https.enabled=true
     volumes:
       - ./clawguard.yaml:/app/clawguard.yaml:ro   # config (read-only)
       - ./data:/app/data                            # SQLite DB persistence
