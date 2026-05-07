@@ -268,7 +268,9 @@
         <h3>This browser</h3>
         <p style="color: var(--text2); font-size: 13px; margin-bottom: 12px;">
           Enable Web Push to receive approval requests as native OS notifications on this device — even when the dashboard tab is closed.
-          On macOS, Notification Settings &rarr; Allow Time-Sensitive Notifications for your browser to bypass Focus modes.
+          To make them stand out on macOS: System Settings &rarr; Notifications &rarr; <em>your browser</em> &rarr; set <strong>Banner style: Persistent</strong> + Play sound.
+          To bypass Focus modes, add the browser under System Settings &rarr; Focus &rarr; <em>active Focus</em> &rarr; Allowed Notifications.
+          Note: on Safari only the body of the notification is shown (no Approve/Deny action buttons — Safari ignores them); click the body to open the dashboard. Chrome shows the action buttons.
         </p>
         <div id="webpush-status" style="background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; margin-bottom: 12px; font-size: 13px;">Checking…</div>
         <div style="display: flex; gap: 8px; flex-wrap: wrap;">
