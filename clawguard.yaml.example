@@ -208,23 +208,32 @@ notifications:
       enabled: true
       secret: "change-me-to-a-random-pairing-secret"  # IMPORTANT: openssl rand -hex 16
 
-  # ─── Web Push (browser native notifications, e.g. macOS banners) ──
-  # A second, independent notification channel. Useful when you miss
-  # Telegram pushes. Both channels race for approval — first response wins.
+  # ─── Outbound webhook (fire-and-forget side notification) ──
+  # Posts a JSON payload to a URL of your choice every time an approval
+  # is requested, and (optionally) when it's resolved. Useful to plug
+  # ClawGuard into any external alerting or automation system that can
+  # ingest a webhook. This channel does NOT participate in the approval
+  # decision — Telegram is still the decider.
   #
-  # 1. Enable below and restart ClawGuard (VAPID keys are auto-generated).
-  # 2. Open the dashboard, go to "Web Push", click "Enable on this browser".
-  # 3. On macOS: System Settings → Notifications → <browser> → Allow
-  #    Time-Sensitive (and optionally enable sounds) so pushes bypass Focus.
-  webpush:
-    enabled: false
-    subject: "mailto:you@example.com"   # required by VAPID spec
-    # keysPath: ./data/webpush-vapid.json
-    # ttl: 120                          # how long the push service holds the message
-    # urgency: high                     # very-low | low | normal | high (default: high)
-    # requireInteraction: true          # notification stays until clicked (default: true)
-    # vapidPublicKey: ""                # optional: provide explicitly to skip auto-generation
-    # vapidPrivateKey: ""
+  # Payload (approval_required):
+  #   { "event": "approval_required", "requestId": "...",
+  #     "service": "github", "method": "DELETE", "path": "/repos/x/y",
+  #     "agentIp": "1.2.3.4", "timestamp": 1700000000000,
+  #     "dashboardUrl": "..." }
+  #
+  # Payload (approval_resolved, when cancelOnResolve is true):
+  #   { "event": "approval_resolved", "requestId": "...",
+  #     "approved": true, "approvedBy": "alice", "timestamp": ... }
+  #
+  # webhook:
+  #   enabled: true
+  #   url: "https://your-system.example.com/hook/abc123"
+  #   method: POST                                    # POST (default) or PUT
+  #   timeoutMs: 5000                                 # default 5s
+  #   cancelOnResolve: true                           # also notify when approval is resolved (default true)
+  #   dashboardUrl: "https://clawguard.example.com/__admin/"   # optional, included in payload
+  #   headers:                                        # optional custom headers
+  #     X-My-Token: "${MY_HOOK_TOKEN}"
 
 security:
   allowedUpstreams:

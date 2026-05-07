@@ -3,7 +3,6 @@ import path from 'path';
 import yaml from 'js-yaml';
 import { Config, ServiceConfig } from './types';
 import { createSecretProviders, resolveSecretValue, SecretProvider } from './secrets/provider';
-import { ensureVapidKeys } from './webpush';
 
 function substituteEnvVars(str: string): string {
   return str.replace(/\$\{(\w+)\}/g, (match, varName) => {
@@ -146,26 +145,26 @@ export async function loadConfig(configPath: string): Promise<Config> {
     }
   }
 
-  // ─── Web Push ──────────────────────────────────────────────
+  // ─── Outbound webhook ──────────────────────────────────────
 
-  if (config.notifications?.webpush?.enabled) {
-    const wp = config.notifications.webpush;
-    if (!wp.subject) {
-      console.error('❌ Web Push enabled but notifications.webpush.subject is missing.');
-      console.error('   Set it to a mailto: address (e.g. "mailto:you@example.com")');
+  if (config.notifications?.webhook?.enabled) {
+    const wh = config.notifications.webhook;
+    if (!wh.url) {
+      console.error('❌ notifications.webhook.enabled is true but notifications.webhook.url is missing.');
       process.exit(1);
     }
-    if (!wp.subject.startsWith('mailto:') && !wp.subject.startsWith('https://')) {
-      console.error('❌ notifications.webpush.subject must start with "mailto:" or "https://" (VAPID requirement)');
+    try {
+      const u = new URL(wh.url);
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+        throw new Error(`unsupported protocol: ${u.protocol}`);
+      }
+    } catch (err) {
+      console.error(`❌ notifications.webhook.url is not a valid URL: ${err instanceof Error ? err.message : err}`);
       process.exit(1);
     }
-    const keysPath = path.resolve(wp.keysPath || './data/webpush-vapid.json');
-    const keys = ensureVapidKeys(keysPath, wp.vapidPublicKey, wp.vapidPrivateKey);
-    wp.vapidPublicKey = keys.publicKey;
-    wp.vapidPrivateKey = keys.privateKey;
-    wp.ttl = wp.ttl ?? 120;
-    wp.urgency = wp.urgency ?? 'high';
-    wp.requireInteraction = wp.requireInteraction ?? true;
+    wh.method = wh.method ?? 'POST';
+    wh.timeoutMs = wh.timeoutMs ?? 5000;
+    wh.cancelOnResolve = wh.cancelOnResolve ?? true;
   }
 
   // ─── Validate admin PIN ────────────────────────────────────

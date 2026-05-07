@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { AuditEntry, Approval, DashboardStats, ServiceConfig, WebPushSubscriptionRecord } from './types';
+import { AuditEntry, Approval, DashboardStats, ServiceConfig } from './types';
 
 export class AuditLogger {
   private db: Database.Database;
@@ -49,14 +49,6 @@ export class AuditLogger {
         updated_at TEXT NOT NULL
       );
 
-      CREATE TABLE IF NOT EXISTS webpush_subscriptions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        endpoint TEXT NOT NULL UNIQUE,
-        p256dh TEXT NOT NULL,
-        auth TEXT NOT NULL,
-        user_agent TEXT,
-        created_at TEXT NOT NULL
-      );
     `);
 
     // Add columns if they don't exist (migration for existing DBs)
@@ -340,30 +332,6 @@ export class AuditLogger {
       methodBreakdown: this.getMethodBreakdown(weekStart, filterService),
       availableServices: this.getDistinctServices(),
     };
-  }
-
-  // ─── Web Push subscriptions ───────────────────────────────
-
-  saveWebPushSubscription(endpoint: string, p256dh: string, auth: string, userAgent: string | null): void {
-    const now = new Date().toISOString();
-    this.db.prepare(`
-      INSERT INTO webpush_subscriptions (endpoint, p256dh, auth, user_agent, created_at)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(endpoint) DO UPDATE SET p256dh = ?, auth = ?, user_agent = ?
-    `).run(endpoint, p256dh, auth, userAgent, now, p256dh, auth, userAgent);
-  }
-
-  deleteWebPushSubscription(endpoint: string): boolean {
-    const info = this.db.prepare('DELETE FROM webpush_subscriptions WHERE endpoint = ?').run(endpoint);
-    return info.changes > 0;
-  }
-
-  getWebPushSubscriptions(): WebPushSubscriptionRecord[] {
-    return this.db.prepare(`
-      SELECT id, endpoint, p256dh, auth, user_agent as userAgent, created_at as createdAt
-      FROM webpush_subscriptions
-      ORDER BY id DESC
-    `).all() as WebPushSubscriptionRecord[];
   }
 
   // ─── Lifecycle ─────────────────────────────────────────────

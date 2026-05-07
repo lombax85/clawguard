@@ -140,7 +140,6 @@
       <a href="#" data-section="approvals" onclick="showSection('approvals')">&#9989; <span>Approvals</span></a>
       <a href="#" data-section="audit" onclick="showSection('audit')">&#128203; <span>Audit Log</span></a>
       <a href="#" data-section="telegram" onclick="showSection('telegram')">&#128242; <span>Telegram</span></a>
-      <a href="#" data-section="webpush" onclick="showSection('webpush')">&#128276; <span>Web Push</span></a>
       <a href="#" data-section="discovered" onclick="showSection('discovered')">&#128269; <span>Discovered</span></a>
     </nav>
   </div>
@@ -258,34 +257,6 @@
         <p style="color: var(--text2); font-size: 13px; margin-top: 12px;">
           To pair a new user, send <code>/pair &lt;secret&gt;</code> to the Telegram bot.
         </p>
-      </div>
-    </div>
-
-    <!-- ─── Web Push ─────────────────────────── -->
-    <div class="section" id="sec-webpush">
-      <h2 class="page-title">Web Push Notifications</h2>
-      <div class="panel">
-        <h3>This browser</h3>
-        <p style="color: var(--text2); font-size: 13px; margin-bottom: 12px;">
-          Enable Web Push to receive approval requests as native OS notifications on this device — even when the dashboard tab is closed.
-          To make them stand out on macOS: System Settings &rarr; Notifications &rarr; <em>your browser</em> &rarr; set <strong>Banner style: Persistent</strong> + Play sound.
-          To bypass Focus modes, add the browser under System Settings &rarr; Focus &rarr; <em>active Focus</em> &rarr; Allowed Notifications.
-          Note: on Safari only the body of the notification is shown (no Approve/Deny action buttons — Safari ignores them); click the body to open the dashboard. Chrome shows the action buttons.
-        </p>
-        <div id="webpush-status" style="background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; margin-bottom: 12px; font-size: 13px;">Checking…</div>
-        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-          <button class="btn btn-primary" id="webpush-enable-btn" onclick="enableWebPush()" style="display:none;">Enable on this browser</button>
-          <button class="btn btn-danger" id="webpush-disable-btn" onclick="disableWebPush()" style="display:none;">Disable on this browser</button>
-          <button class="btn" id="webpush-test-btn" onclick="testWebPush()" style="background: var(--bg3); display:none;">Send test notification</button>
-        </div>
-      </div>
-      <div class="panel">
-        <h3>All registered subscribers</h3>
-        <table>
-          <thead><tr><th>#</th><th>Endpoint</th><th>User agent</th><th>Registered</th></tr></thead>
-          <tbody id="webpush-table"></tbody>
-        </table>
-        <p id="webpush-empty" style="color: var(--text2); font-size: 13px; margin-top: 12px; display:none;">No subscribers yet.</p>
       </div>
     </div>
 
@@ -408,7 +379,6 @@ function showSection(name) {
   if (name === 'approvals') loadApprovals();
   if (name === 'audit') loadAudit();
   if (name === 'telegram') loadTelegram();
-  if (name === 'webpush') loadWebPush();
   if (name === 'discovered') loadDiscovered();
 }
 
@@ -867,148 +837,6 @@ async function loadTelegram() {
   if ((data.pairedUsers || []).length === 0) {
     tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--text2)">No paired users</td></tr>';
   }
-}
-
-// ─── Web Push ────────────────────────────────────
-
-function urlBase64ToUint8Array(base64String) {
-  const padding = '='.repeat((4 - base64String.length % 4) % 4);
-  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
-  const raw = atob(base64);
-  const out = new Uint8Array(raw.length);
-  for (let i = 0; i < raw.length; ++i) out[i] = raw.charCodeAt(i);
-  return out;
-}
-
-async function loadWebPush() {
-  const statusEl = document.getElementById('webpush-status');
-  const enableBtn = document.getElementById('webpush-enable-btn');
-  const disableBtn = document.getElementById('webpush-disable-btn');
-
-  if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
-    statusEl.innerHTML = '<span style="color:var(--red)">⚠️ This browser does not support Web Push (Service Worker / PushManager API missing).</span>';
-    enableBtn.style.display = 'none';
-    disableBtn.style.display = 'none';
-    await loadWebPushSubscribers();
-    return;
-  }
-
-  const cfg = await fetch(BASE + '/api/webpush/config').then(r => r.json()).catch(() => ({ enabled: false }));
-  if (!cfg.enabled) {
-    statusEl.innerHTML = '<span style="color:var(--orange)">Web Push is disabled in <code>clawguard.yaml</code>. Set <code>notifications.webpush.enabled: true</code> and restart.</span>';
-    enableBtn.style.display = 'none';
-    disableBtn.style.display = 'none';
-    await loadWebPushSubscribers();
-    return;
-  }
-
-  // Register the service worker (cheap if already registered)
-  let registration;
-  try {
-    registration = await navigator.serviceWorker.register(BASE + '/sw.js', { scope: BASE + '/' });
-  } catch (err) {
-    statusEl.innerHTML = '<span style="color:var(--red)">⚠️ Service worker registration failed: ' + esc(err.message || err) + '</span>';
-    return;
-  }
-
-  const existing = await registration.pushManager.getSubscription();
-  if (Notification.permission === 'denied') {
-    statusEl.innerHTML = '<span style="color:var(--red)">⛔ Notification permission was denied for this browser. Re-enable it in your browser settings to receive pushes.</span>';
-    enableBtn.style.display = 'none';
-    disableBtn.style.display = 'none';
-  } else if (existing) {
-    statusEl.innerHTML = '<span style="color:var(--green)">✅ Subscribed on this browser. Notifications will arrive here.</span>';
-    enableBtn.style.display = 'none';
-    disableBtn.style.display = 'inline-block';
-    document.getElementById('webpush-test-btn').style.display = 'inline-block';
-  } else {
-    statusEl.innerHTML = 'Not subscribed on this browser. Click <strong>Enable</strong> and grant notification permission.';
-    enableBtn.style.display = 'inline-block';
-    disableBtn.style.display = 'none';
-  }
-
-  // Stash the public key + registration for the enable action
-  window.__webpushCfg = { publicKey: cfg.publicKey, registration };
-
-  await loadWebPushSubscribers();
-}
-
-async function loadWebPushSubscribers() {
-  try {
-    const data = await api('GET', '/api/webpush/subscriptions');
-    const tbody = document.getElementById('webpush-table');
-    const empty = document.getElementById('webpush-empty');
-    tbody.innerHTML = '';
-    const subs = data.subscriptions || [];
-    if (subs.length === 0) {
-      empty.style.display = 'block';
-      return;
-    }
-    empty.style.display = 'none';
-    for (const s of subs) {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td>${s.id}</td>
-        <td><code>…${esc(s.endpointSuffix)}</code></td>
-        <td style="font-size:11px;color:var(--text2);">${esc(s.userAgent || '-')}</td>
-        <td>${new Date(s.createdAt).toLocaleString()}</td>
-      `;
-      tbody.appendChild(tr);
-    }
-  } catch (err) {
-    // probably session expired — UI is already redirected to login by api()
-  }
-}
-
-async function enableWebPush() {
-  const cfg = window.__webpushCfg;
-  if (!cfg) { await loadWebPush(); return; }
-
-  const permission = await Notification.requestPermission();
-  if (permission !== 'granted') {
-    alert('Notification permission was not granted.');
-    return;
-  }
-
-  try {
-    const sub = await cfg.registration.pushManager.subscribe({
-      userVisibleOnly: true,
-      applicationServerKey: urlBase64ToUint8Array(cfg.publicKey),
-    });
-    const json = sub.toJSON();
-    await api('POST', '/api/webpush/subscribe', {
-      endpoint: json.endpoint,
-      keys: json.keys,
-    });
-    await loadWebPush();
-  } catch (err) {
-    alert('Web Push subscription failed: ' + (err.message || err));
-  }
-}
-
-async function disableWebPush() {
-  const cfg = window.__webpushCfg;
-  if (!cfg) return;
-  const sub = await cfg.registration.pushManager.getSubscription();
-  if (!sub) { await loadWebPush(); return; }
-  const endpoint = sub.endpoint;
-  try {
-    await sub.unsubscribe();
-  } catch (err) {
-    // continue — still try to delete server-side
-  }
-  try {
-    await api('POST', '/api/webpush/unsubscribe', { endpoint });
-  } catch (err) {
-    // ignore
-  }
-  await loadWebPush();
-}
-
-async function testWebPush() {
-  // Trigger a real approval flow against a non-existent service. The server
-  // will issue a push to all subscribers — this is the simplest end-to-end test.
-  alert('To test, make any agent request that requires approval — the push should arrive within ~1s.');
 }
 
 // ─── Helpers ─────────────────────────────────────

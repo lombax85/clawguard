@@ -78,26 +78,16 @@ export interface TelegramConfig {
   };
 }
 
-// ─── Web Push (browser push notifications, e.g. macOS native banners) ──
+// ─── Outbound webhook (fire-and-forget side notification) ──
 
-export interface WebPushConfig {
+export interface WebhookConfig {
   enabled: boolean;
-  subject: string;             // mailto: or https URL — required by VAPID spec
-  keysPath?: string;           // where to persist auto-generated VAPID keys
-  vapidPublicKey?: string;     // optional: provide explicitly to skip auto-generation
-  vapidPrivateKey?: string;
-  ttl?: number;                // seconds the push service holds the message; default 120
-  urgency?: 'very-low' | 'low' | 'normal' | 'high'; // default 'high'
-  requireInteraction?: boolean; // notification stays visible until clicked; default true
-}
-
-export interface WebPushSubscriptionRecord {
-  id: number;
-  endpoint: string;
-  p256dh: string;
-  auth: string;
-  userAgent: string | null;
-  createdAt: string;
+  url: string;                          // POST target (any URL the operator controls)
+  method?: 'POST' | 'PUT';              // default 'POST'
+  headers?: Record<string, string>;     // optional custom headers
+  timeoutMs?: number;                   // default 5000
+  cancelOnResolve?: boolean;            // also POST a follow-up event when the approval resolves; default true
+  dashboardUrl?: string;                // optional, included in the payload so the receiver can deep-link
 }
 
 // ─── Audit ───────────────────────────────────────────────────
@@ -160,7 +150,7 @@ export interface Config {
   services: Record<string, ServiceConfig>;
   notifications?: {
     telegram?: TelegramConfig;
-    webpush?: WebPushConfig;
+    webhook?: WebhookConfig;
   };
   audit: AuditConfig;
   security: SecurityConfig;

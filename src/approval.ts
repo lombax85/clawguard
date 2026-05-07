@@ -1,6 +1,6 @@
 import { Approval, ServiceConfig, PolicyRule } from './types';
 import { TelegramNotifier } from './telegram';
-import { WebPushNotifier } from './webpush';
+import { WebhookNotifier } from './webhook';
 import { AuditLogger } from './audit';
 
 let requestCounter = 0;
@@ -18,7 +18,7 @@ export class ApprovalManager {
     return `${service}::${method.toUpperCase()}::${pathPart}`;
   }
   private telegram: TelegramNotifier | undefined;
-  private webpush: WebPushNotifier | undefined;
+  private webhook: WebhookNotifier | undefined;
   private audit: AuditLogger;
   private approvalTimeout: number;
 
@@ -26,19 +26,15 @@ export class ApprovalManager {
     telegram: TelegramNotifier | undefined,
     audit: AuditLogger,
     approvalTimeoutMs: number = 120000,
-    webpush?: WebPushNotifier
+    webhook?: WebhookNotifier
   ) {
     this.telegram = telegram;
-    this.webpush = webpush;
+    this.webhook = webhook;
     this.audit = audit;
     this.approvalTimeout = approvalTimeoutMs;
 
     // Restore active approvals from SQLite (survive restarts)
     this.restoreApprovals();
-  }
-
-  getWebPush(): WebPushNotifier | undefined {
-    return this.webpush;
   }
 
   private restoreApprovals(): void {
@@ -155,7 +151,8 @@ export class ApprovalManager {
     console.log(`🔔 Requesting approval for: ${method} ${service}${path}`);
 
     // No notification channel configured — auto-approve (test/dev mode)
-    if (!this.telegram && !this.webpush) {
+    // The webhook is informational-only and cannot approve, so it doesn't count here.
+    if (!this.telegram) {
       console.log(`✅ Auto-approved (no notification channel): ${method} ${service}${path}`);
       const approval: Approval = {
         service,
@@ -172,27 +169,23 @@ export class ApprovalManager {
 
     const requestId = generateRequestId();
 
+    // Fire-and-forget side notification (e.g. user-defined webhook integration)
+    this.webhook?.notifyApprovalRequired(requestId, service, method, path, agentIp);
+
     const timeoutPromise = new Promise<{ approved: boolean; ttlSeconds: number; approvedBy: string; pathScoped: boolean }>((resolve) => {
       setTimeout(() => {
         this.telegram?.clearPendingRequest(requestId);
-        this.webpush?.clearPendingRequest(requestId);
         resolve({ approved: false, ttlSeconds: 0, approvedBy: 'timeout', pathScoped: false });
       }, this.approvalTimeout);
     });
 
-    const channelPromises: Promise<{ approved: boolean; ttlSeconds: number; approvedBy: string; pathScoped: boolean }>[] = [];
-    if (this.telegram) {
-      channelPromises.push(this.telegram.requestApproval(requestId, service, method, path, agentIp));
-    }
-    if (this.webpush) {
-      channelPromises.push(this.webpush.requestApproval(requestId, service, method, path, agentIp));
-    }
+    const result = await Promise.race([
+      this.telegram.requestApproval(requestId, service, method, path, agentIp),
+      timeoutPromise,
+    ]);
 
-    const result = await Promise.race([...channelPromises, timeoutPromise]);
-
-    // First channel won — clear the others so any later button click is a no-op
-    this.telegram?.clearPendingRequest(requestId);
-    this.webpush?.clearPendingRequest(requestId);
+    // Side-channel notification of resolution so external integrations can dismiss alerts
+    this.webhook?.notifyApprovalResolved(requestId, result.approved, result.approvedBy);
 
     if (result.approved) {
       const scopedPath = result.pathScoped ? path : null;

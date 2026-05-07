@@ -4,7 +4,7 @@ import express from 'express';
 import { loadConfig } from './config';
 import { AuditLogger } from './audit';
 import { TelegramNotifier } from './telegram';
-import { WebPushNotifier } from './webpush';
+import { WebhookNotifier } from './webhook';
 import { ApprovalManager } from './approval';
 import { createProxy } from './proxy';
 import { validateAllUpstreams, validateUpstreamUrl } from './security';
@@ -59,17 +59,17 @@ async function main() {
     console.log('📱 Telegram: disabled (not configured)');
   }
 
-  // Init Web Push (optional second notification channel)
-  let webpushNotifier: WebPushNotifier | undefined;
-  if (config.notifications?.webpush?.enabled) {
-    webpushNotifier = new WebPushNotifier(config.notifications.webpush, audit);
+  // Init Webhook (optional informational side channel — fire-and-forget)
+  let webhookNotifier: WebhookNotifier | undefined;
+  if (config.notifications?.webhook?.enabled) {
+    webhookNotifier = new WebhookNotifier(config.notifications.webhook);
   } else {
-    console.log('🔔 Web Push: disabled (not configured)');
+    console.log('🪝 Webhook: disabled (not configured)');
   }
 
   // Init approval manager (restores active approvals from SQLite)
   console.log(`🔑 Restoring approvals:`);
-  const approvalManager = new ApprovalManager(telegram, audit, undefined, webpushNotifier);
+  const approvalManager = new ApprovalManager(telegram, audit, undefined, webhookNotifier);
 
   // Create and start proxy
   const app = createProxy(config, approvalManager, audit);
@@ -131,7 +131,7 @@ async function main() {
 
     const adminApp = express();
     adminApp.use(express.raw({ type: '*/*', limit: '10mb' }));
-    adminApp.use('/__admin', createAdminRouter(config, approvalManager, audit, webpushNotifier));
+    adminApp.use('/__admin', createAdminRouter(config, approvalManager, audit));
 
     httpsServer = https.createServer({ cert: pair.cert, key: pair.key }, adminApp);
     httpsServer.listen(httpsCfg.port, () => {

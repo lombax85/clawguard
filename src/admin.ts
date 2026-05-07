@@ -6,7 +6,6 @@ import { ApprovalManager } from './approval';
 import { AuditLogger } from './audit';
 import { validateUpstreamUrl } from './security';
 import { getPassthroughHosts } from './mitm-proxy';
-import { WebPushNotifier } from './webpush';
 
 /**
  * Check if an IP matches an allowed entry.
@@ -47,8 +46,7 @@ function ipv4ToInt(ip: string): number {
 export function createAdminRouter(
   config: Config,
   approvalManager: ApprovalManager,
-  audit: AuditLogger,
-  webpushNotifier?: WebPushNotifier
+  audit: AuditLogger
 ): Router {
   const router = Router();
 
@@ -74,17 +72,6 @@ export function createAdminRouter(
 
   router.get('/', (_req: Request, res: Response) => {
     res.sendFile(path.join(process.cwd(), 'public', 'index.html'));
-  });
-
-  // ─── Service worker (must be served at /__admin/ scope, no PIN) ──
-  // The browser fetches this directly when registering the SW, so we
-  // can't gate it on a PIN header. The IP allowlist (above) still applies.
-
-  router.get('/sw.js', (_req: Request, res: Response) => {
-    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
-    res.setHeader('Service-Worker-Allowed', '/__admin/');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.sendFile(path.join(process.cwd(), 'public', 'sw.js'));
   });
 
   // ─── Login (validate PIN) ─────────────────────────────────
@@ -311,97 +298,6 @@ export function createAdminRouter(
       pairedUsers: audit.getPairedUsers(),
       pairingEnabled: config.notifications?.telegram?.pairing?.enabled ?? false,
     });
-  });
-
-  // ─── Web Push ─────────────────────────────────────────────
-
-  // Public — the SW fetches this before subscribing. Returns the VAPID public
-  // key + a flag so the dashboard knows if pushes are enabled at all.
-  router.get('/api/webpush/config', (_req: Request, res: Response) => {
-    if (!webpushNotifier) {
-      res.json({ enabled: false });
-      return;
-    }
-    res.json({
-      enabled: true,
-      publicKey: webpushNotifier.getPublicKey(),
-    });
-  });
-
-  router.post('/api/webpush/subscribe', pinAuth, (req: Request, res: Response) => {
-    if (!webpushNotifier) {
-      res.status(400).json({ error: 'Web Push is not enabled in config' });
-      return;
-    }
-    let body: { endpoint?: string; keys?: { p256dh?: string; auth?: string } };
-    try {
-      body = JSON.parse(req.body?.toString() || '{}');
-    } catch {
-      res.status(400).json({ error: 'Invalid JSON body' });
-      return;
-    }
-    if (!body.endpoint || !body.keys?.p256dh || !body.keys?.auth) {
-      res.status(400).json({ error: 'Missing endpoint, keys.p256dh, or keys.auth' });
-      return;
-    }
-    const userAgent = (req.headers['user-agent'] as string | undefined) || null;
-    audit.saveWebPushSubscription(body.endpoint, body.keys.p256dh, body.keys.auth, userAgent);
-    console.log(`🔔 Web Push subscription registered (${body.endpoint.slice(-12)})`);
-    res.json({ ok: true });
-  });
-
-  router.post('/api/webpush/unsubscribe', pinAuth, (req: Request, res: Response) => {
-    let body: { endpoint?: string };
-    try {
-      body = JSON.parse(req.body?.toString() || '{}');
-    } catch {
-      res.status(400).json({ error: 'Invalid JSON body' });
-      return;
-    }
-    if (!body.endpoint) {
-      res.status(400).json({ error: 'Missing endpoint' });
-      return;
-    }
-    const removed = audit.deleteWebPushSubscription(body.endpoint);
-    res.json({ ok: removed });
-  });
-
-  // Public — invoked by the service worker when the user taps an action button
-  // on a Web Push notification. Authentication is via HMAC signature inside the
-  // payload (signed by ClawGuard at push time using the VAPID private key).
-  router.post('/api/webpush/respond', (req: Request, res: Response) => {
-    if (!webpushNotifier) {
-      res.status(400).json({ error: 'Web Push is not enabled' });
-      return;
-    }
-    let body: { requestId?: string; action?: string; signature?: string };
-    try {
-      body = JSON.parse(req.body?.toString() || '{}');
-    } catch {
-      res.status(400).json({ error: 'Invalid JSON body' });
-      return;
-    }
-    if (!body.requestId || !body.action || !body.signature) {
-      res.status(400).json({ error: 'Missing requestId, action, or signature' });
-      return;
-    }
-    const result = webpushNotifier.resolveRequest(body.requestId, body.action, body.signature);
-    if (!result.ok) {
-      res.status(409).json({ error: result.reason });
-      return;
-    }
-    console.log(`📲 Web Push callback: action=${body.action} requestId=${body.requestId}`);
-    res.json({ ok: true });
-  });
-
-  router.get('/api/webpush/subscriptions', pinAuth, (_req: Request, res: Response) => {
-    const subs = audit.getWebPushSubscriptions().map((s) => ({
-      id: s.id,
-      endpointSuffix: s.endpoint.slice(-16),
-      userAgent: s.userAgent,
-      createdAt: s.createdAt,
-    }));
-    res.json({ subscriptions: subs, enabled: !!webpushNotifier });
   });
 
   return router;
