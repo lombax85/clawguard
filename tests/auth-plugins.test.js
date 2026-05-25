@@ -490,6 +490,45 @@ test('oauth2-authcode preserves custom token_type', async () => {
   }
 });
 
+test('oauth2-authcode rejects cached tokens for a different OAuth client', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-test-'));
+  try {
+    const tokens = {
+      access_token: 'old-client-token',
+      refresh_token: 'old-refresh-token',
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+      token_type: 'Bearer',
+      client_id: 'old-client-id',
+      token_url: 'https://login.example.com/oauth2/v2.0/token',
+    };
+    fs.writeFileSync(path.join(tmpDir, 'tokens.json'), JSON.stringify(tokens));
+
+    const plugin = createOAuth2Plugin();
+    await plugin.init(tmpDir, {
+      clientId: 'new-client-id',
+      tokenUrl: 'https://login.example.com/oauth2/v2.0/token',
+    });
+
+    const ctx = {
+      serviceName: 'test',
+      method: 'GET',
+      path: '/me',
+      headers: {},
+      body: Buffer.alloc(0),
+      upstreamUrl: 'https://example.com/me',
+      dataDir: tmpDir,
+      config: {},
+    };
+
+    await assert.rejects(
+      () => plugin.rewriteRequest(ctx),
+      /Run clawguard auth/
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test('oauth2-authcode throws when token expired and no refresh_token', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-test-'));
   try {

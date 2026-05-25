@@ -150,8 +150,10 @@ services:
 
   # ─── OAuth2 Authorization Code (e.g. Microsoft Graph) ──
   # For APIs using OAuth2 Authorization Code Flow with PKCE.
-  # Tokens are stored in data/plugins/oauth2-authcode/tokens.json
-  # Run `clawguard auth msgraph` to complete the initial authorization.
+  # Tokens are stored in data/plugins/oauth2-authcode/tokens.json.
+  # Run `clawguard auth msgraph` to complete or refresh authorization.
+  # That command backs up any existing token cache first, so changing
+  # clientId/tokenUrl cannot keep using refresh tokens from the old app.
   # msgraph:
   #   upstream: https://graph.microsoft.com
   #   auth:

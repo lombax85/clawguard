@@ -30,6 +30,10 @@ interface TokenData {
   refresh_token?: string;
   expires_at?: number;
   token_type?: string;
+  service_name?: string;
+  client_id?: string;
+  token_url?: string;
+  created_at?: string;
 }
 
 /**
@@ -288,13 +292,29 @@ function waitForCallback(
   });
 }
 
+function getTokensPath(): string {
+  const tokensDir = path.resolve('data', 'plugins', 'oauth2-authcode');
+  fs.mkdirSync(tokensDir, { recursive: true });
+  return path.join(tokensDir, 'tokens.json');
+}
+
+function backupExistingTokens(serviceName: string): void {
+  const tokensPath = getTokensPath();
+  if (!fs.existsSync(tokensPath)) {
+    return;
+  }
+
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const backupPath = `${tokensPath}.bak-${serviceName}-${timestamp}`;
+  fs.renameSync(tokensPath, backupPath);
+  console.log(`   Existing OAuth2 token cache moved to: ${backupPath}`);
+}
+
 /**
  * Save tokens to the plugin data directory.
  */
 function saveTokens(tokenData: TokenData): void {
-  const tokensDir = path.resolve('data', 'plugins', 'oauth2-authcode');
-  fs.mkdirSync(tokensDir, { recursive: true });
-  const tokensPath = path.join(tokensDir, 'tokens.json');
+  const tokensPath = getTokensPath();
   fs.writeFileSync(tokensPath, JSON.stringify(tokenData, null, 2), 'utf-8');
 }
 
@@ -323,6 +343,10 @@ export async function runAuth(serviceName: string): Promise<void> {
 
   const serviceConfig = services[serviceName] as Record<string, unknown>;
   const oauth2 = extractOAuth2Config(serviceName, serviceConfig);
+
+  // Remove stale cached tokens before starting a fresh OAuth login. This avoids
+  // silently reusing refresh tokens that belong to an older clientId/app.
+  backupExistingTokens(serviceName);
 
   // ── 2. Generate PKCE (if enabled) ───────────────────────
   let pkce: { codeVerifier: string; codeChallenge: string } | undefined;
@@ -389,6 +413,10 @@ export async function runAuth(serviceName: string): Promise<void> {
       ? Math.floor(Date.now() / 1000) + tokenResponse.expires_in
       : undefined,
     token_type: tokenResponse.token_type ?? 'Bearer',
+    service_name: serviceName,
+    client_id: oauth2.clientId,
+    token_url: oauth2.tokenUrl,
+    created_at: new Date().toISOString(),
   };
 
   saveTokens(tokenData);
