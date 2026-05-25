@@ -8,6 +8,10 @@ interface TokenData {
   refresh_token?: string;
   expires_at?: number; // unix timestamp in seconds
   token_type?: string;
+  service_name?: string;
+  client_id?: string;
+  token_url?: string;
+  created_at?: string;
 }
 
 interface TokenResponse {
@@ -39,6 +43,7 @@ class OAuth2AuthCodePlugin implements IAuthPlugin {
       try {
         const raw = fs.readFileSync(tokensPath, 'utf-8');
         this.tokens = JSON.parse(raw) as TokenData;
+        this.validateTokenMetadata(tokensPath);
         console.log(`   🔌 [oauth2-authcode] Loaded existing tokens from ${tokensPath}`);
       } catch (err) {
         console.error(`   🔌 [oauth2-authcode] Failed to load tokens: ${err}`);
@@ -113,6 +118,10 @@ class OAuth2AuthCodePlugin implements IAuthPlugin {
         ? Math.floor(Date.now() / 1000) + tokenResponse.expires_in
         : undefined,
       token_type: tokenResponse.token_type ?? 'Bearer',
+      service_name: this.tokens.service_name,
+      client_id: clientId,
+      token_url: tokenUrl,
+      created_at: this.tokens.created_at,
     };
 
     this.saveTokens();
@@ -122,6 +131,31 @@ class OAuth2AuthCodePlugin implements IAuthPlugin {
   private saveTokens(): void {
     const tokensPath = path.join(this.dataDir, 'tokens.json');
     fs.writeFileSync(tokensPath, JSON.stringify(this.tokens, null, 2), 'utf-8');
+  }
+
+  private validateTokenMetadata(tokensPath: string): void {
+    if (!this.tokens) {
+      return;
+    }
+
+    const currentClientId = this.config['clientId'] as string | undefined;
+    const currentTokenUrl = this.config['tokenUrl'] as string | undefined;
+
+    if (this.tokens.client_id && currentClientId && this.tokens.client_id !== currentClientId) {
+      throw new Error(
+        `tokens.json was created for OAuth client '${this.tokens.client_id}', ` +
+        `but current config uses '${currentClientId}'. Run clawguard auth <service> to re-authenticate. ` +
+        `Token file: ${tokensPath}`
+      );
+    }
+
+    if (this.tokens.token_url && currentTokenUrl && this.tokens.token_url !== currentTokenUrl) {
+      throw new Error(
+        `tokens.json was created for tokenUrl '${this.tokens.token_url}', ` +
+        `but current config uses '${currentTokenUrl}'. Run clawguard auth <service> to re-authenticate. ` +
+        `Token file: ${tokensPath}`
+      );
+    }
   }
 
   private postToken(url: string, body: string): Promise<TokenResponse> {

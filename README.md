@@ -397,6 +397,49 @@ security:
 
 > ClawGuard supports several auth injection modes: `bearer`, `header`, `query`, `basic`, `url`, `oauth2_client_credentials`, `body_json`, and `plugin`. Built-in plugins include `oauth2-authcode` and `aws-sigv4` for APIs such as AWS CloudTrail.
 
+### OAuth2 auth-code services: Microsoft Graph / Outlook
+
+For Microsoft Graph, configure a service with the built-in `oauth2-authcode` plugin and then run the CLI auth flow once on the ClawGuard host.
+
+```yaml
+services:
+  outlook:
+    upstream: https://graph.microsoft.com
+    auth:
+      type: plugin
+      token: "unused"
+      pluginPath: oauth2-authcode
+      pluginConfig:
+        authorizeUrl: "https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/authorize"
+        tokenUrl: "https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/token"
+        clientId: "your-app-client-id"
+        # clientSecret: "your-client-secret"  # omit for public clients with PKCE
+        redirectUri: "http://localhost:3000/auth/callback"
+        scopes:
+          - openid
+          - profile
+          - offline_access
+          - https://graph.microsoft.com/Mail.Read
+          - https://graph.microsoft.com/Mail.Read.Shared
+        usePkce: true
+    policy:
+      default: require_approval
+```
+
+Authenticate or re-authenticate the service:
+
+```bash
+cd /path/to/clawguard
+node dist/cli/index.js auth outlook
+# or, inside Docker:
+docker compose exec clawguard node dist/cli/index.js auth outlook
+docker compose restart clawguard
+```
+
+`clawguard auth outlook` backs up the existing OAuth token cache before starting the login flow, then writes fresh tokens with the current `clientId` and `tokenUrl`. If you change the Azure app/client id, re-run the auth command; ClawGuard will not keep refreshing with a token cache that was created for a different OAuth client.
+
+Tokens are stored in `data/plugins/oauth2-authcode/tokens.json` by default. Service definitions changed through the admin UI are stored as SQLite service overrides in `data/clawguard.db`; delete the matching row from `services_override` if an old admin override should stop shadowing `clawguard.yaml`.
+
 Restart ClawGuard: `docker compose up -d --build`
 
 ### 2. Test from the agent machine
