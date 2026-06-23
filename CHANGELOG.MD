@@ -7,6 +7,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 ## [Unreleased]
 
 ### Added
+- **Telegram polling health diagnostics**: admin/API status now exposes Telegram health (`polling`, `restartingPolling`, pending callbacks, last update/callback, last polling error, restart timestamps) so callback stalls can be diagnosed without relying only on process logs.
+- **Admin service configuration strict mode**: `admin.strictMode` defaults to `true`, making YAML the authoritative source for service/token configuration. When set to `false`, the dashboard can persist service overrides in SQLite.
+- **Dashboard service token management**: when admin edit mode is enabled, the Services UI can add, edit, rotate, and remove service credentials without exposing existing secret values.
+- **Grouped approvals dashboard**: active approvals and approval history are grouped by service with collapsible sections and service-level revoke controls.
+- **Admin API strict-mode tests** covering blocked writes in strict mode and persisted service overrides in editable mode.
 - **Outbound webhook side channel**: fire-and-forget notification to a user-defined URL whenever an approval is requested, and (optionally) when it's resolved. Generic by design — any external alerting or automation system that can ingest a JSON POST is supported. Does not participate in the approval decision; Telegram is still the decider. Configure via `notifications.webhook` in `clawguard.yaml` (URL, method, headers, timeout, `cancelOnResolve`).
   - **Escalation delay** (`escalateAfterSeconds`, default 0): when set, the `approval_required` event is deferred by N seconds and only fires if the request is still pending. If the user approves/denies within the window, neither `approval_required` nor `approval_resolved` is sent. Useful to keep the webhook (and any urgent alerts it triggers) reserved for cases where Telegram was missed.
 - **Admin HTTPS listener**: optional second listener (`admin.https.enabled`, default port 9443) that serves the dashboard over TLS using a leaf cert auto-issued by the existing MITM CA. Cert SAN includes `localhost` + `127.0.0.1` plus any user-configured hostnames/IPs. Files persisted under `data/ca/admin.{crt,key,json}`; cert is regenerated when the SAN list changes.
@@ -41,6 +46,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - Admin deny response now includes `clientIp` + hint when access is blocked by `admin.allowedIPs`, to speed up network/debug setup.
 
 ### Changed
+- **Telegram polling restart is now cancel-first and bounded**: scheduled/watchdog restarts cancel the current long-poll instead of waiting for it forever, preventing the known state where approval messages still send but button callbacks are no longer consumed.
+- **Telegram 409 conflicts now trigger recovery** instead of being ignored indefinitely. Repeated polling errors are counted and surfaced through health diagnostics.
+- **Service overrides are ignored in strict mode** so stale SQLite admin overrides cannot shadow `clawguard.yaml` unless `admin.strictMode: false` is explicitly configured.
+- **Multi-token usage is documented as service-name based**: use separate services such as `coolify-logotel` and `coolify-lombax`; a single service entry still has one credential set.
 - **Telegram approval buttons reorganized**: removed `8h`, moved `Forever` out of the method-wide row (use `forever-path` for path-only approvals). New layout: row 1 `Once / 15m / 1h`, row 2 `24h / 1w / 1month`, row 3 `15m-path / 24h-path / forever-path`, row 4 `Deny`.
 - **Approval lookup order**: exact path match first, then method-wide approval, before requesting a new approval.
 - **Telegram notifications are now optional**: when unconfigured, approvals are auto-approved instead of failing.

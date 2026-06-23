@@ -47,6 +47,7 @@ const DEFAULT_ADMIN = {
   enabled: true,
   pin: '',
   allowedIPs: ['127.0.0.1', '::1', '::ffff:127.0.0.1', '172.16.0.0/12'],
+  strictMode: true,
 };
 
 const DEFAULT_ADMIN_HTTPS = {

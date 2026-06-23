@@ -4,6 +4,21 @@ import { AuditLogger } from './audit';
 
 export type ApprovalCallback = (approved: boolean, ttlSeconds: number, approvedBy: string, pathScoped: boolean) => void;
 
+export interface TelegramHealth {
+  paired: boolean;
+  polling: boolean;
+  restartingPolling: boolean;
+  pendingCallbacks: number;
+  consecutivePollingErrors: number;
+  lastUpdateAt: string | null;
+  lastCallbackAt: string | null;
+  lastPollingErrorAt: string | null;
+  lastPollingError: string | null;
+  lastPollingRestartAt: string | null;
+  lastPollingRestartOkAt: string | null;
+  lastPollingRestartErrorAt: string | null;
+}
+
 export class TelegramNotifier {
   private bot: TelegramBot;
   private config: TelegramConfig;
@@ -13,6 +28,14 @@ export class TelegramNotifier {
   private paired: boolean = false;
   private restartingPolling = false;
   private pollingRestartTimer: ReturnType<typeof setInterval> | undefined;
+  private consecutivePollingErrors = 0;
+  private lastPollingErrorAt: number | null = null;
+  private lastPollingError: string | null = null;
+  private lastPollingRestartAt: number | null = null;
+  private lastPollingRestartOkAt: number | null = null;
+  private lastPollingRestartErrorAt: number | null = null;
+  private lastUpdateAt: number | null = null;
+  private lastCallbackAt: number | null = null;
 
   constructor(config: TelegramConfig, audit: AuditLogger) {
     this.config = config;
@@ -47,8 +70,14 @@ export class TelegramNotifier {
   // ─── Polling diagnostics & watchdog ──────────────────────
 
   private setupPollingDiagnostics(): void {
+    this.bot.on('message', () => {
+      this.lastUpdateAt = Date.now();
+    });
     this.bot.on('polling_error', (err) => {
-      console.error('❌ Telegram polling_error:', err instanceof Error ? err.stack || err.message : err);
+      const message = err instanceof Error ? err.stack || err.message : String(err);
+      this.lastPollingErrorAt = Date.now();
+      this.lastPollingError = message;
+      console.error('❌ Telegram polling_error:', message);
     });
     this.bot.on('error', (err) => {
       console.error('❌ Telegram error:', err instanceof Error ? err.stack || err.message : err);
@@ -58,13 +87,38 @@ export class TelegramNotifier {
     });
   }
 
+  private iso(timestamp: number | null): string | null {
+    return timestamp ? new Date(timestamp).toISOString() : null;
+  }
+
+  private async withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<T>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   private async restartPolling(reason: string): Promise<void> {
     if (this.restartingPolling) return;
     this.restartingPolling = true;
+    this.lastPollingRestartAt = Date.now();
     console.log(`🔄 Restarting Telegram polling (${reason})`);
     try {
-      // Graceful stop: waits for the current long-poll to finish.
-      await this.bot.stopPolling();
+      // Cancel the current long-poll instead of waiting for it. Waiting here can
+      // deadlock if the polling request is already wedged, which leaves button
+      // callbacks unprocessed while sendMessage still works.
+      await this.withTimeout(
+        this.bot.stopPolling({ cancel: true, reason: `ClawGuard restart: ${reason}` }),
+        5000,
+        'Telegram stopPolling',
+      );
 
       // Reclaim the Telegram getUpdates lock with a short-poll.
       // Even after stopPolling(), Telegram may still hold the
@@ -80,9 +134,16 @@ export class TelegramNotifier {
         console.warn(`⚠️ Lock reclaim failed (non-fatal):`, err instanceof Error ? err.message : err);
       }
 
-      await this.bot.startPolling({ restart: true });
+      const startPromise = this.bot.startPolling({ restart: true });
+      startPromise.catch((err) => {
+        this.lastPollingRestartErrorAt = Date.now();
+        console.error(`❌ Telegram startPolling error (${reason}):`, err instanceof Error ? err.stack || err.message : err);
+      });
+      this.consecutivePollingErrors = 0;
+      this.lastPollingRestartOkAt = Date.now();
       console.log(`✅ Telegram polling restarted (${reason})`);
     } catch (err) {
+      this.lastPollingRestartErrorAt = Date.now();
       console.error(`❌ Polling restart failed (${reason}):`, err instanceof Error ? err.stack || err.message : err);
     } finally {
       this.restartingPolling = false;
@@ -90,29 +151,28 @@ export class TelegramNotifier {
   }
 
   private startPollingWatchdog(): void {
-    let consecutiveErrors = 0;
     const MAX_CONSECUTIVE_ERRORS = 3;
     const RESET_AFTER_MS = 60_000;
     let lastErrorAt = 0;
 
     this.bot.on('polling_error', async (err) => {
-      // 409 Conflict is expected right after a restart cycle — ignore it
       const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes('409 Conflict')) {
-        console.warn('⚠️ Telegram 409 Conflict (transient, ignoring)');
+      const isConflict = msg.includes('409 Conflict');
+      if (this.restartingPolling) {
+        console.warn(`⚠️ Telegram polling error during restart: ${msg}`);
         return;
       }
 
       const now = Date.now();
       if (now - lastErrorAt > RESET_AFTER_MS) {
-        consecutiveErrors = 0;
+        this.consecutivePollingErrors = 0;
       }
       lastErrorAt = now;
-      consecutiveErrors++;
+      this.consecutivePollingErrors++;
 
-      if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-        consecutiveErrors = 0;
-        await this.restartPolling('watchdog');
+      if (isConflict || this.consecutivePollingErrors >= MAX_CONSECUTIVE_ERRORS) {
+        const restartReason = isConflict ? 'telegram-409-conflict' : 'watchdog';
+        await this.restartPolling(restartReason);
       }
     });
 
@@ -129,6 +189,23 @@ export class TelegramNotifier {
   clearPendingRequest(requestId: string): void {
     this.pendingCallbacks.delete(requestId);
     this.pendingTexts.delete(requestId);
+  }
+
+  getHealth(): TelegramHealth {
+    return {
+      paired: this.paired,
+      polling: this.bot.isPolling(),
+      restartingPolling: this.restartingPolling,
+      pendingCallbacks: this.pendingCallbacks.size,
+      consecutivePollingErrors: this.consecutivePollingErrors,
+      lastUpdateAt: this.iso(this.lastUpdateAt),
+      lastCallbackAt: this.iso(this.lastCallbackAt),
+      lastPollingErrorAt: this.iso(this.lastPollingErrorAt),
+      lastPollingError: this.lastPollingError,
+      lastPollingRestartAt: this.iso(this.lastPollingRestartAt),
+      lastPollingRestartOkAt: this.iso(this.lastPollingRestartOkAt),
+      lastPollingRestartErrorAt: this.iso(this.lastPollingRestartErrorAt),
+    };
   }
 
   private formatCallbackError(err: unknown): string {
@@ -218,6 +295,8 @@ export class TelegramNotifier {
   private setupCallbackHandler(): void {
     this.bot.on('callback_query', async (query) => {
       if (!query.data || !query.message) return;
+      this.lastCallbackAt = Date.now();
+      this.lastUpdateAt = this.lastCallbackAt;
 
       const chatId = query.message.chat.id.toString();
 
