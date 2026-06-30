@@ -1,4 +1,4 @@
-import { Approval, ServiceConfig, PolicyRule } from './types';
+import { Approval, ServiceConfig, PolicyRule, RequestMeta } from './types';
 import { TelegramNotifier } from './telegram';
 import { WebhookNotifier } from './webhook';
 import { AuditLogger } from './audit';
@@ -123,14 +123,15 @@ export class ApprovalManager {
     serviceConfig: ServiceConfig,
     method: string,
     path: string,
-    agentIp: string
+    agentIp: string,
+    meta?: RequestMeta
   ): Promise<boolean> {
     const action = this.getAction(serviceConfig, method, path);
 
     // Auto-approve based on policy
     if (action === 'auto_approve') {
       console.log(`✅ Auto-approved: ${method} ${service}${path}`);
-      this.telegram?.notifyAutoApproved(service, method, path, agentIp, 'policy:auto_approve');
+      this.telegram?.notifyAutoApproved(service, method, path, agentIp, 'policy:auto_approve', meta);
       return true;
     }
 
@@ -143,7 +144,7 @@ export class ApprovalManager {
       const reason = existing.path
         ? `approval:path (${remaining}min left)`
         : `approval:method-wide (${remaining}min left)`;
-      this.telegram?.notifyAutoApproved(service, method, path, agentIp, reason);
+      this.telegram?.notifyAutoApproved(service, method, path, agentIp, reason, meta);
       return true;
     }
 
@@ -170,7 +171,7 @@ export class ApprovalManager {
     const requestId = generateRequestId();
 
     // Fire-and-forget side notification (e.g. user-defined webhook integration)
-    this.webhook?.notifyApprovalRequired(requestId, service, method, path, agentIp);
+    this.webhook?.notifyApprovalRequired(requestId, service, method, path, agentIp, meta);
 
     const timeoutPromise = new Promise<{ approved: boolean; ttlSeconds: number; approvedBy: string; pathScoped: boolean }>((resolve) => {
       setTimeout(() => {
@@ -180,7 +181,7 @@ export class ApprovalManager {
     });
 
     const result = await Promise.race([
-      this.telegram.requestApproval(requestId, service, method, path, agentIp),
+      this.telegram.requestApproval(requestId, service, method, path, agentIp, meta),
       timeoutPromise,
     ]);
 

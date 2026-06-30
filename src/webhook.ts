@@ -1,4 +1,4 @@
-import { WebhookConfig } from './types';
+import { WebhookConfig, RequestMeta } from './types';
 
 /**
  * Outbound webhook notifier — fire-and-forget side channel.
@@ -38,7 +38,8 @@ export class WebhookNotifier {
     service: string,
     method: string,
     path: string,
-    agentIp: string
+    agentIp: string,
+    meta?: RequestMeta
   ): void {
     const payload = {
       event: 'approval_required',
@@ -47,6 +48,8 @@ export class WebhookNotifier {
       method,
       path,
       agentIp,
+      user: meta?.user,
+      reason: meta?.reason,
       timestamp: Date.now(),
       dashboardUrl: this.config.dashboardUrl,
     };

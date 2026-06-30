@@ -227,7 +227,7 @@
           <span id="audit-count" style="color: var(--text2); font-size: 12px; margin-left: auto;"></span>
         </div>
         <table>
-          <thead><tr><th>Time</th><th>Service</th><th>Method</th><th>Path</th><th>Status</th><th>Approved</th><th>Agent IP</th><th>Payload</th></tr></thead>
+          <thead><tr><th>Time</th><th>Service</th><th>Method</th><th>Path</th><th>Status</th><th>Approved</th><th>Agent IP</th><th>User / Reason</th><th>Payload</th></tr></thead>
           <tbody id="audit-table"></tbody>
         </table>
       </div>
@@ -892,6 +892,7 @@ function filterAudit() {
       <td><span class="badge ${row.response_status < 400 ? 'green' : 'red'}">${row.response_status || '-'}</span></td>
       <td>${row.approved ? '<span class="badge green">Yes</span>' : '<span class="badge red">No</span>'}</td>
       <td><code>${esc(row.agent_ip || '-')}</code></td>
+      <td style="max-width:220px">${row.request_user || row.request_reason ? `${row.request_user ? '<b>' + esc(row.request_user) + '</b>' : ''}${row.request_reason ? '<div style="color:var(--text2);font-size:12px;overflow:hidden;text-overflow:ellipsis">' + esc(row.request_reason) + '</div>' : ''}` : '-'}</td>
       <td>${hasPayload ? `<span class="payload-toggle" onclick="togglePayload(this)">View</span><div class="payload-content">${row.request_body ? '<b>Request:</b>\n' + esc(row.request_body) + '\n\n' : ''}${row.response_body ? '<b>Response:</b>\n' + esc(row.response_body) : ''}</div>` : '-'}</td>
     `;
     tbody.appendChild(tr);

@@ -61,6 +61,8 @@ Agent Machine (untrusted)          Secure Machine (trusted)
 
 - **Per-method policy rules** — Auto-approve GET requests but require approval for POST and DELETE? One rule. Fine-grained control per service, per HTTP method, per path prefix.
 
+- **Multi-user provenance & group approvals** — For shared OpenClaw instances, agents tag each request with `X-ClawGuard-User` (who) and `X-ClawGuard-Reason` (why); both show up in the Telegram approval and the audit log, and are stripped before reaching the API. Approvals can be posted to a Telegram **group** (optionally a forum topic), with an optional allowlist controlling who may approve.
+
 | Without ClawGuard | With ClawGuard |
 |---|---|
 | Agent holds real API tokens | Agent never sees them — tokens injected after approval |

@@ -39,9 +39,44 @@ To install the forwarder, follow: [forwarder/INSTALL.md](../forwarder/INSTALL.md
 
 The forwarder is a standalone Node.js script with zero dependencies. No npm install needed.
 
+## ALWAYS identify your requests (multi-user)
+
+When ClawGuard serves a multi-user OpenClaw instance, the human operator needs to
+know **who** triggered each call and **why**. You MUST attach these two headers to
+**every** API request you make through ClawGuard, in **all** modes (A, B, and C):
+
+| Header | Value |
+|--------|-------|
+| `X-ClawGuard-User` | The name or email of the end-user on whose behalf you are acting (e.g. `alice@logotel.it`). If you are acting autonomously, use your agent name. |
+| `X-ClawGuard-Reason` | A short, human-readable description of what this specific request does (e.g. `Create task "ship release" in Todoist`). |
+
+These headers are **optional for ClawGuard** (it will not reject a request that
+omits them), but you should treat them as **mandatory**: always fill them in. They:
+
+- appear in the **Telegram approval message**, so the operator can decide with full context;
+- are written to the **audit log** and shown in the dashboard request history.
+
+They are stripped by ClawGuard before the request reaches the real API — they never
+leak upstream, and they carry no credentials, so it is always safe to send them.
+
+```bash
+# Example — every call carries who + why
+curl http://CLAWGUARD-IP:9090/todoist/rest/v2/tasks \
+  -H "X-ClawGuard-Key: the-agent-key" \
+  -H "X-ClawGuard-User: alice@logotel.it" \
+  -H "X-ClawGuard-Reason: Create task 'ship release' in Todoist" \
+  -d '{"content":"ship release"}'
+```
+
+In Mode C (HTTPS_PROXY) you set them as normal request headers on the real API call;
+ClawGuard reads them inside the MITM tunnel and strips them before forwarding.
+
 ## How to make API calls
 
 There are three modes. Ask the human operator which one is configured.
+
+**In every mode, remember to add the `X-ClawGuard-User` and `X-ClawGuard-Reason`
+headers described above to each request.**
 
 ### Mode A: Custom base URL
 
@@ -53,10 +88,12 @@ Headers:  X-ClawGuard-Key: THE-AGENT-KEY
 API Key:  "dummy" (ignored — ClawGuard injects the real one)
 ```
 
-Example — calling Todoist via ClawGuard:
+Example — calling Todoist via ClawGuard (note the provenance headers):
 ```bash
 curl http://CLAWGUARD-IP:9090/todoist/rest/v2/tasks \
-  -H "X-ClawGuard-Key: the-agent-key"
+  -H "X-ClawGuard-Key: the-agent-key" \
+  -H "X-ClawGuard-User: alice@logotel.it" \
+  -H "X-ClawGuard-Reason: List today's tasks"
 ```
 
 Example — calling GitHub via ClawGuard:

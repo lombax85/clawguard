@@ -11,6 +11,7 @@ import { validateRuntimeUrl, validateUpstreamUrl, resolveAndCheckPrivateIP } fro
 import { rewriteRequestAuth } from './auth-rewrite';
 import { TelegramNotifier } from './telegram';
 import { applyPlugin } from './auth-plugins/apply';
+import { extractRequestMeta } from './request-meta';
 
 // ─── Discovery host tracking ─────────────────────────────────
 
@@ -348,6 +349,7 @@ function handleMitmRequest(
     const body = Buffer.concat(bodyChunks);
     const method = req.method || 'GET';
     const requestPath = req.url || '/';
+    const meta = extractRequestMeta(req.headers as Record<string, string | string[] | undefined>);
 
     // Build upstream URL
     const upstreamUrl = new URL(requestPath, serviceConfig.upstream);
@@ -360,6 +362,7 @@ function handleMitmRequest(
         timestamp: new Date().toISOString(), service: serviceName,
         method, path: requestPath, approved: false,
         responseStatus: 403, agentIp: clientIp,
+        requestUser: meta.user, requestReason: meta.reason,
       });
       res.writeHead(403, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Request blocked by security policy' }));
@@ -368,7 +371,7 @@ function handleMitmRequest(
 
     // Check approval
     const approved = await approvalManager.checkApproval(
-      serviceName, serviceConfig, method, requestPath, clientIp
+      serviceName, serviceConfig, method, requestPath, clientIp, meta
     );
 
     if (!approved) {
@@ -376,6 +379,7 @@ function handleMitmRequest(
         timestamp: new Date().toISOString(), service: serviceName,
         method, path: requestPath, approved: false,
         responseStatus: 403, agentIp: clientIp,
+        requestUser: meta.user, requestReason: meta.reason,
       });
       res.writeHead(403, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Approval denied or timed out' }));
@@ -389,6 +393,8 @@ function handleMitmRequest(
       if (lower === 'host') continue;
       if (lower === 'proxy-authorization') continue;
       if (lower === 'proxy-connection') continue;
+      // Strip ClawGuard control/provenance headers so they never reach upstream.
+      if (lower.startsWith('x-clawguard')) continue;
       if (typeof value === 'string') forwardHeaders[key] = value;
       else if (Array.isArray(value)) forwardHeaders[key] = value.join(', ');
     }
@@ -410,6 +416,7 @@ function handleMitmRequest(
           timestamp: new Date().toISOString(), service: serviceName,
           method, path: requestPath, approved: true,
           responseStatus: 500, agentIp: clientIp,
+          requestUser: meta.user, requestReason: meta.reason,
         });
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: `Auth plugin error: ${message}` }));
@@ -486,6 +493,7 @@ function handleMitmRequest(
           method, path: requestPath, approved: true,
           responseStatus: proxyRes.statusCode || 0, agentIp: clientIp,
           requestBody: requestBodyLog, responseBody: responseBodyLog,
+          requestUser: meta.user, requestReason: meta.reason,
         });
       });
 
@@ -505,6 +513,7 @@ function handleMitmRequest(
         method, path: requestPath, approved: true,
         responseStatus: 502, agentIp: clientIp,
         requestBody: requestBodyLog,
+        requestUser: meta.user, requestReason: meta.reason,
       });
       res.writeHead(502, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: `Upstream error: ${err.message}` }));

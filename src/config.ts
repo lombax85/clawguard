@@ -144,6 +144,25 @@ export async function loadConfig(configPath: string): Promise<Config> {
       console.error('   Set notifications.telegram.pairing.secret in config');
       process.exit(1);
     }
+
+    // ─── Normalize group/multi-user fields ─────────────────────
+
+    const tg = config.notifications.telegram;
+    if (tg.allowedApprovers !== undefined) {
+      if (!Array.isArray(tg.allowedApprovers)) {
+        console.error('❌ notifications.telegram.allowedApprovers must be a list of @usernames or numeric user ids');
+        process.exit(1);
+      }
+      tg.allowedApprovers = tg.allowedApprovers.map((a) => String(a).trim()).filter((a) => a.length > 0);
+    }
+    if (tg.messageThreadId !== undefined) {
+      const threadId = Number(tg.messageThreadId);
+      if (!Number.isInteger(threadId)) {
+        console.error('❌ notifications.telegram.messageThreadId must be an integer (forum topic id)');
+        process.exit(1);
+      }
+      tg.messageThreadId = threadId;
+    }
   }
 
   // ─── Outbound webhook ──────────────────────────────────────

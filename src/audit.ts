@@ -59,14 +59,17 @@ export class AuditLogger {
     // NULL path = method-wide approval; non-null = path-scoped (exact match on pathname + querystring)
     try { this.db.exec('ALTER TABLE approvals ADD COLUMN path TEXT'); } catch { /* already exists */ }
     try { this.db.exec('ALTER TABLE telegram_paired_users ADD COLUMN showlog INTEGER NOT NULL DEFAULT 0'); } catch { /* already exists */ }
+    // Optional request provenance (multi-user): who triggered the call and why.
+    try { this.db.exec('ALTER TABLE requests ADD COLUMN request_user TEXT'); } catch { /* already exists */ }
+    try { this.db.exec('ALTER TABLE requests ADD COLUMN request_reason TEXT'); } catch { /* already exists */ }
   }
 
   // ─── Request logging ──────────────────────────────────────
 
   logRequest(entry: AuditEntry): void {
     this.db.prepare(`
-      INSERT INTO requests (timestamp, service, method, path, approved, response_status, agent_ip, request_body, response_body)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO requests (timestamp, service, method, path, approved, response_status, agent_ip, request_body, response_body, request_user, request_reason)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       entry.timestamp,
       entry.service,
@@ -76,7 +79,9 @@ export class AuditLogger {
       entry.responseStatus,
       entry.agentIp,
       entry.requestBody || null,
-      entry.responseBody || null
+      entry.responseBody || null,
+      entry.requestUser || null,
+      entry.requestReason || null
     );
   }
 
@@ -225,7 +230,7 @@ export class AuditLogger {
 
   getRecentRequests(limit: number = 50): unknown[] {
     return this.db.prepare(`
-      SELECT id, timestamp, service, method, path, approved, response_status, agent_ip, request_body, response_body
+      SELECT id, timestamp, service, method, path, approved, response_status, agent_ip, request_body, response_body, request_user, request_reason
       FROM requests ORDER BY id DESC LIMIT ?
     `).all(limit);
   }

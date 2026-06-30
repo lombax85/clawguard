@@ -205,7 +205,19 @@ services:
 notifications:
   telegram:
     botToken: "${TELEGRAM_BOT_TOKEN}"
+    # A 1:1 chat id, OR a group/supergroup id (a negative number, e.g. "-1001234567890").
+    # To use a group: add the bot to the group, then send `/pair <secret>` IN the group
+    # to pair it. Approval requests will be posted to the group.
     chatId: "your-telegram-chat-id"
+    # Optional — post approvals into a specific forum topic of a supergroup that has
+    # topics enabled. Omit for normal chats/groups.
+    # messageThreadId: 42
+    # Optional — restrict WHO may tap Approve/Deny (useful in a shared approval group).
+    # List @usernames and/or numeric Telegram user ids. Empty/omitted = anyone in the
+    # paired chat can approve.
+    # allowedApprovers:
+    #   - "@alice"
+    #   - "123456789"
     pairing:
       enabled: true
       secret: "change-me-to-a-random-pairing-secret"  # IMPORTANT: openssl rand -hex 16

@@ -10,6 +10,7 @@ import { createAdminRouter } from './admin';
 import { validateRuntimeUrl } from './security';
 import { rewriteRequestAuth } from './auth-rewrite';
 import { applyPlugin } from './auth-plugins/apply';
+import { extractRequestMeta } from './request-meta';
 
 /**
  * Validates that the client sent the correct dummy token.
@@ -196,6 +197,7 @@ export function handleHostProxy(
 
     const serviceName = match.name;
     const serviceConfig = match.config;
+    const meta = extractRequestMeta(req.headers);
 
     // Validate agent key if required
     if (options.requireAgentKey) {
@@ -214,6 +216,7 @@ export function handleHostProxy(
         timestamp: new Date().toISOString(), service: serviceName,
         method: req.method, path: req.originalUrl || '/', approved: false,
         responseStatus: 403, agentIp: (req.ip || req.socket.remoteAddress || 'unknown') as string,
+        requestUser: meta.user, requestReason: meta.reason,
       });
       res.status(403).json({ error: dummyError });
       return;
@@ -236,7 +239,7 @@ export function handleHostProxy(
     // ─── Approval ────────────────────────────────────────────
 
     const approved = await approvalManager.checkApproval(
-      serviceName, serviceConfig, req.method, upstreamPath, agentIp
+      serviceName, serviceConfig, req.method, upstreamPath, agentIp, meta
     );
 
     if (!approved) {
@@ -244,6 +247,7 @@ export function handleHostProxy(
         timestamp: new Date().toISOString(), service: serviceName,
         method: req.method, path: upstreamPath, approved: false,
         responseStatus: 403, agentIp,
+        requestUser: meta.user, requestReason: meta.reason,
       });
       res.status(403).json({ error: 'Approval denied or timed out' });
       return;
@@ -282,6 +286,7 @@ export function handleHostProxy(
             timestamp: new Date().toISOString(), service: serviceName,
             method: req.method, path: upstreamPath, approved: true,
             responseStatus: 500, agentIp,
+            requestUser: meta.user, requestReason: meta.reason,
           });
           res.status(500).json({ error: `Auth plugin error: ${message}` });
           return;
@@ -333,6 +338,7 @@ export function handleHostProxy(
             method: req.method, path: upstreamPath, approved: true,
             responseStatus: proxyRes.statusCode || 0, agentIp,
             requestBody: requestBodyLog, responseBody: responseBodyLog,
+            requestUser: meta.user, requestReason: meta.reason,
           });
         });
 
@@ -349,6 +355,7 @@ export function handleHostProxy(
           timestamp: new Date().toISOString(), service: serviceName,
           method: req.method, path: upstreamPath, approved: true,
           responseStatus: 502, agentIp, requestBody: requestBodyLog,
+          requestUser: meta.user, requestReason: meta.reason,
         });
         res.status(502).json({ error: `Upstream error: ${err.message}` });
       });
@@ -386,6 +393,8 @@ function handleProxy(
       return;
     }
 
+    const meta = extractRequestMeta(req.headers);
+
     // Validate agent key
     const agentKey = (req.headers['x-clawguard-key'] || req.headers['x-agentgate-key']) as string | undefined;
     if (agentKey !== config.server.agentKey) {
@@ -401,6 +410,7 @@ function handleProxy(
         timestamp: new Date().toISOString(), service: serviceName,
         method: req.method, path: req.originalUrl || '/', approved: false,
         responseStatus: 403, agentIp: (req.ip || req.socket.remoteAddress || 'unknown') as string,
+        requestUser: meta.user, requestReason: meta.reason,
       });
       res.status(403).json({ error: dummyError });
       return;
@@ -425,6 +435,8 @@ function handleProxy(
         approved: false,
         responseStatus: 403,
         agentIp,
+        requestUser: meta.user,
+        requestReason: meta.reason,
       });
       res.status(403).json({ error: 'Request blocked by security policy' });
       return;
@@ -437,7 +449,8 @@ function handleProxy(
       serviceConfig,
       req.method,
       upstreamPath,
-      agentIp
+      agentIp,
+      meta
     );
 
     if (!approved) {
@@ -449,6 +462,8 @@ function handleProxy(
         approved: false,
         responseStatus: 403,
         agentIp,
+        requestUser: meta.user,
+        requestReason: meta.reason,
       });
       res.status(403).json({ error: 'Approval denied or timed out' });
       return;
@@ -492,6 +507,7 @@ function handleProxy(
             timestamp: new Date().toISOString(), service: serviceName,
             method: req.method, path: upstreamPath, approved: true,
             responseStatus: 500, agentIp,
+            requestUser: meta.user, requestReason: meta.reason,
           });
           res.status(500).json({ error: `Auth plugin error: ${message}` });
           return;
@@ -558,6 +574,8 @@ function handleProxy(
                   responseStatus: 403,
                   agentIp,
                   requestBody: requestBodyLog,
+                  requestUser: meta.user,
+                  requestReason: meta.reason,
                 });
                 res.status(403).json({ error: 'Redirect blocked by security policy' });
                 return;
@@ -593,6 +611,8 @@ function handleProxy(
               agentIp,
               requestBody: requestBodyLog,
               responseBody: responseBodyLog,
+              requestUser: meta.user,
+              requestReason: meta.reason,
             });
           });
 
@@ -616,6 +636,8 @@ function handleProxy(
           responseStatus: 502,
           agentIp,
           requestBody: requestBodyLog,
+          requestUser: meta.user,
+          requestReason: meta.reason,
         });
         res.status(502).json({ error: `Upstream error: ${err.message}` });
       });

@@ -1,8 +1,26 @@
 import TelegramBot from 'node-telegram-bot-api';
-import { TelegramConfig } from './types';
+import { TelegramConfig, RequestMeta } from './types';
 import { AuditLogger } from './audit';
 
 export type ApprovalCallback = (approved: boolean, ttlSeconds: number, approvedBy: string, pathScoped: boolean) => void;
+
+/**
+ * Strips characters that would break Telegram's legacy Markdown parser
+ * (which has no reliable escaping) out of free-text, client-supplied values
+ * so a malformed user/reason can never make the approval message fail to send.
+ */
+function sanitizeForTelegram(value: string): string {
+  return value.replace(/[`*_[\]]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+/** Renders optional provenance (who/why) as Markdown lines, or [] if absent. */
+function metaLines(meta?: RequestMeta): string[] {
+  if (!meta) return [];
+  const lines: string[] = [];
+  if (meta.user) lines.push(`👤 User: *${sanitizeForTelegram(meta.user)}*`);
+  if (meta.reason) lines.push(`📝 Reason: _${sanitizeForTelegram(meta.reason)}_`);
+  return lines;
+}
 
 export interface TelegramHealth {
   paired: boolean;
@@ -290,6 +308,32 @@ export class TelegramNotifier {
     });
   }
 
+  /**
+   * Returns true if the given Telegram user is allowed to approve/deny.
+   * When `allowedApprovers` is unset/empty, anyone in the paired chat is allowed
+   * (backwards-compatible). Entries may be numeric user ids or @usernames.
+   */
+  private isAllowedApprover(from: TelegramBot.User | undefined): boolean {
+    const list = this.config.allowedApprovers;
+    if (!list || list.length === 0) return true;
+    if (!from) return false;
+    const username = from.username?.toLowerCase();
+    const userId = String(from.id);
+    return list.some((entry) => {
+      const normalized = entry.trim().replace(/^@/, '').toLowerCase();
+      return normalized === userId || (!!username && normalized === username);
+    });
+  }
+
+  /** Send options shared by all approval-related messages (adds the group topic thread). */
+  private sendOptions(extra?: TelegramBot.SendMessageOptions): TelegramBot.SendMessageOptions {
+    const opts: TelegramBot.SendMessageOptions = { parse_mode: 'Markdown', ...extra };
+    if (this.config.messageThreadId !== undefined) {
+      opts.message_thread_id = this.config.messageThreadId;
+    }
+    return opts;
+  }
+
   // ─── Callback handler (approve/deny buttons) ─────────────
 
   private setupCallbackHandler(): void {
@@ -306,6 +350,18 @@ export class TelegramNotifier {
           await this.bot.answerCallbackQuery(query.id, { text: '❌ Not paired. Send /pair <secret> first.' });
         } catch (err) {
           console.warn(`⚠️ Telegram callback ack error (not paired): ${this.formatCallbackError(err)}`);
+        }
+        return;
+      }
+
+      // In a shared group, optionally restrict who may approve/deny.
+      if (!this.isAllowedApprover(query.from)) {
+        const who = query.from.username ? `@${query.from.username}` : (query.from.first_name || 'this user');
+        console.log(`🚫 Telegram approver not allowlisted: ${who} (id=${query.from.id})`);
+        try {
+          await this.bot.answerCallbackQuery(query.id, { text: '🚫 You are not authorized to approve ClawGuard requests.' });
+        } catch (err) {
+          console.warn(`⚠️ Telegram callback ack error (not allowlisted): ${this.formatCallbackError(err)}`);
         }
         return;
       }
@@ -428,7 +484,8 @@ export class TelegramNotifier {
     service: string,
     method: string,
     path: string,
-    agentIp: string
+    agentIp: string,
+    meta?: RequestMeta
   ): Promise<{ approved: boolean; ttlSeconds: number; approvedBy: string; pathScoped: boolean }> {
     // If not paired, deny immediately
     if (this.config.pairing.enabled && !this.paired) {
@@ -449,6 +506,7 @@ export class TelegramNotifier {
         `🔹 Service: *${service}*`,
         `🔹 Method: \`${method}\``,
         `🔹 Path: \`${path}\``,
+        ...metaLines(meta),
         `🔹 Agent IP: \`${agentIp}\``,
         `🔹 Time: ${new Date().toLocaleString('it-IT', { timeZone: 'Europe/Rome' })}`,
         `🔹 Request ID: \`${requestId}\``,
@@ -457,8 +515,7 @@ export class TelegramNotifier {
       this.pendingTexts.set(requestId, text);
 
       (async () => {
-        const sent = await this.safeSendMessage(this.config.chatId, text, {
-          parse_mode: 'Markdown',
+        const sent = await this.safeSendMessage(this.config.chatId, text, this.sendOptions({
           reply_markup: {
             inline_keyboard: [
               [
@@ -481,7 +538,7 @@ export class TelegramNotifier {
               ],
             ],
           },
-        });
+        }));
 
         if (!sent) {
           this.clearPendingRequest(requestId);
@@ -508,6 +565,7 @@ export class TelegramNotifier {
     path: string,
     agentIp: string,
     reason: string,
+    meta?: RequestMeta,
   ): void {
     const chatIds = this.audit.getShowlogEnabledChatIds();
     if (chatIds.length === 0) return;
@@ -518,9 +576,10 @@ export class TelegramNotifier {
       `🔹 Service: *${service}*`,
       `🔹 Method: \`${method}\``,
       `🔹 Path: \`${path}\``,
+      ...metaLines(meta),
       `🔹 Agent IP: \`${agentIp}\``,
       `🔹 Time: ${new Date().toLocaleString('it-IT', { timeZone: 'Europe/Rome' })}`,
-      `🔹 Reason: _${reason}_`,
+      `🔹 Auto-approve: _${reason}_`,
     ].join('\n');
 
     for (const chatId of chatIds) {

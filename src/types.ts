@@ -74,11 +74,30 @@ export interface AdminConfig {
 
 export interface TelegramConfig {
   botToken: string;
+  // 1:1 chat id OR a group/supergroup id (negative number, as a string).
+  // Approval requests are posted here; in a group, /pair <secret> pairs the group.
   chatId: string;
+  // Optional forum-topic thread id, for posting approvals into a specific
+  // topic of a supergroup that has topics enabled.
+  messageThreadId?: number;
+  // Optional allowlist of approvers (Telegram @usernames or numeric user ids).
+  // When set and non-empty, only these users may tap Approve/Deny — useful in a
+  // shared approval group. Empty/unset = anyone in the paired chat can approve.
+  allowedApprovers?: string[];
   pairing: {
     enabled: boolean;
     secret: string; // user must send /pair <secret> to the bot
   };
+}
+
+// ─── Request provenance (optional, multi-user) ───────────────
+
+// Optional, human-readable context a client attaches to a request via the
+// X-ClawGuard-User / X-ClawGuard-Reason headers. Surfaced in audit logs and
+// the Telegram approval message; never forwarded upstream.
+export interface RequestMeta {
+  user?: string;    // who triggered the request (name/email)
+  reason?: string;  // short description of what the request does
 }
 
 // ─── Outbound webhook (fire-and-forget side notification) ──
@@ -199,6 +218,8 @@ export interface AuditEntry {
   agentIp: string;
   requestBody?: string | null;
   responseBody?: string | null;
+  requestUser?: string | null;    // X-ClawGuard-User (optional provenance)
+  requestReason?: string | null;  // X-ClawGuard-Reason (optional provenance)
 }
 
 // ─── Dashboard ──────────────────────────────────────────────
