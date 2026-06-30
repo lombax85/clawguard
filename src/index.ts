@@ -38,17 +38,21 @@ async function main() {
   const audit = new AuditLogger(auditPath);
 
   // Apply service overrides from admin panel (SQLite)
-  const overrides = audit.getServiceOverrides();
-  for (const [name, svcConfig] of Object.entries(overrides)) {
-    // Validate override against current allowlist
-    const validation = validateUpstreamUrl(svcConfig.upstream, config.security);
-    if (!validation.valid) {
-      console.warn(`   ⚠️  Service override skipped: ${name} — ${validation.reason}`);
-      console.warn(`      Add "${new URL(svcConfig.upstream).hostname}" to security.allowedUpstreams in clawguard.yaml to enable it`);
-      continue;
+  if (config.admin.strictMode) {
+    console.log('   🔒 Admin strict mode enabled: service overrides are ignored; YAML is the source of truth');
+  } else {
+    const overrides = audit.getServiceOverrides();
+    for (const [name, svcConfig] of Object.entries(overrides)) {
+      // Validate override against current allowlist
+      const validation = validateUpstreamUrl(svcConfig.upstream, config.security);
+      if (!validation.valid) {
+        console.warn(`   ⚠️  Service override skipped: ${name} — ${validation.reason}`);
+        console.warn(`      Add "${new URL(svcConfig.upstream).hostname}" to security.allowedUpstreams in clawguard.yaml to enable it`);
+        continue;
+      }
+      config.services[name] = svcConfig;
+      console.log(`   ↻ Service override loaded: ${name}`);
     }
-    config.services[name] = svcConfig;
-    console.log(`   ↻ Service override loaded: ${name}`);
   }
 
   // Init Telegram (optional — if not configured, approvals are auto-approved)
@@ -72,7 +76,7 @@ async function main() {
   const approvalManager = new ApprovalManager(telegram, audit, undefined, webhookNotifier);
 
   // Create and start proxy
-  const app = createProxy(config, approvalManager, audit);
+  const app = createProxy(config, approvalManager, audit, telegram);
   const port = config.server.port;
 
   // Load auth plugins BEFORE accepting requests
@@ -131,7 +135,7 @@ async function main() {
 
     const adminApp = express();
     adminApp.use(express.raw({ type: '*/*', limit: '10mb' }));
-    adminApp.use('/__admin', createAdminRouter(config, approvalManager, audit));
+    adminApp.use('/__admin', createAdminRouter(config, approvalManager, audit, telegram));
 
     httpsServer = https.createServer({ cert: pair.cert, key: pair.key }, adminApp);
     httpsServer.listen(httpsCfg.port, () => {

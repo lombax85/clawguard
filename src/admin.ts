@@ -4,6 +4,7 @@ import net from 'net';
 import { Config, ServiceConfig } from './types';
 import { ApprovalManager } from './approval';
 import { AuditLogger } from './audit';
+import { TelegramNotifier } from './telegram';
 import { validateUpstreamUrl } from './security';
 import { getPassthroughHosts } from './mitm-proxy';
 
@@ -43,10 +44,19 @@ function ipv4ToInt(ip: string): number {
   return ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0;
 }
 
+function rejectIfStrictMode(config: Config, res: Response): boolean {
+  if (!config.admin.strictMode) return false;
+  res.status(403).json({
+    error: 'Admin service editing is disabled by admin.strictMode. Edit clawguard.yaml and restart ClawGuard, or set admin.strictMode: false.',
+  });
+  return true;
+}
+
 export function createAdminRouter(
   config: Config,
   approvalManager: ApprovalManager,
-  audit: AuditLogger
+  audit: AuditLogger,
+  telegram?: TelegramNotifier
 ): Router {
   const router = Router();
 
@@ -114,6 +124,13 @@ export function createAdminRouter(
     res.json(stats);
   });
 
+  router.get('/api/admin-config', pinAuth, (_req: Request, res: Response) => {
+    res.json({
+      strictMode: config.admin.strictMode,
+      serviceEditingEnabled: !config.admin.strictMode,
+    });
+  });
+
   // ─── Services CRUD ────────────────────────────────────────
 
   router.get('/api/services', pinAuth, (_req: Request, res: Response) => {
@@ -122,8 +139,11 @@ export function createAdminRouter(
       const authInfo: Record<string, unknown> = {
         type: svc.auth.type,
         token: maskToken(svc.auth.token),
+        dummyToken: svc.auth.dummyToken ? maskToken(svc.auth.dummyToken) : undefined,
         headerName: svc.auth.headerName,
         paramName: svc.auth.paramName,
+        username: svc.auth.username,
+        password: svc.auth.password ? maskToken(svc.auth.password) : undefined,
       };
       if (svc.auth.type === 'oauth2_client_credentials') {
         authInfo.tokenPath = svc.auth.tokenPath;
@@ -141,12 +161,15 @@ export function createAdminRouter(
         upstream: svc.upstream,
         auth: authInfo,
         policy: svc.policy,
+        hostnames: svc.hostnames,
       };
     }
     res.json(services);
   });
 
   router.post('/api/services', pinAuth, (req: Request, res: Response) => {
+    if (rejectIfStrictMode(config, res)) return;
+
     let body: { name?: string; config?: ServiceConfig };
     try {
       body = JSON.parse(req.body?.toString() || '{}');
@@ -180,6 +203,8 @@ export function createAdminRouter(
   });
 
   router.put('/api/services/:name', pinAuth, (req: Request, res: Response) => {
+    if (rejectIfStrictMode(config, res)) return;
+
     const name = req.params['name'] as string;
     let body: { config?: Partial<ServiceConfig> };
     try {
@@ -218,6 +243,8 @@ export function createAdminRouter(
   });
 
   router.delete('/api/services/:name', pinAuth, (req: Request, res: Response) => {
+    if (rejectIfStrictMode(config, res)) return;
+
     const name = req.params['name'] as string;
     if (!config.services[name]) {
       res.status(404).json({ error: `Service "${name}" not found` });
@@ -297,7 +324,12 @@ export function createAdminRouter(
     res.json({
       pairedUsers: audit.getPairedUsers(),
       pairingEnabled: config.notifications?.telegram?.pairing?.enabled ?? false,
+      health: telegram?.getHealth() ?? null,
     });
+  });
+
+  router.get('/api/telegram-health', pinAuth, (_req: Request, res: Response) => {
+    res.json(telegram?.getHealth() ?? { enabled: false });
   });
 
   return router;

@@ -74,6 +74,19 @@
   .badge.red { background: rgba(255,107,107,0.15); color: var(--red); }
   .badge.blue { background: rgba(66,165,245,0.15); color: var(--blue); }
   .badge.orange { background: rgba(255,167,38,0.15); color: var(--orange); }
+  .notice { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; margin-bottom: 16px; color: var(--text2); font-size: 12px; }
+  .notice.warning { border-color: rgba(255,167,38,0.45); background: rgba(255,167,38,0.08); color: var(--orange); }
+  .notice.success { border-color: rgba(78,205,196,0.45); background: rgba(78,205,196,0.08); color: var(--green); }
+  .inline-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .btn[disabled] { opacity: 0.45; cursor: not-allowed; }
+  .service-group { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; margin-bottom: 12px; }
+  .service-group-header { width: 100%; border: 0; background: var(--bg); color: var(--text); padding: 12px 14px; display: flex; align-items: center; justify-content: space-between; cursor: pointer; text-align: left; }
+  .service-group-header:hover { background: var(--bg3); }
+  .service-group-title { display: flex; align-items: center; gap: 8px; font-weight: 700; }
+  .service-group-body { padding: 12px; }
+  .service-group.collapsed .service-group-body { display: none; }
+  .service-group-chevron { color: var(--text2); font-size: 12px; }
+  .service-group.collapsed .service-group-chevron { transform: rotate(-90deg); }
 
   /* ─── Forms ────────────────────────────────── */
   .form-group { margin-bottom: 16px; }
@@ -173,8 +186,8 @@
     <div class="section" id="sec-services">
       <h2 class="page-title">Services</h2>
       <div class="panel">
-        <h3>Configured services <button class="btn btn-primary btn-sm" onclick="showAddService()">+ Add Service</button></h3>
-        <p style="color: var(--text2); font-size: 12px; margin-bottom: 12px;">Services added here are persisted in the database and survive restarts. No YAML changes needed. However, the upstream domain must be in <code>security.allowedUpstreams</code> in <code>clawguard.yaml</code>.</p>
+        <h3>Configured services <button class="btn btn-primary btn-sm" id="add-service-btn" onclick="showAddService()">+ Add Service</button></h3>
+        <div id="service-mode-notice" class="notice"></div>
         <table>
           <thead><tr><th>Name</th><th>Upstream</th><th>Auth type</th><th>Token</th><th>Policy</th><th>Actions</th></tr></thead>
           <tbody id="services-table"></tbody>
@@ -187,17 +200,11 @@
       <h2 class="page-title">Approvals</h2>
       <div class="panel">
         <h3>Active approvals <button class="btn btn-danger btn-sm" onclick="revokeAll()">Revoke all</button></h3>
-        <table>
-          <thead><tr><th>Service</th><th>Scope</th><th>Approved by</th><th>Expires</th><th>Remaining</th><th>Actions</th></tr></thead>
-          <tbody id="approvals-table"></tbody>
-        </table>
+        <div id="approvals-groups"></div>
       </div>
       <div class="panel">
         <h3>Recent approval history</h3>
-        <table>
-          <thead><tr><th>Time</th><th>Service</th><th>Method</th><th>Path</th><th>Approved by</th><th>TTL</th></tr></thead>
-          <tbody id="approval-history"></tbody>
-        </table>
+        <div id="approval-history-groups"></div>
       </div>
     </div>
 
@@ -249,6 +256,10 @@
     <div class="section" id="sec-telegram">
       <h2 class="page-title">Telegram Pairing</h2>
       <div class="panel">
+        <h3>Polling health</h3>
+        <div id="telegram-health" class="notice"></div>
+      </div>
+      <div class="panel">
         <h3>Paired users</h3>
         <table>
           <thead><tr><th>Chat ID</th><th>User name</th><th>Paired at</th></tr></thead>
@@ -267,7 +278,7 @@
 <!-- ─── Add Service Modal ─────────────────────── -->
 <div class="modal-overlay" id="add-service-modal">
   <div class="modal">
-    <h3>Add Service</h3>
+    <h3 id="svc-modal-title">Add Service</h3>
     <div class="form-group">
       <label>Service name</label>
       <input type="text" id="svc-name" placeholder="e.g. openai">
@@ -279,7 +290,7 @@
     <div class="form-row">
       <div class="form-group">
         <label>Auth type</label>
-        <select id="svc-auth-type" onchange="onAuthTypeChange()"><option value="bearer">Bearer token</option><option value="header">Custom header</option><option value="query">Query parameter</option><option value="oauth2_client_credentials">OAuth2 Client Credentials</option></select>
+        <select id="svc-auth-type" onchange="onAuthTypeChange()"><option value="bearer">Bearer token</option><option value="header">Custom header</option><option value="query">Query parameter</option><option value="basic">Basic auth</option><option value="url">URL credentials</option><option value="oauth2_client_credentials">OAuth2 Client Credentials</option></select>
       </div>
       <div class="form-group" id="svc-token-group">
         <label>Token</label>
@@ -289,6 +300,18 @@
     <div class="form-group" id="svc-header-name-group">
       <label>Header name (for custom header) / Parameter name (for query)</label>
       <input type="text" id="svc-header-name" placeholder="e.g. X-API-Key or appid">
+    </div>
+    <div id="svc-basic-fields" style="display:none;">
+      <div class="form-row">
+        <div class="form-group">
+          <label>Username</label>
+          <input type="text" id="svc-username" placeholder="Real username">
+        </div>
+        <div class="form-group">
+          <label>Password</label>
+          <input type="password" id="svc-password" placeholder="Real password">
+        </div>
+      </div>
     </div>
     <div id="svc-oauth2-fields" style="display:none;">
       <div class="form-group">
@@ -319,7 +342,7 @@
     <div id="add-service-error" style="background: rgba(255,107,107,0.1); border: 1px solid var(--red); border-radius: var(--radius); padding: 12px; margin-bottom: 16px; font-size: 13px; color: var(--red); display: none;"></div>
     <div class="modal-actions">
       <button class="btn" onclick="hideAddService()" style="background: var(--bg3);">Cancel</button>
-      <button class="btn btn-primary" onclick="addService()">Add Service</button>
+      <button class="btn btn-primary" id="svc-save-btn" onclick="saveService()">Add Service</button>
     </div>
   </div>
 </div>
@@ -328,6 +351,10 @@
 let PIN = '';
 const BASE = '/__admin';
 let charts = {};
+let serviceEditingEnabled = false;
+let servicesCache = {};
+let editingServiceName = null;
+const collapsedGroups = { active: {}, history: {} };
 
 // ─── Auth ────────────────────────────────────────
 
@@ -461,24 +488,35 @@ function renderChart(canvasId, type, data) {
 // ─── Services ────────────────────────────────────
 
 async function loadServices() {
+  const adminConfig = await api('GET', '/api/admin-config');
+  serviceEditingEnabled = !!adminConfig.serviceEditingEnabled;
   const services = await api('GET', '/api/services');
+  servicesCache = services;
+  renderServiceModeNotice(adminConfig);
+
   const tbody = document.getElementById('services-table');
   tbody.innerHTML = '';
   for (const [name, svc] of Object.entries(services)) {
     const tr = document.createElement('tr');
-    let tokenDisplay = `<code>${esc(svc.auth.token)}</code>`;
+    let tokenDisplay = tokenSummary(svc.auth);
     if (svc.auth.type === 'oauth2_client_credentials') {
       tokenDisplay = `<span style="font-size:11px;color:var(--text2)">ID:</span> <code>${esc(svc.auth.clientId || '-')}</code><br>` +
         `<span style="font-size:11px;color:var(--text2)">Secret:</span> <code>${esc(svc.auth.clientSecret || '-')}</code>` +
         (svc.auth.tokenPath ? `<br><span style="font-size:11px;color:var(--text2)">Path:</span> <code>${esc(svc.auth.tokenPath)}</code>` : '');
+    } else if (svc.auth.type === 'basic' || svc.auth.type === 'url') {
+      tokenDisplay = `<span style="font-size:11px;color:var(--text2)">User:</span> <code>${esc(svc.auth.username || '-')}</code><br>` +
+        `<span style="font-size:11px;color:var(--text2)">Password:</span> <code>${esc(svc.auth.password || '-')}</code>`;
     }
+    const actions = serviceEditingEnabled
+      ? `<div class="inline-actions"><button class="btn btn-primary btn-sm" onclick="showEditService('${esc(name)}')">Edit</button><button class="btn btn-danger btn-sm" onclick="deleteService('${esc(name)}')">Delete</button></div>`
+      : '<span style="color:var(--text2);font-size:12px;">YAML only</span>';
     tr.innerHTML = `
       <td><strong>${esc(name)}</strong></td>
       <td><code>${esc(svc.upstream)}</code></td>
       <td><span class="badge blue">${esc(svc.auth.type)}</span></td>
       <td>${tokenDisplay}</td>
       <td><span class="badge ${svc.policy.default === 'auto_approve' ? 'green' : 'orange'}">${esc(svc.policy.default)}</span></td>
-      <td><button class="btn btn-danger btn-sm" onclick="deleteService('${esc(name)}')">Delete</button></td>
+      <td>${actions}</td>
     `;
     tbody.appendChild(tr);
   }
@@ -487,7 +525,50 @@ async function loadServices() {
   }
 }
 
+function renderServiceModeNotice(adminConfig) {
+  const notice = document.getElementById('service-mode-notice');
+  const addBtn = document.getElementById('add-service-btn');
+  if (adminConfig.strictMode) {
+    notice.className = 'notice warning';
+    notice.innerHTML = 'Strict mode is enabled. Service and token edits are read-only here; edit <code>clawguard.yaml</code> and restart ClawGuard. Set <code>admin.strictMode: false</code> to allow dashboard-backed service overrides.';
+    addBtn.disabled = true;
+  } else {
+    notice.className = 'notice success';
+    notice.innerHTML = 'Dashboard service editing is enabled. Changes are saved as SQLite service overrides and can shadow <code>clawguard.yaml</code>.';
+    addBtn.disabled = false;
+  }
+}
+
+function tokenSummary(auth) {
+  if (auth.type === 'header') {
+    return `<span style="font-size:11px;color:var(--text2)">${esc(auth.headerName || 'Header')}:</span> <code>${esc(auth.token || '-')}</code>`;
+  }
+  if (auth.type === 'query') {
+    return `<span style="font-size:11px;color:var(--text2)">${esc(auth.paramName || 'Param')}:</span> <code>${esc(auth.token || '-')}</code>`;
+  }
+  return `<code>${esc(auth.token || '-')}</code>`;
+}
+
 async function showAddService() {
+  if (!serviceEditingEnabled) return;
+  editingServiceName = null;
+  document.getElementById('svc-modal-title').textContent = 'Add Service';
+  document.getElementById('svc-save-btn').textContent = 'Add Service';
+  document.getElementById('svc-name').disabled = false;
+  document.getElementById('svc-name').value = '';
+  document.getElementById('svc-upstream').value = '';
+  document.getElementById('svc-token').value = '';
+  document.getElementById('svc-token').placeholder = 'API key or token';
+  document.getElementById('svc-header-name').value = '';
+  document.getElementById('svc-username').value = '';
+  document.getElementById('svc-password').value = '';
+  document.getElementById('svc-password').placeholder = 'Real password';
+  document.getElementById('svc-client-id').value = '';
+  document.getElementById('svc-client-id').placeholder = 'Real client_id';
+  document.getElementById('svc-client-secret').value = '';
+  document.getElementById('svc-client-secret').placeholder = 'Real client_secret';
+  document.getElementById('svc-token-path').value = '/token';
+  document.getElementById('svc-policy').value = 'require_approval';
   document.getElementById('add-service-modal').classList.add('show');
   document.getElementById('add-service-error').style.display = 'none';
   document.getElementById('svc-auth-type').value = 'bearer';
@@ -504,41 +585,93 @@ async function showAddService() {
     }
   } catch { /* ignore */ }
 }
+
+async function showEditService(name) {
+  if (!serviceEditingEnabled) return;
+  const svc = servicesCache[name];
+  if (!svc) return;
+  editingServiceName = name;
+  document.getElementById('svc-modal-title').textContent = `Edit ${name}`;
+  document.getElementById('svc-save-btn').textContent = 'Save Changes';
+  document.getElementById('svc-name').disabled = true;
+  document.getElementById('svc-name').value = name;
+  document.getElementById('svc-upstream').value = svc.upstream || '';
+  document.getElementById('svc-auth-type').value = svc.auth.type || 'bearer';
+  document.getElementById('svc-token').value = '';
+  document.getElementById('svc-token').placeholder = 'Leave blank to keep current token';
+  document.getElementById('svc-header-name').value = svc.auth.headerName || svc.auth.paramName || '';
+  document.getElementById('svc-username').value = svc.auth.username || '';
+  document.getElementById('svc-password').value = '';
+  document.getElementById('svc-password').placeholder = 'Leave blank to keep current password';
+  document.getElementById('svc-client-id').value = '';
+  document.getElementById('svc-client-id').placeholder = 'Leave blank to keep current client_id';
+  document.getElementById('svc-client-secret').value = '';
+  document.getElementById('svc-client-secret').placeholder = 'Leave blank to keep current client_secret';
+  document.getElementById('svc-token-path').value = svc.auth.tokenPath || '/token';
+  document.getElementById('svc-policy').value = svc.policy?.default || 'require_approval';
+  document.getElementById('add-service-error').style.display = 'none';
+  document.getElementById('add-service-modal').classList.add('show');
+  onAuthTypeChange();
+}
+
 function hideAddService() { document.getElementById('add-service-modal').classList.remove('show'); }
 
 function onAuthTypeChange() {
   const authType = document.getElementById('svc-auth-type').value;
   const oauth2Fields = document.getElementById('svc-oauth2-fields');
+  const basicFields = document.getElementById('svc-basic-fields');
   const tokenGroup = document.getElementById('svc-token-group');
   const headerGroup = document.getElementById('svc-header-name-group');
   if (authType === 'oauth2_client_credentials') {
     oauth2Fields.style.display = 'block';
+    basicFields.style.display = 'none';
+    tokenGroup.style.display = 'none';
+    headerGroup.style.display = 'none';
+  } else if (authType === 'basic' || authType === 'url') {
+    oauth2Fields.style.display = 'none';
+    basicFields.style.display = 'block';
     tokenGroup.style.display = 'none';
     headerGroup.style.display = 'none';
   } else {
     oauth2Fields.style.display = 'none';
+    basicFields.style.display = 'none';
     tokenGroup.style.display = 'block';
     headerGroup.style.display = (authType === 'header' || authType === 'query') ? 'block' : 'none';
   }
 }
 
-async function addService() {
+async function saveService() {
+  if (!serviceEditingEnabled) return;
   const name = document.getElementById('svc-name').value.trim();
   const upstream = document.getElementById('svc-upstream').value.trim();
   const authType = document.getElementById('svc-auth-type').value;
   const token = document.getElementById('svc-token').value;
   const headerName = document.getElementById('svc-header-name').value.trim();
+  const username = document.getElementById('svc-username').value.trim();
+  const password = document.getElementById('svc-password').value;
   const policy = document.getElementById('svc-policy').value;
+  const isEdit = !!editingServiceName;
+  const existingAuthType = isEdit ? servicesCache[editingServiceName]?.auth?.type : null;
+  const authTypeChanged = isEdit && existingAuthType !== authType;
+  let auth;
 
   if (authType === 'oauth2_client_credentials') {
     const clientId = document.getElementById('svc-client-id').value.trim();
     const clientSecret = document.getElementById('svc-client-secret').value.trim();
     const tokenPath = document.getElementById('svc-token-path').value.trim() || '/token';
-    if (!name || !upstream || !clientId || !clientSecret) { alert('Fill all required fields'); return; }
-    var auth = { type: authType, token: 'unused', tokenPath, clientId, clientSecret };
+    if (!name || !upstream || ((!isEdit || authTypeChanged) && (!clientId || !clientSecret))) { alert('Fill all required fields'); return; }
+    auth = { type: authType, token: 'unused', tokenPath };
+    if (clientId) auth.clientId = clientId;
+    if (clientSecret) auth.clientSecret = clientSecret;
+  } else if (authType === 'basic' || authType === 'url') {
+    if (!name || !upstream || ((!isEdit || authTypeChanged) && (!username || !password))) { alert('Fill all required fields'); return; }
+    auth = { type: authType, token: 'unused' };
+    if (username) auth.username = username;
+    if (password) auth.password = password;
   } else {
-    if (!name || !upstream || !token) { alert('Fill all required fields'); return; }
-    var auth = { type: authType, token };
+    if (!name || !upstream || ((!isEdit || authTypeChanged) && !token)) { alert('Fill all required fields'); return; }
+    auth = { type: authType };
+    if (token) auth.token = token;
     if (authType === 'header' && headerName) auth.headerName = headerName;
     if (authType === 'query' && headerName) auth.paramName = headerName;
   }
@@ -547,14 +680,12 @@ async function addService() {
   errorDiv.style.display = 'none';
 
   try {
-    await api('POST', '/api/services', {
-      name,
-      config: {
-        upstream,
-        auth,
-        policy: { default: policy }
-      }
-    });
+    const config = { upstream, auth, policy: { default: policy } };
+    if (isEdit) {
+      await api('PUT', '/api/services/' + encodeURIComponent(editingServiceName), { config });
+    } else {
+      await api('POST', '/api/services', { name, config });
+    }
     hideAddService();
     loadServices();
   } catch (e) {
@@ -584,50 +715,110 @@ async function deleteService(name) {
 
 async function loadApprovals() {
   const data = await api('GET', '/api/approvals');
-  const tbody = document.getElementById('approvals-table');
-  tbody.innerHTML = '';
+  const activeEl = document.getElementById('approvals-groups');
+  activeEl.innerHTML = '';
 
   const active = data.active || {};
-  for (const [, info] of Object.entries(active)) {
-    const service = info.service || 'unknown';
-    const method = info.method || '*';
-    const path = info.path || null;
-    const scopeCell = path
-      ? `<span class="badge" style="background:#3d2b5f;color:#c5a3ff">path</span> <code style="font-size:12px">${esc(path)}</code>`
-      : `<span class="badge blue">method-wide</span>`;
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td><strong>${esc(service)}</strong> <span class="badge blue">${esc(method)}</span></td>
+  const activeRows = Object.values(active);
+  renderApprovalGroups(activeEl, activeRows, 'active');
+  if (activeRows.length === 0) {
+    activeEl.innerHTML = '<div style="text-align:center;color:var(--text2);padding:20px;">No active approvals</div>';
+  }
+
+  // History
+  const historyEl = document.getElementById('approval-history-groups');
+  historyEl.innerHTML = '';
+  const recentRows = data.recent || [];
+  renderApprovalGroups(historyEl, recentRows, 'history');
+  if (recentRows.length === 0) {
+    historyEl.innerHTML = '<div style="text-align:center;color:var(--text2);padding:20px;">No recent approvals</div>';
+  }
+}
+
+function renderApprovalGroups(container, rows, mode) {
+  const grouped = {};
+  for (const row of rows) {
+    const service = row.service || 'unknown';
+    if (!grouped[service]) grouped[service] = [];
+    grouped[service].push(row);
+  }
+
+  for (const service of Object.keys(grouped).sort()) {
+    const groupRows = grouped[service];
+    const collapsed = !!collapsedGroups[mode][service];
+    const group = document.createElement('div');
+    group.className = 'service-group' + (collapsed ? ' collapsed' : '');
+
+    const countLabel = mode === 'active'
+      ? `${groupRows.length} active`
+      : `${groupRows.length} recent`;
+    const revokeAllButton = mode === 'active'
+      ? `<button class="btn btn-danger btn-sm" data-service="${esc(service)}" onclick="event.stopPropagation(); revokeServiceApprovalsFromBtn(this)">Revoke service</button>`
+      : '';
+    group.innerHTML = `
+      <button class="service-group-header" data-mode="${esc(mode)}" data-service="${esc(service)}" onclick="toggleApprovalGroupFromHeader(this)">
+        <span class="service-group-title"><span class="service-group-chevron">▼</span>${esc(service)} <span class="badge blue">${countLabel}</span></span>
+        <span class="inline-actions">${revokeAllButton}</span>
+      </button>
+      <div class="service-group-body">${approvalGroupTable(groupRows, mode)}</div>
+    `;
+    container.appendChild(group);
+  }
+}
+
+function approvalGroupTable(rows, mode) {
+  const head = mode === 'active'
+    ? '<thead><tr><th>Method</th><th>Scope</th><th>Approved by</th><th>Expires</th><th>Remaining</th><th>Actions</th></tr></thead>'
+    : '<thead><tr><th>Time</th><th>Method</th><th>Path</th><th>Approved by</th><th>TTL</th></tr></thead>';
+  const body = rows.map(row => mode === 'active' ? activeApprovalRow(row) : approvalHistoryRow(row)).join('');
+  return `<table>${head}<tbody>${body}</tbody></table>`;
+}
+
+function activeApprovalRow(info) {
+  const method = info.method || '*';
+  const path = info.path || null;
+  const scopeCell = path
+    ? `<span class="badge" style="background:#3d2b5f;color:#c5a3ff">path</span> <code style="font-size:12px">${esc(path)}</code>`
+    : `<span class="badge blue">method-wide</span>`;
+  return `
+    <tr>
+      <td><span class="badge blue">${esc(method)}</span></td>
       <td>${scopeCell}</td>
       <td>${esc(info.approvedBy)}</td>
       <td>${new Date(info.expiresAt).toLocaleString()}</td>
       <td><span class="badge green">${info.remainingMinutes} min</span></td>
-      <td><button class="btn btn-danger btn-sm" data-service="${esc(service)}" data-method="${esc(method)}" data-path="${path === null ? '' : esc(path)}" data-pathscoped="${path === null ? '0' : '1'}" onclick="revokeApprovalFromBtn(this)">Revoke</button></td>
-    `;
-    tbody.appendChild(tr);
-  }
-  if (Object.keys(active).length === 0) {
-    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text2)">No active approvals</td></tr>';
-  }
+      <td><button class="btn btn-danger btn-sm" data-service="${esc(info.service)}" data-method="${esc(method)}" data-path="${path === null ? '' : esc(path)}" data-pathscoped="${path === null ? '0' : '1'}" onclick="revokeApprovalFromBtn(this)">Revoke</button></td>
+    </tr>
+  `;
+}
 
-  // History
-  const histTbody = document.getElementById('approval-history');
-  histTbody.innerHTML = '';
-  for (const row of (data.recent || [])) {
-    const pathCell = row.path
-      ? `<code style="font-size:12px">${esc(row.path)}</code>`
-      : `<span style="color:var(--text2)">method-wide</span>`;
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
+function approvalHistoryRow(row) {
+  const pathCell = row.path
+    ? `<code style="font-size:12px">${esc(row.path)}</code>`
+    : `<span style="color:var(--text2)">method-wide</span>`;
+  return `
+    <tr>
       <td>${new Date(row.timestamp).toLocaleString()}</td>
-      <td>${esc(row.service)}</td>
       <td><span class="badge blue">${esc(row.method || '*')}</span></td>
       <td>${pathCell}</td>
       <td>${esc(row.approved_by)}</td>
       <td>${Math.round(row.ttl_seconds / 3600)}h</td>
-    `;
-    histTbody.appendChild(tr);
-  }
+    </tr>
+  `;
+}
+
+function toggleApprovalGroupFromHeader(header) {
+  const mode = header.dataset.mode;
+  const service = header.dataset.service;
+  collapsedGroups[mode][service] = !collapsedGroups[mode][service];
+  header.closest('.service-group').classList.toggle('collapsed', collapsedGroups[mode][service]);
+}
+
+async function revokeServiceApprovalsFromBtn(btn) {
+  const service = btn.dataset.service;
+  if (!confirm(`Revoke all active approvals for ${service}?`)) return;
+  await api('POST', '/api/revoke/' + encodeURIComponent(service));
+  loadApprovals();
 }
 
 async function revokeApprovalFromBtn(btn) {
@@ -823,6 +1014,7 @@ ${authBlock}
 
 async function loadTelegram() {
   const data = await api('GET', '/api/telegram');
+  renderTelegramHealth(data.health);
   const tbody = document.getElementById('telegram-table');
   tbody.innerHTML = '';
   for (const user of (data.pairedUsers || [])) {
@@ -839,6 +1031,33 @@ async function loadTelegram() {
   }
 }
 
+function renderTelegramHealth(health) {
+  const el = document.getElementById('telegram-health');
+  if (!health) {
+    el.className = 'notice warning';
+    el.textContent = 'Telegram notifications are disabled.';
+    return;
+  }
+  const healthy = health.polling && !health.restartingPolling && health.consecutivePollingErrors === 0;
+  el.className = healthy ? 'notice success' : 'notice warning';
+  el.innerHTML = `
+    <div class="inline-actions" style="margin-bottom:8px;">
+      <span class="badge ${health.polling ? 'green' : 'red'}">polling: ${health.polling ? 'on' : 'off'}</span>
+      <span class="badge ${health.restartingPolling ? 'orange' : 'blue'}">restart: ${health.restartingPolling ? 'running' : 'idle'}</span>
+      <span class="badge ${health.pendingCallbacks > 0 ? 'orange' : 'blue'}">pending callbacks: ${health.pendingCallbacks}</span>
+      <span class="badge ${health.consecutivePollingErrors > 0 ? 'red' : 'green'}">polling errors: ${health.consecutivePollingErrors}</span>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;">
+      <div>Last update: <code>${esc(formatMaybeDate(health.lastUpdateAt))}</code></div>
+      <div>Last callback: <code>${esc(formatMaybeDate(health.lastCallbackAt))}</code></div>
+      <div>Last restart: <code>${esc(formatMaybeDate(health.lastPollingRestartAt))}</code></div>
+      <div>Last restart OK: <code>${esc(formatMaybeDate(health.lastPollingRestartOkAt))}</code></div>
+      <div>Last polling error: <code>${esc(formatMaybeDate(health.lastPollingErrorAt))}</code></div>
+    </div>
+    ${health.lastPollingError ? `<div style="margin-top:8px;color:var(--red);word-break:break-word;">${esc(health.lastPollingError)}</div>` : ''}
+  `;
+}
+
 // ─── Helpers ─────────────────────────────────────
 
 function esc(str) {
@@ -846,6 +1065,10 @@ function esc(str) {
   const d = document.createElement('div');
   d.textContent = String(str);
   return d.innerHTML;
+}
+
+function formatMaybeDate(value) {
+  return value ? new Date(value).toLocaleString() : '-';
 }
 
 // Auto-refresh dashboard every 30s

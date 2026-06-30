@@ -5,6 +5,7 @@ import { URL } from 'url';
 import { Config, ServiceConfig } from './types';
 import { ApprovalManager } from './approval';
 import { AuditLogger } from './audit';
+import { TelegramNotifier } from './telegram';
 import { createAdminRouter } from './admin';
 import { validateRuntimeUrl } from './security';
 import { rewriteRequestAuth } from './auth-rewrite';
@@ -55,7 +56,8 @@ function validateDummyToken(req: Request, serviceConfig: ServiceConfig): string 
 export function createProxy(
   config: Config,
   approvalManager: ApprovalManager,
-  audit: AuditLogger
+  audit: AuditLogger,
+  telegram?: TelegramNotifier
 ): express.Application {
   const app = express();
 
@@ -65,7 +67,7 @@ export function createProxy(
   // ─── Admin panel ──────────────────────────────────────────
 
   if (config.admin.enabled) {
-    const adminRouter = createAdminRouter(config, approvalManager, audit);
+    const adminRouter = createAdminRouter(config, approvalManager, audit, telegram);
     app.use('/__admin', adminRouter);
   }
 
@@ -82,6 +84,7 @@ export function createProxy(
       version: '0.2.0',
       services: Object.keys(config.services),
       approvals: approvalManager.getStatus(),
+      telegram: telegram?.getHealth() ?? null,
     });
   });
 

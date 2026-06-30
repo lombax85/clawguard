@@ -261,6 +261,7 @@ security:
 admin:
   enabled: true
   pin: "change-me"                          # IMPORTANT: quote it! YAML parses numbers as integers
+  strictMode: true                          # true = services/tokens editable only in YAML; false = dashboard can save SQLite overrides
   allowedIPs:
     - "127.0.0.1"
     - "::1"

@@ -64,6 +64,9 @@ export interface AdminConfig {
   enabled: boolean;
   pin: string;
   allowedIPs: string[];
+  // true = YAML is authoritative and dashboard service/token edits are disabled.
+  // false = dashboard can persist service overrides in SQLite.
+  strictMode: boolean;
   https?: AdminHttpsConfig;
 }
 

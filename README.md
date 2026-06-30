@@ -540,7 +540,7 @@ ClawGuard includes a built-in dashboard at `http://clawguard-host:9090/__admin`,
   <img src="docs/screenshots/dashboard.png" alt="ClawGuard dashboard with analytics charts" width="700">
 </p>
 
-**Service management** — add, edit, remove services and tokens from the browser (tokens are masked):
+**Service management** — add, edit, rotate, and remove services and tokens from the browser when `admin.strictMode: false` (tokens are masked). In strict mode, YAML remains the only source of truth and the dashboard is read-only for service credentials:
 
 <p align="center">
   <img src="docs/screenshots/services.png" alt="Configured services with masked tokens" width="700">
@@ -557,6 +557,8 @@ ClawGuard includes a built-in dashboard at `http://clawguard-host:9090/__admin`,
 <p align="center">
   <img src="docs/screenshots/approvals.png" alt="Active approvals and approval history" width="700">
 </p>
+
+Active approvals and recent approval history are grouped by service with collapsible sections, so high-volume setups remain scannable.
 
 ## Configuration
 
@@ -683,6 +685,7 @@ security:
 admin:
   enabled: true
   pin: "your-admin-pin"
+  strictMode: true                         # true = YAML-only service/token config; false = dashboard SQLite overrides
   allowedIPs: ["127.0.0.1", "::1"]      # dashboard only from localhost
 
 audit:
@@ -705,6 +708,12 @@ proxy:
 | `notifications.telegram.pairing.secret` | Prevents strangers from approving via your bot | `openssl rand -hex 16` |
 | `admin.pin` | Protects the web dashboard | Choose a PIN you'll remember |
 | Service tokens | Your real API keys | From each provider's dashboard |
+
+### Multiple tokens for the same upstream
+
+ClawGuard supports multiple credentials for the same upstream by defining multiple service names. For example, use `coolify-logotel` and `coolify-lombax` as separate services, each with its own `auth.token`, policy, and audit trail.
+
+Path-prefix routing (`/:service/*`) cleanly disambiguates those services. Host-based routing with the same hostname cannot choose between two credentials by itself and will match the first configured service for that hostname.
 
 ## How It Works
 
