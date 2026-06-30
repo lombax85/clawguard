@@ -68,14 +68,18 @@ You should see:
 
 ## 5. Pair Your Account
 
-This step is **critical for security**. Without pairing, anyone who discovers your bot could approve requests.
+This step is **critical for security**. Until the configured chat is paired, ClawGuard denies every request that needs approval.
 
-1. Open your bot in Telegram
+1. Open the **configured chat** in Telegram — the 1:1 chat (or group) whose id you set in `chatId`.
 2. Send: `/pair my-secret-pairing-code` (use the secret you set in the config)
 3. The bot replies: `✅ Paired successfully!`
 4. ClawGuard logs: `✅ Telegram paired with user: YourName`
 
-From now on, only your paired account can approve or deny requests.
+From now on, only your paired chat can approve or deny requests.
+
+> **Pairing only works from the configured `chatId`.** `/pair`, `/unpair`, `/status` and `/showlog` sent from any other chat are silently ignored (logged as `🚫 Ignoring … from non-configured chat <id>`). This prevents a stranger who finds your bot from brute-forcing the secret, leaking metadata via `/showlog`, or disabling approvals with `/unpair`. Repeated wrong `/pair` attempts from the configured chat are also rate-limited.
+>
+> **Tip — finding a group's chat id:** add the bot to the group and send `/pair <secret>` there once; even though it's ignored (the group isn't configured yet), ClawGuard logs the group id in the `🚫 Ignoring…` line. Put that id in `chatId`, restart, then `/pair` again in the group to complete pairing. (Or use a helper bot like `@getidsbot`.)
 
 ## 6. Test It
 
@@ -128,16 +132,19 @@ Tap **Approve 1h** and the request goes through!
 - Buttons expire after the approval timeout (default: 120 seconds)
 
 ### "Someone else can talk to my bot"
-- This is exactly why pairing exists! Enable it:
-  ```yaml
-  pairing:
-    enabled: true
-    secret: "a-strong-random-secret"
-  ```
-- Only users who know the pairing secret can approve requests
-- Without pairing, anyone who discovers your bot's username could approve requests — this is a critical security risk
+Telegram bots are publicly reachable — anyone can DM your bot or add it to their own group. That's fine: ClawGuard only sends approval requests to the configured `chatId`, and only acts on `/pair`/`/unpair`/`/showlog` from that same chat. Messages from any other chat are received but ignored. To keep the secret strong:
+```yaml
+pairing:
+  enabled: true
+  secret: "a-strong-random-secret"   # openssl rand -hex 32
+```
 
-### "I want multiple people to approve"
-- Multiple people can pair with the same bot
-- The first person to tap a button wins
-- Each paired user receives the notification
+### "I want multiple people to approve" (group mode)
+- Set `chatId` to a **group/supergroup id** and pair the group — every member of that group can then approve. The first tap wins.
+- **Keep the group private**: anyone in it can approve. To restrict approvals to specific people even inside a shared group, use `allowedApprovers`:
+  ```yaml
+  allowedApprovers:
+    - "@alice"
+    - "123456789"   # numeric Telegram user id
+  ```
+- Optional `messageThreadId` posts approvals into a specific forum topic of the group.

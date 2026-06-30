@@ -1,6 +1,7 @@
 import TelegramBot from 'node-telegram-bot-api';
 import { TelegramConfig, RequestMeta } from './types';
 import { AuditLogger } from './audit';
+import { PairThrottle } from './pair-throttle';
 
 export type ApprovalCallback = (approved: boolean, ttlSeconds: number, approvedBy: string, pathScoped: boolean) => void;
 
@@ -43,7 +44,8 @@ export class TelegramNotifier {
   private audit: AuditLogger;
   private pendingCallbacks: Map<string, ApprovalCallback> = new Map();
   private pendingTexts: Map<string, string> = new Map(); // requestId → original message text
-  private paired: boolean = false;
+  // Per-chat `/pair` brute-force throttle.
+  private pairThrottle = new PairThrottle();
   private restartingPolling = false;
   private pollingRestartTimer: ReturnType<typeof setInterval> | undefined;
   private consecutivePollingErrors = 0;
@@ -70,19 +72,34 @@ export class TelegramNotifier {
     this.setupPairingHandler();
     this.startPollingWatchdog();
 
-    // Check if the configured chatId is already paired
+    // Pairing status is derived live from the DB (per-chat), not a mutable flag.
     if (config.pairing.enabled) {
-      this.paired = audit.isPairedUser(config.chatId);
-      if (this.paired) {
+      if (this.isConfiguredChatPaired()) {
         console.log('📱 Telegram notifier started (paired)');
       } else {
         console.log('📱 Telegram notifier started — ⚠️  NOT PAIRED');
-        console.log(`   Send /pair ${config.pairing.secret} to the bot from your Telegram account`);
+        console.log(`   Send /pair <secret> from the configured chat (chatId=${config.chatId})`);
       }
     } else {
-      this.paired = true; // pairing disabled = always paired
       console.log('📱 Telegram notifier started (pairing disabled)');
     }
+  }
+
+  // ─── Pairing helpers ──────────────────────────────────────
+
+  /** True only for the chat configured to receive approvals (1:1 or group). */
+  private isConfiguredChat(chatId: string): boolean {
+    return chatId === this.config.chatId;
+  }
+
+  /**
+   * Whether approvals can be requested: the configured chat must be paired
+   * (or pairing is disabled). Derived from the DB so it can't be flipped by
+   * a stray command from another chat.
+   */
+  private isConfiguredChatPaired(): boolean {
+    if (!this.config.pairing.enabled) return true;
+    return this.audit.isPairedUser(this.config.chatId);
   }
 
   // ─── Polling diagnostics & watchdog ──────────────────────
@@ -211,7 +228,7 @@ export class TelegramNotifier {
 
   getHealth(): TelegramHealth {
     return {
-      paired: this.paired,
+      paired: this.isConfiguredChatPaired(),
       polling: this.bot.isPolling(),
       restartingPolling: this.restartingPolling,
       pendingCallbacks: this.pendingCallbacks.size,
@@ -240,23 +257,38 @@ export class TelegramNotifier {
   private setupPairingHandler(): void {
     this.bot.onText(/\/pair\s+(.+)/, async (msg, match) => {
       const chatId = msg.chat.id.toString();
-      const providedSecret = match?.[1]?.trim();
-      const userName = msg.from?.first_name || msg.from?.username || 'unknown';
+
+      // Only the configured chat may pair. Silently ignore everyone else so the
+      // bot is not a brute-force / identity oracle for arbitrary chats.
+      if (!this.isConfiguredChat(chatId)) {
+        console.log(`🚫 Ignoring /pair from non-configured chat ${chatId}`);
+        return;
+      }
 
       if (!this.config.pairing.enabled) {
         await this.safeSendMessage(chatId, '⚠️ Pairing is disabled in configuration.');
         return;
       }
 
+      // Throttle repeated wrong attempts from the configured chat.
+      if (this.pairThrottle.isThrottled(chatId)) {
+        console.log(`⛔ /pair throttled for chat ${chatId} (too many failed attempts)`);
+        return;
+      }
+
+      const providedSecret = match?.[1]?.trim();
+      const userName = msg.from?.first_name || msg.from?.username || 'unknown';
+
       if (providedSecret === this.config.pairing.secret) {
+        this.pairThrottle.reset(chatId);
         this.audit.pairUser(chatId, userName);
-        this.paired = true;
         console.log(`✅ Telegram paired with user: ${userName} (chat: ${chatId})`);
         await this.safeSendMessage(chatId,
-          `✅ *Paired successfully!*\n\nHi ${userName}, you are now authorized to approve/deny ClawGuard requests from this chat.`,
+          `✅ *Paired successfully!*\n\nHi ${userName}, this chat is now authorized to approve/deny ClawGuard requests.`,
           { parse_mode: 'Markdown' }
         );
       } else {
+        this.pairThrottle.registerFailure(chatId);
         console.log(`❌ Failed pairing attempt from chat ${chatId} (wrong secret)`);
         await this.safeSendMessage(chatId, '❌ Wrong pairing secret. Check your clawguard.yaml config.');
       }
@@ -264,15 +296,24 @@ export class TelegramNotifier {
 
     this.bot.onText(/\/unpair/, async (msg) => {
       const chatId = msg.chat.id.toString();
+      // Only the configured chat can unpair itself; ignore stray commands so a
+      // third party can't disrupt the approval flow.
+      if (!this.isConfiguredChat(chatId)) {
+        console.log(`🚫 Ignoring /unpair from non-configured chat ${chatId}`);
+        return;
+      }
       this.audit.unpairUser(chatId);
-      this.paired = false;
       console.log(`🔓 Telegram unpaired: chat ${chatId}`);
       await this.safeSendMessage(chatId, '🔓 Unpaired. You will no longer receive approval requests.');
     });
 
     this.bot.onText(/\/status/, async (msg) => {
       const chatId = msg.chat.id.toString();
-      const isPaired = this.audit.isPairedUser(chatId);
+      if (!this.isConfiguredChat(chatId)) {
+        console.log(`🚫 Ignoring /status from non-configured chat ${chatId}`);
+        return;
+      }
+      const isPaired = this.isConfiguredChatPaired();
       const status = isPaired ? '✅ Paired' : '❌ Not paired';
       const showlog = isPaired && this.audit.isShowlogEnabled(chatId) ? 'on' : 'off';
       await this.safeSendMessage(
@@ -284,6 +325,10 @@ export class TelegramNotifier {
 
     this.bot.onText(/^\/showlog(?:\s+(on|off))?/i, async (msg, match) => {
       const chatId = msg.chat.id.toString();
+      if (!this.isConfiguredChat(chatId)) {
+        console.log(`🚫 Ignoring /showlog from non-configured chat ${chatId}`);
+        return;
+      }
       if (this.config.pairing.enabled && !this.audit.isPairedUser(chatId)) {
         await this.safeSendMessage(chatId, '❌ Not paired. Send /pair <secret> first.');
         return;
@@ -487,9 +532,9 @@ export class TelegramNotifier {
     agentIp: string,
     meta?: RequestMeta
   ): Promise<{ approved: boolean; ttlSeconds: number; approvedBy: string; pathScoped: boolean }> {
-    // If not paired, deny immediately
-    if (this.config.pairing.enabled && !this.paired) {
-      console.log('❌ Cannot request approval: Telegram bot is not paired');
+    // If the configured chat isn't paired, deny immediately
+    if (!this.isConfiguredChatPaired()) {
+      console.log('❌ Cannot request approval: configured Telegram chat is not paired');
       return { approved: false, ttlSeconds: 0, approvedBy: 'unpaired', pathScoped: false };
     }
 
@@ -606,7 +651,7 @@ export class TelegramNotifier {
   // ─── Info notifications ─────────────────────────────────────
 
   async notifyDiscoveryBlocked(hostname: string, clientIp: string): Promise<void> {
-    if (this.config.pairing.enabled && !this.paired) return;
+    if (!this.isConfiguredChatPaired()) return;
 
     const text = [
       `🔍 *Discovery: new host blocked*`,
