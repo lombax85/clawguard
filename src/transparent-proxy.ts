@@ -7,6 +7,7 @@ import { ApprovalManager } from './approval';
 import { AuditLogger } from './audit';
 import { CertManager } from './cert-manager';
 import { handleHostProxy } from './proxy';
+import { preserveRawBody } from './raw-body';
 
 export function startTransparentProxy(
   config: Config,
@@ -18,8 +19,8 @@ export function startTransparentProxy(
 
   const app = express();
 
-  // Parse raw body for forwarding
-  app.use(express.raw({ type: '*/*', limit: '10mb' }));
+  // Preserve the exact request bytes, including gzip/deflate payloads.
+  app.use(preserveRawBody());
 
   // Forward all requests via host-based routing, skipping agentKey validation
   // passthrough: unknown hosts are forwarded directly without auth injection

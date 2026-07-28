@@ -11,6 +11,7 @@ import { validateRuntimeUrl } from './security';
 import { rewriteRequestAuth } from './auth-rewrite';
 import { applyPlugin } from './auth-plugins/apply';
 import { extractRequestMeta } from './request-meta';
+import { preserveRawBody } from './raw-body';
 
 /**
  * Validates that the client sent the correct dummy token.
@@ -62,8 +63,8 @@ export function createProxy(
 ): express.Application {
   const app = express();
 
-  // Parse raw body for forwarding
-  app.use(express.raw({ type: '*/*', limit: '10mb' }));
+  // Preserve the exact request bytes, including gzip/deflate payloads.
+  app.use(preserveRawBody());
 
   // ─── Admin panel ──────────────────────────────────────────
 
