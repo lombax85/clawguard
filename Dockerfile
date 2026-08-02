@@ -15,6 +15,10 @@ FROM node:20-alpine
 
 WORKDIR /app
 
+# Experimental SSH broker: runs a short-lived stock ssh-agent per approved
+# session. No SSH server is implemented in the Node process.
+RUN apk add --no-cache openssh-client
+
 # Copy compiled deps (includes native better-sqlite3 bindings)
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist

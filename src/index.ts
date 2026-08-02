@@ -7,12 +7,15 @@ import { TelegramNotifier } from './telegram';
 import { WebhookNotifier } from './webhook';
 import { ApprovalManager } from './approval';
 import { createProxy } from './proxy';
-import { validateAllUpstreams, validateUpstreamUrl } from './security';
+import { validateAllUpstreams, validateSshTargetRuntime, validateUpstreamUrl } from './security';
 import { CertManager } from './cert-manager';
 import { attachMitmProxy } from './mitm-proxy';
 import { startTransparentProxy } from './transparent-proxy';
 import { loadPlugin } from './auth-plugins/loader';
 import { createAdminRouter } from './admin';
+import { loadSshCredentialPlugin } from './ssh-credential-plugins/loader';
+import { SshAgentLeaseManager } from './ssh-agent-lease';
+import { SshBroker } from './ssh-broker';
 
 const CONFIG_PATH = process.env['CLAWGUARD_CONFIG'] || process.env['AGENTGATE_CONFIG'] || path.join(process.cwd(), 'clawguard.yaml');
 
@@ -43,6 +46,18 @@ async function main() {
   } else {
     const overrides = audit.getServiceOverrides();
     for (const [name, svcConfig] of Object.entries(overrides)) {
+      // SSH services are always sourced from YAML. A stale HTTP override may
+      // not shadow one, and an override may never introduce SSH dynamically.
+      if (config.services[name]?.protocol === 'ssh'
+        || svcConfig.protocol === 'ssh'
+        || svcConfig.ssh !== undefined) {
+        console.warn(`   ⚠️  SSH service override ignored: ${name} (SSH is YAML-only)`);
+        continue;
+      }
+      if (svcConfig.protocol !== undefined && svcConfig.protocol !== 'http') {
+        console.warn(`   ⚠️  Service override skipped: ${name} — unsupported protocol`);
+        continue;
+      }
       // Validate override against current allowlist
       const validation = validateUpstreamUrl(svcConfig.upstream, config.security);
       if (!validation.valid) {
@@ -50,6 +65,7 @@ async function main() {
         console.warn(`      Add "${new URL(svcConfig.upstream).hostname}" to security.allowedUpstreams in clawguard.yaml to enable it`);
         continue;
       }
+      svcConfig.protocol = 'http';
       config.services[name] = svcConfig;
       console.log(`   ↻ Service override loaded: ${name}`);
     }
@@ -81,10 +97,20 @@ async function main() {
 
   // Load auth plugins BEFORE accepting requests
   const PLUGIN_DATA_DIR = path.resolve('data/plugins');
+  const SSH_PLUGIN_DATA_DIR = path.resolve('data/ssh-credential-plugins');
   for (const [name, svc] of Object.entries(config.services)) {
     if (svc.auth.type === 'plugin' && svc.auth.pluginPath) {
       try {
-        await loadPlugin(name, svc.auth.pluginPath, svc.auth.pluginConfig || {}, PLUGIN_DATA_DIR);
+        if (svc.protocol === 'ssh') {
+          await loadSshCredentialPlugin(
+            name,
+            svc.auth.pluginPath,
+            svc.auth.pluginConfig || {},
+            SSH_PLUGIN_DATA_DIR
+          );
+        } else {
+          await loadPlugin(name, svc.auth.pluginPath, svc.auth.pluginConfig || {}, PLUGIN_DATA_DIR);
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Unknown error';
         console.error(`❌ Failed to load plugin for ${name}: ${message}`);
@@ -93,11 +119,45 @@ async function main() {
     }
   }
 
+  // Resolve SSH targets before accepting sessions. The broker repeats this on
+  // every request and gives the sidecar the validated IP, avoiding a second
+  // untrusted DNS lookup between policy evaluation and connection.
+  for (const [name, svc] of Object.entries(config.services)) {
+    if (svc.protocol !== 'ssh') continue;
+    const validation = await validateSshTargetRuntime(svc, config.security);
+    if (!validation.valid) {
+      throw new Error(`SSH target validation failed for ${name}: ${validation.reason}`);
+    }
+    console.log(`   ✓ SSH target resolved and validated: ${name}`);
+  }
+
+  let sshLeaseManager: SshAgentLeaseManager | undefined;
+  let sshBroker: SshBroker | undefined;
+  if (config.sshBroker.enabled) {
+    sshLeaseManager = new SshAgentLeaseManager({
+      runtimeDir: config.sshBroker.runtimeDir,
+      gatewayUid: config.sshBroker.gatewayUid,
+      gatewayGid: config.sshBroker.gatewayGid,
+      leaseTtlSeconds: config.sshBroker.leaseTtlSeconds,
+      maxConcurrentLeases: config.sshBroker.maxConcurrentLeases,
+      sshAgentPath: config.sshBroker.sshAgentPath,
+      sshAddPath: config.sshBroker.sshAddPath,
+    });
+    sshBroker = new SshBroker(config, {
+      approvalManager,
+      audit,
+      leaseManager: sshLeaseManager,
+    });
+    await sshBroker.start();
+    console.log(`🔐 Experimental SSH broker: ${config.sshBroker.socketPath}`);
+  }
+
   const server = app.listen(port, () => {
     console.log(`\n🚀 ClawGuard proxy running on http://localhost:${port}`);
     console.log(`📡 Configured services:`);
     for (const [name, svc] of Object.entries(config.services)) {
-      console.log(`   → ${name}: ${svc.upstream} (${svc.policy.default})`);
+      const detail = svc.protocol === 'ssh' ? 'one-time SSH approval' : svc.policy.default;
+      console.log(`   → ${name}: ${svc.upstream} (${detail})`);
     }
     console.log(`\n🔑 Agent key header: X-ClawGuard-Key`);
     console.log(`📊 Status:    http://localhost:${port}/__status`);
@@ -163,17 +223,30 @@ async function main() {
   }
 
   // Graceful shutdown
-  function shutdown(): void {
+  let shuttingDown = false;
+  async function shutdown(): Promise<void> {
+    if (shuttingDown) return;
+    shuttingDown = true;
     console.log('\n🛑 Shutting down ClawGuard...');
     telegram?.stop();
+    await sshBroker?.close();
+    await sshLeaseManager?.close();
+    await Promise.all([
+      new Promise<void>((resolve) => server.close(() => resolve())),
+      new Promise<void>((resolve) => {
+        if (!httpsServer) {
+          resolve();
+          return;
+        }
+        httpsServer.close(() => resolve());
+      }),
+    ]);
     audit.close();
-    server.close();
-    httpsServer?.close();
     process.exit(0);
   }
 
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', () => { void shutdown(); });
+  process.on('SIGTERM', () => { void shutdown(); });
 }
 
 main().catch((err) => {

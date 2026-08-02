@@ -29,6 +29,29 @@ function makeConfig(strictMode) {
   };
 }
 
+function makeSshService({ includeToken = true } = {}) {
+  const auth = {
+    type: 'plugin',
+    pluginPath: 'ssh-agent-key',
+    pluginConfig: {
+      username: 'deploy',
+      privateKey: 'PRIVATE_KEY_MUST_NEVER_LEAVE_ADMIN_API',
+    },
+  };
+  if (includeToken) auth.token = 'unused';
+
+  return {
+    protocol: 'ssh',
+    upstream: 'ssh://ssh.example.com:22',
+    auth,
+    policy: { default: 'require_approval' },
+    ssh: {
+      knownHostKey: 'ssh-ed25519 AAAATESTPUBLICHOSTKEY',
+      allowPrivateTarget: false,
+    },
+  };
+}
+
 function fakeApprovalManager() {
   return {
     getActiveCount: () => 0,
@@ -39,7 +62,7 @@ function fakeApprovalManager() {
 }
 
 function fakeAudit() {
-  const calls = { saveServiceOverride: [] };
+  const calls = { saveServiceOverride: [], deleteServiceOverride: [] };
   return {
     calls,
     getDashboardStats: () => ({
@@ -54,7 +77,7 @@ function fakeAudit() {
       availableServices: [],
     }),
     saveServiceOverride: (name, config) => calls.saveServiceOverride.push({ name, config }),
-    deleteServiceOverride: () => {},
+    deleteServiceOverride: (name) => calls.deleteServiceOverride.push(name),
     getRecentApprovals: () => [],
     getRecentRequests: () => [],
     getPairedUsers: () => [],
@@ -116,5 +139,112 @@ test('admin editable mode persists service overrides and updates runtime config'
     assert.equal(res.status, 200);
     assert.equal(audit.calls.saveServiceOverride.length, 1);
     assert.deepEqual(config.services.newsvc, serviceConfig);
+  });
+});
+
+test('admin editable mode rejects creating SSH services', async () => {
+  const config = makeConfig(false);
+  await withAdminServer(config, async (base, audit) => {
+    const res = await fetch(`${base}/api/services`, {
+      method: 'POST',
+      headers: { 'x-clawguard-pin': '1234', 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'production-ssh', config: makeSshService() }),
+    });
+
+    assert.equal(res.status, 403);
+    assert.match((await res.json()).error, /SSH services are YAML-only/i);
+    assert.equal(audit.calls.saveServiceOverride.length, 0);
+    assert.equal(config.services['production-ssh'], undefined);
+  });
+});
+
+test('admin editable mode rejects unsupported service protocols', async () => {
+  const config = makeConfig(false);
+  await withAdminServer(config, async (base, audit) => {
+    const res = await fetch(`${base}/api/services`, {
+      method: 'POST',
+      headers: { 'x-clawguard-pin': '1234', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: 'invalid-protocol',
+        config: {
+          protocol: 'bogus',
+          upstream: 'https://api.example.com',
+          auth: { type: 'bearer', token: 'secret' },
+          policy: { default: 'require_approval' },
+        },
+      }),
+    });
+
+    assert.equal(res.status, 403);
+    assert.match((await res.json()).error, /only HTTP service overrides/i);
+    assert.equal(audit.calls.saveServiceOverride.length, 0);
+    assert.equal(config.services['invalid-protocol'], undefined);
+  });
+});
+
+test('admin editable mode rejects modifying SSH services or converting HTTP services to SSH', async () => {
+  const config = makeConfig(false);
+  config.services['production-ssh'] = makeSshService();
+  const originalSsh = JSON.parse(JSON.stringify(config.services['production-ssh']));
+
+  await withAdminServer(config, async (base, audit) => {
+    const updateSsh = await fetch(`${base}/api/services/production-ssh`, {
+      method: 'PUT',
+      headers: { 'x-clawguard-pin': '1234', 'content-type': 'application/json' },
+      body: JSON.stringify({ config: { policy: { default: 'auto_approve' } } }),
+    });
+    assert.equal(updateSsh.status, 403);
+    assert.match((await updateSsh.json()).error, /SSH services are YAML-only/i);
+
+    const convertHttp = await fetch(`${base}/api/services/existing`, {
+      method: 'PUT',
+      headers: { 'x-clawguard-pin': '1234', 'content-type': 'application/json' },
+      body: JSON.stringify({ config: makeSshService() }),
+    });
+    assert.equal(convertHttp.status, 403);
+    assert.match((await convertHttp.json()).error, /SSH services are YAML-only/i);
+
+    assert.equal(audit.calls.saveServiceOverride.length, 0);
+    assert.deepEqual(config.services['production-ssh'], originalSsh);
+    assert.equal(config.services.existing.protocol, undefined);
+  });
+});
+
+test('admin editable mode rejects deleting SSH services', async () => {
+  const config = makeConfig(false);
+  config.services['production-ssh'] = makeSshService();
+
+  await withAdminServer(config, async (base, audit) => {
+    const res = await fetch(`${base}/api/services/production-ssh`, {
+      method: 'DELETE',
+      headers: { 'x-clawguard-pin': '1234' },
+    });
+
+    assert.equal(res.status, 403);
+    assert.match((await res.json()).error, /SSH services are YAML-only/i);
+    assert.equal(audit.calls.deleteServiceOverride.length, 0);
+    assert.ok(config.services['production-ssh']);
+  });
+});
+
+test('admin GET marks SSH services YAML-only without exposing credential plugin config', async () => {
+  const config = makeConfig(false);
+  // SSH auth.token is intentionally omitted: loadConfig supports this form.
+  config.services['production-ssh'] = makeSshService({ includeToken: false });
+
+  await withAdminServer(config, async (base) => {
+    const res = await fetch(`${base}/api/services`, {
+      headers: { 'x-clawguard-pin': '1234' },
+    });
+
+    assert.equal(res.status, 200);
+    const raw = await res.text();
+    const services = JSON.parse(raw);
+    assert.equal(services['production-ssh'].protocol, 'ssh');
+    assert.equal(services['production-ssh'].yamlOnly, true);
+    assert.equal(services['production-ssh'].auth.type, 'plugin');
+    assert.equal(services['production-ssh'].auth.pluginConfig, undefined);
+    assert.equal(raw.includes('PRIVATE_KEY_MUST_NEVER_LEAVE_ADMIN_API'), false);
+    assert.equal(raw.includes('privateKey'), false);
   });
 });

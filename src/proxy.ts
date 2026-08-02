@@ -130,11 +130,20 @@ function resolveServiceByHost(
   if (!host) return null;
   const hostname = host.split(':')[0]; // strip port
   for (const [name, svc] of Object.entries(services)) {
+    if (svc.protocol === 'ssh') continue;
     if (svc.hostnames?.some((h) => h === hostname)) {
       return { name, config: svc };
     }
   }
   return null;
+}
+
+// Test helper for the protocol boundary used by transparent host routing.
+export function __resolveServiceByHostForTests(
+  host: string | undefined,
+  services: Record<string, ServiceConfig>
+): { name: string; config: ServiceConfig } | null {
+  return resolveServiceByHost(host, services);
 }
 
 export function handleHostProxy(
@@ -198,6 +207,11 @@ export function handleHostProxy(
 
     const serviceName = match.name;
     const serviceConfig = match.config;
+
+    if (serviceConfig.protocol === 'ssh') {
+      res.status(404).json({ error: 'SSH services are not available over the HTTP proxy' });
+      return;
+    }
     const meta = extractRequestMeta(req.headers);
 
     // Validate agent key if required
@@ -391,6 +405,13 @@ function handleProxy(
 
     if (!serviceConfig) {
       res.status(404).json({ error: `Unknown service: ${serviceName}` });
+      return;
+    }
+
+    // SSH services are reachable only through the Unix-socket broker and
+    // OpenSSH sidecar. Never pass them into HTTP URL/auth-plugin handling.
+    if (serviceConfig.protocol === 'ssh') {
+      res.status(404).json({ error: 'SSH services are not available over the HTTP proxy' });
       return;
     }
 

@@ -118,6 +118,29 @@ services:
   #   policy:
   #     default: require_approval
 
+  # ─── Experimental SSH access gateway ────────────────────
+  # SSH services are YAML-only and always require one explicit Telegram
+  # approval per session. The key is resolved inside ClawGuard and is never
+  # returned to the inbound SSH client or written to a private-key file.
+  #
+  # production-ssh:
+  #   protocol: ssh
+  #   upstream: ssh://ssh.example.com:22       # fixed host AND explicit port
+  #   auth:
+  #     type: plugin
+  #     pluginPath: ssh-agent-key
+  #     pluginConfig:
+  #       username: deploy                     # fixed upstream account
+  #       privateKey: "vault:secret/data/ssh/production#privateKey"
+  #   policy:
+  #     default: require_approval              # SSH never reuses cached HTTP approvals
+  #   ssh:
+  #     # Replace this complete key with the upstream sshd host public key,
+  #     # obtained and verified through a trusted channel. Fingerprints alone
+  #     # and trust-on-first-use are intentionally rejected.
+  #     knownHostKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
+  #     allowPrivateTarget: false              # set true explicitly for a private/LAN target
+
   # ─── AWS SigV4 (e.g. CloudTrail LookupEvents) ───────────
   # Signs requests with AWS Signature Version 4. Keep these IAM keys read-only.
   # aws-cloudtrail:
@@ -317,6 +340,23 @@ proxy:
   caDir: ./data/ca              # CA cert/key stored here (auto-generated on first run)
   discovery: false              # enable discovery handling for unknown hosts
   discoveryPolicy: block        # block (default) | silent_allow (explicit opt-in)
+
+# ─── Experimental SSH credential broker ─────────────────────
+# Disabled by default. Enable only after configuring at least one protocol:ssh
+# service above and the opt-in Compose sidecar documented in ssh-gateway/README.md.
+sshBroker:
+  enabled: false
+  runtimeDir: /run/clawguard-ssh
+  socketPath: /run/clawguard-ssh/broker.sock
+  gatewayUid: 10001
+  gatewayGid: 10001
+  approvalTimeoutMs: 90000
+  credentialTimeoutMs: 30000   # bounded plugin retrieval; 1000..300000
+  leaseTtlSeconds: 120          # lifetime of the signing capability, not the authenticated channel
+  maxSessionSeconds: 3600       # absolute wrapper limit; 10..86400
+  sshAgentPath: /usr/bin/ssh-agent
+  sshAddPath: /usr/bin/ssh-add
+  maxConcurrentLeases: 10       # pending approvals + live sessions
 
 # ─── Secret providers ────────────────────────────────────────
 # External secret backends for resolving token references.

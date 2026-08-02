@@ -8,7 +8,18 @@ export interface PolicyRule {
   action: 'auto_approve' | 'require_approval';
 }
 
+export type ServiceProtocol = 'http' | 'ssh';
+
+export interface SshServiceConfig {
+  // Complete OpenSSH public host key (`keytype base64`), never a TOFU fingerprint.
+  knownHostKey: string;
+  // Private/link-local/loopback literals and DNS answers require this explicit opt-in.
+  allowPrivateTarget: boolean;
+}
+
 export interface ServiceConfig {
+  // Optional in input for backward compatibility; loadConfig normalizes it to `http`.
+  protocol?: ServiceProtocol;
   upstream: string;
   auth: {
     type: 'bearer' | 'header' | 'query' | 'basic' | 'url' | 'oauth2_client_credentials' | 'oauth2_authorization_code' | 'body_json' | 'plugin';
@@ -39,6 +50,7 @@ export interface ServiceConfig {
     rules?: PolicyRule[];
   };
   hostnames?: string[]; // for host-based routing (forward proxy / /etc/hosts mode)
+  ssh?: SshServiceConfig;
 }
 
 // ─── Security ────────────────────────────────────────────────
@@ -167,6 +179,23 @@ export interface TransparentProxyConfig {
   httpsPort: number;
 }
 
+// ─── SSH credential broker (experimental) ──────────────────
+
+export interface SshBrokerConfig {
+  enabled: boolean;
+  socketPath: string;
+  runtimeDir: string;
+  gatewayUid: number;
+  gatewayGid: number;
+  approvalTimeoutMs: number;
+  credentialTimeoutMs: number;
+  leaseTtlSeconds: number;
+  maxSessionSeconds: number;
+  sshAgentPath: string;
+  sshAddPath: string;
+  maxConcurrentLeases: number;
+}
+
 // ─── Config (root) ──────────────────────────────────────────
 
 export interface Config {
@@ -184,6 +213,7 @@ export interface Config {
   admin: AdminConfig;
   proxy: ProxyConfig;
   transparentProxy: TransparentProxyConfig;
+  sshBroker: SshBrokerConfig;
   secrets?: SecretsConfig;
 }
 

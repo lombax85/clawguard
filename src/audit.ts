@@ -1,6 +1,64 @@
 import Database from 'better-sqlite3';
 import { AuditEntry, Approval, DashboardStats, ServiceConfig } from './types';
 
+export type SshSessionAction = 'shell' | 'exec';
+
+export interface SshSessionStart {
+  id: string;
+  startedAt?: string;
+  service: string;
+  clientIp: string;
+  targetHost?: string | null;
+  targetPort?: number | null;
+  upstreamUser?: string | null;
+  action: SshSessionAction;
+  approved?: boolean;
+  outcome?: string;
+  leaseExpiresAt?: string | null;
+}
+
+export interface SshSessionUpdate {
+  targetHost?: string | null;
+  targetPort?: number | null;
+  upstreamUser?: string | null;
+  approved?: boolean;
+  outcome?: string;
+  leaseExpiresAt?: string | null;
+  exitStatus?: number | null;
+  closeReason?: string | null;
+}
+
+export interface SshSessionFinalize extends SshSessionUpdate {
+  endedAt?: string;
+  outcome: string;
+}
+
+export interface SshSessionRecord {
+  id: string;
+  startedAt: string;
+  updatedAt: string;
+  endedAt: string | null;
+  durationMs: number | null;
+  service: string;
+  clientIp: string;
+  targetHost: string | null;
+  targetPort: number | null;
+  upstreamUser: string | null;
+  action: SshSessionAction;
+  approved: boolean;
+  outcome: string;
+  leaseExpiresAt: string | null;
+  exitStatus: number | null;
+  closeReason: string | null;
+}
+
+function normalizeCloseReason(value: string | null | undefined): string | null | undefined {
+  if (value === undefined || value === null) return value;
+  // Close reasons are metadata, not a transcript. Keep them single-line and
+  // bounded so accidental error dumps cannot turn the audit DB into a stream log.
+  return value.replace(/\s+/g, ' ').trim().slice(0, 1024);
+}
+
 export class AuditLogger {
   private db: Database.Database;
 
@@ -48,6 +106,27 @@ export class AuditLogger {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS ssh_sessions (
+        id TEXT PRIMARY KEY,
+        started_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        ended_at TEXT,
+        service TEXT NOT NULL,
+        client_ip TEXT NOT NULL,
+        target_host TEXT,
+        target_port INTEGER,
+        upstream_user TEXT,
+        action TEXT NOT NULL CHECK (action IN ('shell', 'exec')),
+        approved INTEGER NOT NULL DEFAULT 0,
+        outcome TEXT NOT NULL,
+        lease_expires_at TEXT,
+        exit_status INTEGER,
+        close_reason TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_ssh_sessions_started_at
+      ON ssh_sessions(started_at DESC);
 
     `);
 
@@ -227,6 +306,124 @@ export class AuditLogger {
   }
 
   // ─── Queries ───────────────────────────────────────────────
+
+  startSshSession(entry: SshSessionStart): void {
+    if (!entry.id.trim()) throw new Error('SSH session id is required');
+    if (entry.action !== 'shell' && entry.action !== 'exec') {
+      throw new Error(`Invalid SSH session action: ${entry.action}`);
+    }
+    if (entry.targetPort !== undefined && entry.targetPort !== null
+      && (!Number.isInteger(entry.targetPort) || entry.targetPort < 1 || entry.targetPort > 65535)) {
+      throw new Error(`Invalid SSH target port: ${entry.targetPort}`);
+    }
+
+    const now = entry.startedAt ?? new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO ssh_sessions (
+        id, started_at, updated_at, service, client_ip, target_host, target_port,
+        upstream_user, action, approved, outcome, lease_expires_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      entry.id, now, now, entry.service, entry.clientIp, entry.targetHost ?? null,
+      entry.targetPort ?? null, entry.upstreamUser ?? null, entry.action, entry.approved ? 1 : 0,
+      entry.outcome ?? 'pending_approval', entry.leaseExpiresAt ?? null
+    );
+  }
+
+  updateSshSession(id: string, update: SshSessionUpdate): boolean {
+    return this.applySshSessionUpdate(id, update, undefined);
+  }
+
+  finalizeSshSession(id: string, final: SshSessionFinalize): boolean {
+    return this.applySshSessionUpdate(id, final, final.endedAt ?? new Date().toISOString());
+  }
+
+  private applySshSessionUpdate(
+    id: string,
+    update: SshSessionUpdate,
+    endedAt: string | undefined
+  ): boolean {
+    const assignments = ['updated_at = ?'];
+    const values: unknown[] = [new Date().toISOString()];
+
+    if (endedAt !== undefined) {
+      assignments.push('ended_at = ?');
+      values.push(endedAt);
+    }
+    if (update.approved !== undefined) {
+      assignments.push('approved = ?');
+      values.push(update.approved ? 1 : 0);
+    }
+    if (update.targetHost !== undefined) {
+      assignments.push('target_host = ?');
+      values.push(update.targetHost);
+    }
+    if (update.targetPort !== undefined) {
+      if (update.targetPort !== null
+        && (!Number.isInteger(update.targetPort) || update.targetPort < 1 || update.targetPort > 65535)) {
+        throw new Error(`Invalid SSH target port: ${update.targetPort}`);
+      }
+      assignments.push('target_port = ?');
+      values.push(update.targetPort);
+    }
+    if (update.upstreamUser !== undefined) {
+      assignments.push('upstream_user = ?');
+      values.push(update.upstreamUser);
+    }
+    if (update.outcome !== undefined) {
+      assignments.push('outcome = ?');
+      values.push(update.outcome);
+    }
+    if (update.leaseExpiresAt !== undefined) {
+      assignments.push('lease_expires_at = ?');
+      values.push(update.leaseExpiresAt);
+    }
+    if (update.exitStatus !== undefined) {
+      assignments.push('exit_status = ?');
+      values.push(update.exitStatus);
+    }
+    if (update.closeReason !== undefined) {
+      assignments.push('close_reason = ?');
+      values.push(normalizeCloseReason(update.closeReason));
+    }
+
+    values.push(id);
+    const result = this.db.prepare(`
+      UPDATE ssh_sessions SET ${assignments.join(', ')} WHERE id = ?
+    `).run(...values);
+    return result.changes > 0;
+  }
+
+  getRecentSshSessions(limit: number = 50): SshSessionRecord[] {
+    const safeLimit = Math.max(1, Math.min(Math.trunc(limit) || 50, 1000));
+    const rows = this.db.prepare(`
+      SELECT
+        id,
+        started_at AS startedAt,
+        updated_at AS updatedAt,
+        ended_at AS endedAt,
+        CASE
+          WHEN ended_at IS NULL THEN NULL
+          ELSE CAST(ROUND((julianday(ended_at) - julianday(started_at)) * 86400000) AS INTEGER)
+        END AS durationMs,
+        service,
+        client_ip AS clientIp,
+        target_host AS targetHost,
+        target_port AS targetPort,
+        upstream_user AS upstreamUser,
+        action,
+        approved,
+        outcome,
+        lease_expires_at AS leaseExpiresAt,
+        exit_status AS exitStatus,
+        close_reason AS closeReason
+      FROM ssh_sessions
+      ORDER BY started_at DESC
+      LIMIT ?
+    `).all(safeLimit) as Array<Omit<SshSessionRecord, 'approved'> & { approved: number }>;
+
+    return rows.map((row) => ({ ...row, approved: row.approved === 1 }));
+  }
 
   getRecentRequests(limit: number = 50): unknown[] {
     return this.db.prepare(`

@@ -1,9 +1,15 @@
-import TelegramBot from 'node-telegram-bot-api';
+import TelegramBot, {
+  type InlineKeyboardMarkup,
+  type Message,
+  type SendMessageParams,
+  type User,
+} from 'node-telegram-bot-api';
 import { TelegramConfig, RequestMeta } from './types';
 import { AuditLogger } from './audit';
 import { PairThrottle } from './pair-throttle';
 
 export type ApprovalCallback = (approved: boolean, ttlSeconds: number, approvedBy: string, pathScoped: boolean) => void;
+type SendMessageOptions = Omit<SendMessageParams, 'chat_id' | 'text'>;
 
 /**
  * Strips characters that would break Telegram's legacy Markdown parser
@@ -12,6 +18,21 @@ export type ApprovalCallback = (approved: boolean, ttlSeconds: number, approvedB
  */
 function sanitizeForTelegram(value: string): string {
   return value.replace(/[`*_[\]]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * The SSH approval keyboard intentionally has no TTL or reusable-scope
+ * choices: an approval is valid only for the session currently waiting.
+ */
+export function buildSshSessionApprovalKeyboard(requestId: string): InlineKeyboardMarkup {
+  return {
+    inline_keyboard: [
+      [
+        { text: '✅ Approve this session', callback_data: `approve_ssh_session:${requestId}` },
+        { text: '❌ Deny', callback_data: `deny:${requestId}` },
+      ],
+    ],
+  };
 }
 
 /** Renders optional provenance (who/why) as Markdown lines, or [] if absent. */
@@ -358,7 +379,7 @@ export class TelegramNotifier {
    * When `allowedApprovers` is unset/empty, anyone in the paired chat is allowed
    * (backwards-compatible). Entries may be numeric user ids or @usernames.
    */
-  private isAllowedApprover(from: TelegramBot.User | undefined): boolean {
+  private isAllowedApprover(from: User | undefined): boolean {
     const list = this.config.allowedApprovers;
     if (!list || list.length === 0) return true;
     if (!from) return false;
@@ -371,8 +392,8 @@ export class TelegramNotifier {
   }
 
   /** Send options shared by all approval-related messages (adds the group topic thread). */
-  private sendOptions(extra?: TelegramBot.SendMessageOptions): TelegramBot.SendMessageOptions {
-    const opts: TelegramBot.SendMessageOptions = { parse_mode: 'Markdown', ...extra };
+  private sendOptions(extra?: SendMessageOptions): SendMessageOptions {
+    const opts: SendMessageOptions = { parse_mode: 'Markdown', ...extra };
     if (this.config.messageThreadId !== undefined) {
       opts.message_thread_id = this.config.messageThreadId;
     }
@@ -435,6 +456,14 @@ export class TelegramNotifier {
       let finalText = `${originalText}\n\n⚠️ *Unknown action* by ${userName}`;
 
       switch (action) {
+        case 'approve_ssh_session':
+          approved = true;
+          // Deliberately zero: SSH decisions are consumed directly by the
+          // waiting session and are never stored as TTL approvals.
+          ttlSeconds = 0;
+          ackText = '✅ Approved for this SSH session';
+          finalText = `${originalText}\n\n✅ *Approved for this SSH session* by ${userName}`;
+          break;
         case 'approve_once':
           approved = true;
           ttlSeconds = 1;
@@ -601,6 +630,64 @@ export class TelegramNotifier {
   }
 
   /**
+   * Request a one-time SSH session decision. This is separate from the HTTP
+   * approval UI so reusable TTL buttons can never be presented for SSH.
+   */
+  async requestSshSessionApproval(
+    requestId: string,
+    service: string,
+    path: string,
+    agentIp: string,
+    meta?: RequestMeta
+  ): Promise<{ approved: boolean; approvedBy: string }> {
+    if (!this.isConfiguredChatPaired()) {
+      console.log('❌ Cannot request SSH approval: configured Telegram chat is not paired');
+      return { approved: false, approvedBy: 'unpaired' };
+    }
+
+    return new Promise((resolve) => {
+      const callback: ApprovalCallback = (approved, _ttlSeconds, approvedBy) => {
+        resolve({ approved, approvedBy });
+      };
+
+      this.pendingCallbacks.set(requestId, callback);
+
+      const text: string = [
+        `🛡️ *ClawGuard — SSH Session Approval*`,
+        ``,
+        `🔹 Service: *${sanitizeForTelegram(service)}*`,
+        `🔹 Session: \`${sanitizeForTelegram(path)}\``,
+        ...metaLines(meta),
+        `🔹 Agent IP: \`${sanitizeForTelegram(agentIp)}\``,
+        `🔹 Time: ${new Date().toLocaleString('it-IT', { timeZone: 'Europe/Rome' })}`,
+        `🔹 Request ID: \`${requestId}\``,
+        ``,
+        `This approval is valid for this SSH session only.`,
+      ].join('\n');
+
+      this.pendingTexts.set(requestId, text);
+
+      (async () => {
+        const sent = await this.safeSendMessage(this.config.chatId, text, this.sendOptions({
+          reply_markup: buildSshSessionApprovalKeyboard(requestId),
+        }));
+
+        if (!sent) {
+          this.clearPendingRequest(requestId);
+          resolve({ approved: false, approvedBy: 'telegram_error' });
+          return;
+        }
+
+        console.log(`📤 Telegram SSH approval request sent: requestId=${requestId} service=${service}`);
+      })().catch((err) => {
+        console.error(`❌ Telegram requestSshSessionApproval error: ${err instanceof Error ? err.stack || err.message : err}`);
+        this.clearPendingRequest(requestId);
+        resolve({ approved: false, approvedBy: 'telegram_error' });
+      });
+    });
+  }
+
+  /**
    * Emit an info-only notification for a call that was auto-approved
    * (by policy or an existing approval). Gated per-chat by /showlog.
    */
@@ -638,8 +725,8 @@ export class TelegramNotifier {
   private async safeSendMessage(
     chatId: string,
     text: string,
-    options?: TelegramBot.SendMessageOptions
-  ): Promise<TelegramBot.Message | null> {
+    options?: SendMessageOptions
+  ): Promise<Message | null> {
     try {
       return await this.bot.sendMessage(chatId, text, options);
     } catch (err) {

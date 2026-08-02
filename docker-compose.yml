@@ -8,6 +8,38 @@ services:
     volumes:
       - ./clawguard.yaml:/app/clawguard.yaml:ro   # config (read-only)
       - ./data:/app/data                            # SQLite DB persistence
+      - clawguard-ssh-runtime:/run/clawguard-ssh    # broker + short-lived agent sockets
     environment:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
     restart: unless-stopped
+
+  # Opt-in experimental SSH gateway. The normal HTTP-only deployment above
+  # remains the default; start this sidecar with: docker compose --profile ssh up -d --build
+  clawguard-ssh:
+    profiles: ["ssh"]
+    build:
+      context: ./ssh-gateway
+    container_name: clawguard-ssh
+    depends_on:
+      - clawguard
+    ports:
+      - "2222:2222"
+    environment:
+      - CLAWGUARD_SSH_BROKER_SOCKET=${CLAWGUARD_SSH_BROKER_SOCKET:-/run/clawguard-ssh/broker.sock}
+      - CLAWGUARD_SSH_BROKER_TIMEOUT_SECONDS=${CLAWGUARD_SSH_BROKER_TIMEOUT_SECONDS:-135}
+    volumes:
+      - clawguard-ssh-runtime:/run/clawguard-ssh
+      - clawguard-ssh-host-keys:/data
+      # Host-side inbound public keys. Create this FILE before starting:
+      #   mkdir -p ./data/ssh-gateway
+      #   cp ~/.ssh/id_ed25519.pub ./data/ssh-gateway/authorized_keys
+      - ./data/ssh-gateway/authorized_keys:/config/authorized_keys:ro
+    restart: unless-stopped
+
+volumes:
+  # Shared only by ClawGuard and the SSH sidecar. The fixed gateway account is
+  # UID/GID 10001; ClawGuard grants that group traverse/use access without
+  # making the sidecar user owner of the runtime directory.
+  clawguard-ssh-runtime:
+  # Persists the sidecar's OpenSSH host identity across container recreation.
+  clawguard-ssh-host-keys:

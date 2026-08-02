@@ -56,22 +56,23 @@ OpenSSH client
   - no HTTP development auto-approval fallback;
   - no lookup, persistence or reuse of normal method/path approval TTLs;
   - the Telegram UI offers only `Approve this session` and `Deny`.
-- On approval the broker creates the agent lease and returns only lease id, socket path, fixed target metadata and a public `known_hosts` line.
-- Release is explicit on wrapper exit and enforced again by lease TTL and process shutdown cleanup.
+- On approval the broker creates the agent lease and returns only lease id, socket path, fixed target metadata, an absolute session limit and a public `known_hosts` line.
+- Credential-plugin retrieval has its own deadline and receives an `AbortSignal`; shutdown cannot be held open by a plugin that ignores cancellation, and any late Buffer result is scrubbed.
+- Release is explicit on wrapper exit and enforced again by key-lease TTL, absolute session watchdog and process shutdown cleanup. Key expiry removes signing capability without falsifying the lifecycle of an already authenticated OpenSSH channel.
 
 ### Credential plugin and agent lease
 
-- Keep the HTTP `IAuthPlugin` unchanged. Add a separate SSH credential-plugin contract that can return only an upstream username and private key; it cannot override target, port or host verification.
+- Keep the HTTP `IAuthPlugin` unchanged. Add a separate SSH credential-plugin contract that can return only an upstream username and private key; it cannot override target, port or host verification and should honor broker cancellation.
 - The built-in plugin obtains key material from recursively resolved `pluginConfig` values, so existing Vault/static secret providers remain the source of truth.
 - ClawGuard starts a fresh standard `ssh-agent` per approved session, loads the key through `ssh-add -` stdin, and exposes only its Unix socket through a shared runtime volume.
 - The key is never returned by an HTTP response, written to a file, logged, included in audit data or exposed through the admin API.
 - MVP supports unencrypted in-memory OpenSSH private keys resolved from a protected secret backend. Encrypted-key/passphrase automation is deferred.
-- Lease directories are random, bounded beneath a configured runtime root, permission-restricted, owned for the fixed sidecar UID/GID, killed on release/TTL/shutdown and scrubbed after use.
+- Lease directories are random, bounded beneath a non-listable broker-owned runtime root, permission-restricted for the fixed sidecar UID/GID, killed on release/TTL/shutdown and scrubbed after use. The experimental broker must run as root so the sidecar UID never owns that parent boundary.
 
 ### Target and host verification
 
 - SSH services use a fixed `ssh://host:port` upstream and require a complete OpenSSH public host-key value, not TOFU.
-- ClawGuard constructs the exact `[host]:port key-type base64` known-hosts line; the wrapper uses `StrictHostKeyChecking=yes` and isolated global/user known-host files.
+- ClawGuard constructs an exact service-scoped `HostKeyAlias key-type base64` known-hosts line; the wrapper connects to the already validated IP with `StrictHostKeyChecking=yes` and isolated global/user known-host files.
 - The service alias, target hostname, port, username and host key are validated at startup.
 - Private targets require an SSH-specific explicit opt-in without weakening HTTP SSRF settings.
 - The sidecar must eventually be egress-restricted to configured targets; for the experimental MVP the short-lived per-session agent limits credential exposure, but a compromised sidecar during an approved lease remains a documented residual risk.
@@ -98,7 +99,7 @@ OpenSSH client
 - The sidecar uses stock OpenSSH for both SSH legs; the Node application contains no SSH server or PTY/channel bridge.
 - An OpenSSH client can open an interactive shell and execute a command through a configured service after explicit approval.
 - The upstream private key is resolved only inside ClawGuard, passed to `ssh-add` through stdin, retained only in a short-lived agent process and never reaches the inbound client or filesystem.
-- Missing/invalid inbound authentication, unknown service, no approver, denial, invalid broker token, expired lease and host-key mismatch all fail closed.
+- Missing/invalid inbound authentication, unknown service, no approver, denial, malformed broker request, failed credential setup, host-key mismatch and the absolute session limit all fail closed.
 - Forwarding, extra sessions, arbitrary target selection and unsupported subsystems are rejected.
 - Every session attempt has a metadata-only audit record and every agent process/socket is reclaimed.
 - README, example YAML and sidecar documentation clearly state the experimental limits and residual risks.

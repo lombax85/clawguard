@@ -52,6 +52,22 @@ function rejectIfStrictMode(config: Config, res: Response): boolean {
   return true;
 }
 
+function rejectNonHttpServiceMutation(service: Partial<ServiceConfig> | undefined, res: Response): boolean {
+  if (service?.protocol !== undefined && service.protocol !== 'http') {
+    res.status(403).json({
+      error: service.protocol === 'ssh'
+        ? 'SSH services are YAML-only in the experimental gateway and cannot be changed through the admin API.'
+        : 'The admin API accepts only HTTP service overrides.',
+    });
+    return true;
+  }
+  if (service?.ssh === undefined) return false;
+  res.status(403).json({
+    error: 'SSH services are YAML-only in the experimental gateway and cannot be changed through the admin API.',
+  });
+  return true;
+}
+
 export function createAdminRouter(
   config: Config,
   approvalManager: ApprovalManager,
@@ -158,10 +174,13 @@ export function createAdminRouter(
         authInfo.fields = maskedFields;
       }
       services[name] = {
+        protocol: svc.protocol ?? 'http',
         upstream: svc.upstream,
         auth: authInfo,
         policy: svc.policy,
         hostnames: svc.hostnames,
+        ssh: svc.ssh,
+        yamlOnly: svc.protocol === 'ssh',
       };
     }
     res.json(services);
@@ -182,6 +201,8 @@ export function createAdminRouter(
       res.status(400).json({ error: 'Missing name or config' });
       return;
     }
+
+    if (rejectNonHttpServiceMutation(body.config, res)) return;
 
     if (config.services[body.name]) {
       res.status(409).json({ error: `Service "${body.name}" already exists` });
@@ -219,6 +240,9 @@ export function createAdminRouter(
       return;
     }
 
+    if (rejectNonHttpServiceMutation(config.services[name], res)
+      || rejectNonHttpServiceMutation(body.config, res)) return;
+
     // Merge with existing
     const updated: ServiceConfig = {
       ...config.services[name],
@@ -250,6 +274,8 @@ export function createAdminRouter(
       res.status(404).json({ error: `Service "${name}" not found` });
       return;
     }
+
+    if (rejectNonHttpServiceMutation(config.services[name], res)) return;
 
     audit.deleteServiceOverride(name);
     delete config.services[name];
@@ -337,7 +363,10 @@ export function createAdminRouter(
 
 // ─── Helpers ──────────────────────────────────────────────────
 
-function maskToken(token: string): string {
+function maskToken(token: string): string;
+function maskToken(token: undefined): undefined;
+function maskToken(token: string | undefined): string | undefined {
+  if (token === undefined) return undefined;
   if (token.length <= 8) return '****';
   return token.substring(0, 4) + '****' + token.substring(token.length - 4);
 }

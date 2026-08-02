@@ -1,8 +1,9 @@
 import fs from 'fs';
 import path from 'path';
 import yaml from 'js-yaml';
-import { Config, ServiceConfig } from './types';
+import { Config, ServiceConfig, SshBrokerConfig } from './types';
 import { createSecretProviders, resolveSecretValue, SecretProvider } from './secrets/provider';
+import { validateSshService } from './security';
 
 function substituteEnvVars(str: string): string {
   return str.replace(/\$\{(\w+)\}/g, (match, varName) => {
@@ -75,10 +76,133 @@ const DEFAULT_TRANSPARENT_PROXY = {
   httpsPort: 8443,
 };
 
+export const DEFAULT_SSH_BROKER: SshBrokerConfig = {
+  enabled: false,
+  socketPath: '/run/clawguard-ssh/broker.sock',
+  runtimeDir: '/run/clawguard-ssh',
+  gatewayUid: 10001,
+  gatewayGid: 10001,
+  approvalTimeoutMs: 90000,
+  credentialTimeoutMs: 30000,
+  leaseTtlSeconds: 120,
+  maxSessionSeconds: 3600,
+  sshAgentPath: '/usr/bin/ssh-agent',
+  sshAddPath: '/usr/bin/ssh-add',
+  maxConcurrentLeases: 10,
+};
+
 const DEFAULT_TELEGRAM_PAIRING = {
   enabled: true,
   secret: '',
 };
+
+/** Applies SSH-related defaults without making invalid input silently safe. */
+export function normalizeSshConfiguration(config: Config): void {
+  config.sshBroker = { ...DEFAULT_SSH_BROKER, ...(config.sshBroker || {}) };
+  for (const service of Object.values(config.services || {})) {
+    service.protocol = service.protocol ?? 'http';
+  }
+}
+
+/**
+ * Returns every SSH/broker configuration error so callers and tests can fail
+ * closed without depending on process.exit.
+ */
+export function validateSshConfiguration(config: Config): string[] {
+  const errors: string[] = [];
+  const services = Object.entries(config.services || {});
+  const sshServices = services.filter(([, service]) => service.protocol === 'ssh');
+
+  for (const [name, service] of services) {
+    const protocol = service.protocol ?? 'http';
+    if (protocol !== 'http' && protocol !== 'ssh') {
+      errors.push(`service "${name}" has unsupported protocol "${String(service.protocol)}"`);
+      continue;
+    }
+
+    if (protocol === 'http') {
+      if (service.ssh !== undefined) {
+        errors.push(`HTTP service "${name}" must not define service.ssh`);
+      }
+      continue;
+    }
+
+    if (name.length > 64 || !/^[A-Za-z0-9_-]+$/.test(name)) {
+      errors.push(`SSH service alias "${name}" must be 1-64 letters, digits, hyphens, or underscores`);
+    }
+
+    if (service.auth?.type !== 'plugin') {
+      errors.push(`SSH service "${name}" must use auth.type: plugin`);
+    }
+    if (typeof service.auth?.pluginPath !== 'string' || service.auth.pluginPath.trim().length === 0) {
+      errors.push(`SSH service "${name}" must define auth.pluginPath`);
+    }
+    if (service.hostnames !== undefined) {
+      errors.push(`SSH service "${name}" must not define HTTP hostnames`);
+    }
+    if (!service.ssh || typeof service.ssh.allowPrivateTarget !== 'boolean') {
+      errors.push(`SSH service "${name}" must explicitly set ssh.allowPrivateTarget`);
+    }
+
+    const validation = validateSshService(service, config.security);
+    if (!validation.valid) {
+      errors.push(`SSH service "${name}": ${validation.reason}`);
+    }
+  }
+
+  const broker = config.sshBroker;
+  if (sshServices.length > 0 && !broker?.enabled) {
+    errors.push('sshBroker.enabled must be true when SSH services are configured');
+  }
+
+  if (broker?.enabled) {
+    if (!path.isAbsolute(broker.runtimeDir || '')) {
+      errors.push('sshBroker.runtimeDir must be an absolute path');
+    }
+    if (!path.isAbsolute(broker.socketPath || '')) {
+      errors.push('sshBroker.socketPath must be an absolute path');
+    } else if (path.isAbsolute(broker.runtimeDir || '')) {
+      const runtimeDir = path.resolve(broker.runtimeDir);
+      const socketPath = path.resolve(broker.socketPath);
+      if (socketPath !== path.join(runtimeDir, path.basename(socketPath))) {
+        errors.push('sshBroker.socketPath must be directly inside sshBroker.runtimeDir');
+      }
+    }
+    if (!Number.isInteger(broker.gatewayUid) || broker.gatewayUid <= 0 || broker.gatewayUid > 2147483647) {
+      errors.push('sshBroker.gatewayUid must be a positive non-root integer');
+    }
+    if (!Number.isInteger(broker.gatewayGid) || broker.gatewayGid <= 0 || broker.gatewayGid > 2147483647) {
+      errors.push('sshBroker.gatewayGid must be a positive non-root integer');
+    }
+    if (!Number.isInteger(broker.approvalTimeoutMs) || broker.approvalTimeoutMs <= 0) {
+      errors.push('sshBroker.approvalTimeoutMs must be greater than zero');
+    }
+    if (!Number.isInteger(broker.credentialTimeoutMs)
+      || broker.credentialTimeoutMs < 1000
+      || broker.credentialTimeoutMs > 300000) {
+      errors.push('sshBroker.credentialTimeoutMs must be an integer between 1000 and 300000');
+    }
+    if (!Number.isInteger(broker.leaseTtlSeconds) || broker.leaseTtlSeconds <= 0) {
+      errors.push('sshBroker.leaseTtlSeconds must be greater than zero');
+    }
+    if (!Number.isInteger(broker.maxSessionSeconds)
+      || broker.maxSessionSeconds < 10
+      || broker.maxSessionSeconds > 86400) {
+      errors.push('sshBroker.maxSessionSeconds must be an integer between 10 and 86400');
+    }
+    if (!path.isAbsolute(broker.sshAgentPath || '')) {
+      errors.push('sshBroker.sshAgentPath must be an absolute path');
+    }
+    if (!path.isAbsolute(broker.sshAddPath || '')) {
+      errors.push('sshBroker.sshAddPath must be an absolute path');
+    }
+    if (!Number.isInteger(broker.maxConcurrentLeases) || broker.maxConcurrentLeases <= 0) {
+      errors.push('sshBroker.maxConcurrentLeases must be a positive integer');
+    }
+  }
+
+  return errors;
+}
 
 export async function loadConfig(configPath: string): Promise<Config> {
   if (!fs.existsSync(configPath)) {
@@ -113,7 +237,7 @@ export async function loadConfig(configPath: string): Promise<Config> {
       process.exit(1);
     }
   } else {
-    console.log('⚠️  Telegram not configured — approval requests will be auto-approved');
+    console.log('⚠️  Telegram not configured — HTTP approvals auto-approve; SSH remains fail-closed');
   }
 
   // ─── Apply defaults ────────────────────────────────────────
@@ -126,6 +250,13 @@ export async function loadConfig(configPath: string): Promise<Config> {
   config.audit = { ...DEFAULT_AUDIT, ...(config.audit || {}) };
   config.proxy = { ...DEFAULT_PROXY, ...(config.proxy || {}) };
   config.transparentProxy = { ...DEFAULT_TRANSPARENT_PROXY, ...(config.transparentProxy || {}) };
+  normalizeSshConfiguration(config);
+
+  const sshErrors = validateSshConfiguration(config);
+  if (sshErrors.length > 0) {
+    for (const error of sshErrors) console.error(`❌ ${error}`);
+    process.exit(1);
+  }
 
   if (!['block', 'silent_allow'].includes(config.proxy.discoveryPolicy)) {
     console.error('❌ Invalid proxy.discoveryPolicy. Allowed values: block, silent_allow');
@@ -225,7 +356,9 @@ async function resolveServiceSecrets(config: Config): Promise<void> {
 
   for (const [name, svc] of Object.entries(config.services)) {
     try {
-      svc.auth.token = await resolveSecretValue(svc.auth.token, providers);
+      if (typeof svc.auth.token === 'string') {
+        svc.auth.token = await resolveSecretValue(svc.auth.token, providers);
+      }
       if (svc.auth.clientId) {
         svc.auth.clientId = await resolveSecretValue(svc.auth.clientId, providers);
       }
@@ -281,7 +414,7 @@ function hasSecretRef(svc: ServiceConfig): boolean {
     ? objectHasSecretRef(svc.auth.pluginConfig, refPattern)
     : false;
 
-  return refPattern.test(svc.auth.token)
+  return (typeof svc.auth.token === 'string' && refPattern.test(svc.auth.token))
     || (!!svc.auth.clientId && refPattern.test(svc.auth.clientId))
     || (!!svc.auth.clientSecret && refPattern.test(svc.auth.clientSecret))
     || (!!svc.auth.password && refPattern.test(svc.auth.password))

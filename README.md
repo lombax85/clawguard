@@ -373,6 +373,114 @@ Copy the snippet into your `clawguard.yaml`, replace the placeholder with your r
 
 ---
 
+## Experimental SSH Access Gateway
+
+The experimental SSH mode uses **stock OpenSSH on both SSH legs**. A hardened
+Linux `sshd` sidecar authenticates the inbound public key and forces every
+session through ClawGuard; after one Telegram approval, ClawGuard loads the
+upstream private key into a fresh, short-lived `ssh-agent`. The sidecar's stock
+`ssh` client then connects to the fixed, host-key-pinned upstream target.
+
+```text
+SSH client -> OpenSSH sidecar -> ClawGuard approval broker
+           -> per-session ssh-agent -> OpenSSH client -> upstream sshd
+```
+
+The upstream private key stays inside ClawGuard: it is passed to `ssh-add`
+through stdin, is not written as a private-key file, and is never returned to
+the inbound client. The shared volume contains only the broker socket and
+short-lived agent sockets.
+
+### Enable the opt-in sidecar
+
+1. On the trusted ClawGuard host, create the inbound `authorized_keys` file.
+   This key authenticates only to the restricted gateway account; it is not an
+   upstream credential.
+
+   ```bash
+   mkdir -p ./data/ssh-gateway
+   cp ~/.ssh/id_ed25519.pub ./data/ssh-gateway/authorized_keys
+   chmod 600 ./data/ssh-gateway/authorized_keys
+   ```
+
+   The Compose bind path is exactly
+   `./data/ssh-gateway/authorized_keys`; create it as a file before starting so
+   Docker does not create a directory at that path.
+
+2. Configure and pair Telegram, set `sshBroker.enabled: true`, and uncomment an
+   SSH service like the one in `clawguard.yaml.example`. An SSH service must use
+   `protocol: ssh`, an exact `ssh://host:port` target, the `ssh-agent-key`
+   credential plugin, and a complete pinned host public key. Add a public
+   target hostname to `security.allowedUpstreams`; a private/LAN target also
+   requires the explicit `ssh.allowPrivateTarget: true` opt-in.
+
+3. Resolve `auth.pluginConfig.privateKey` from a protected secret backend (for
+   example a Vault reference), then start ClawGuard and the profile-gated
+   sidecar:
+
+   ```bash
+   docker compose --profile ssh up -d --build
+   docker compose logs clawguard-ssh
+   ```
+
+   The log prints the persistent **inbound** gateway host-key fingerprint.
+   Verify it through a trusted channel when enrolling the client. The gateway
+   account has fixed UID/GID `10001`, matching the broker socket ownership.
+
+### Connect
+
+Use the configured service alias as the first forced-command argument. An
+interactive session needs a TTY:
+
+```bash
+ssh -t gateway@CLAWGUARD_HOST -p 2222 -- production-ssh
+```
+
+Execute one remote command by separating it from the service with a second
+`--`:
+
+```bash
+ssh gateway@CLAWGUARD_HOST -p 2222 -- production-ssh -- uname -a
+```
+
+Each attempt produces a new Telegram request. SSH approval is deliberately
+one-time: it does not use HTTP policy auto-approval or cached approval windows.
+No configured/paired Telegram approver, denial, bot failure, or timeout all
+deny the session without creating a credential lease.
+
+Credential retrieval is also bounded by `credentialTimeoutMs`; broker shutdown
+aborts cooperative plugins immediately and does not wait forever for a plugin
+that ignores the signal.
+
+The signing capability expires after `leaseTtlSeconds`; an already
+authenticated OpenSSH channel can continue until it exits or reaches the
+absolute `maxSessionSeconds` limit. Capacity remains reserved for the live
+session, and the broker has bounded cleanup for a missing completion callback.
+
+### MVP boundaries and residual risk
+
+- Port forwarding, agent forwarding, Unix-socket forwarding, X11, extra
+  channels, `ProxyJump`, SCP and SFTP are disabled or unsupported.
+- The upstream host key is pinned as the complete OpenSSH public key;
+  fingerprints alone and trust-on-first-use are rejected. Obtain and verify
+  the key independently before configuration.
+- The upstream key never reaches the inbound SSH client. However, a compromised
+  sidecar could use an approved session's agent socket for the lease lifetime
+  against any reachable host that accepts that same key. Keep leases short and
+  restrict sidecar egress to configured targets in a real deployment.
+- Destination-constrained agent keys are not yet enabled in this experiment;
+  use a distinct, narrowly scoped upstream key per service before production.
+- This branch is experimental. It is intended for isolated testing before
+  production hardening and security review.
+
+See [ssh-gateway/README.md](./ssh-gateway/README.md) for the sidecar's trust
+boundaries, lifecycle, and troubleshooting notes.
+
+Run the real two-leg OpenSSH regression suite with
+`bash scripts/test-ssh-gateway-e2e.sh` (Docker required).
+
+---
+
 ## Try It: Safe First Test with httpbin
 
 Before connecting real services, test the full approval flow with [httpbin.org](https://httpbin.org) — a free echo API that mirrors back your request. No signup, no API key, works instantly. The best part: httpbin's `/headers` endpoint shows you exactly what headers ClawGuard injected.
