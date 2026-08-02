@@ -1,14 +1,14 @@
-# Experimental SSH Gateway Loop Plan
+# Experimental OpenSSH Gateway Loop Plan
 
 ## Goal
 
 Build and verify, on `experimental-ssh-gateway`, an opt-in SSH access gateway where:
 
+- OpenSSH implements the inbound and outbound SSH protocol; ClawGuard does not emulate `sshd`;
 - the client never receives or stores an upstream SSH private key;
-- ClawGuard terminates inbound SSH and creates a separate authenticated upstream SSH connection;
-- upstream credentials are supplied by an SSH auth plugin and may be resolved through the existing secret-provider layer;
-- every SSH connection is fail-closed behind an explicit approval and produces a metadata-only audit trail;
-- existing HTTP services and HTTP auth plugins remain backward compatible.
+- ClawGuard resolves upstream credentials through a protocol-specific plugin and grants them to a short-lived, per-session `ssh-agent` lease without writing them to disk;
+- every outbound SSH session is fail-closed behind one explicit Telegram approval and produces a metadata-only audit trail;
+- existing HTTP services, plugins and approval behavior remain backward compatible.
 
 ## Loop-state mapping
 
@@ -17,84 +17,92 @@ Build and verify, on `experimental-ssh-gateway`, an opt-in SSH access gateway wh
 - The repository's existing `CHANGELOG.MD` is reused as the append-only iteration log; a duplicate `CHANGELOG.md` is intentionally not created.
 - `.custom-loop.lock` marks an active iteration and is intentionally gitignored.
 
-## Architectural direction
+## Architecture
 
-### Protocol and configuration
+```text
+OpenSSH client
+  -> hardened sshd sidecar (public-key authentication)
+  -> ForceCommand wrapper (fixed gateway account)
+  -> ClawGuard SSH broker (one-time Telegram approval)
+  -> per-session ssh-agent socket managed by ClawGuard
+  -> stock OpenSSH client
+  -> fixed, host-key-pinned upstream sshd
+```
 
-- Add `service.protocol` with `http` as the backward-compatible default and `ssh` as the opt-in value.
-- Add a disabled-by-default `sshGateway` listener with conservative bind, timeout, connection-cap, host-key and authorized-client-key settings.
-- Represent SSH targets as fixed `ssh://host:port` upstream URLs. The inbound SSH username selects the ClawGuard service; it never overrides the configured upstream username.
-- Continue using `auth.type: plugin` and `auth.pluginPath`, but load protocol-specific plugins through a separate `ISshAuthPlugin` contract and registry. Do not widen `IAuthPlugin` with SSH-only optional methods.
-- Keep SSH services YAML-only in the MVP, even when `admin.strictMode` is disabled. Admin overrides are applied after normal secret resolution and dynamic plugin reload is not implemented, so accepting SSH edits there could persist resolved key material or create a service whose plugin is not loaded.
+### OpenSSH sidecar
 
-### Credential boundary
+- A dedicated Linux container runs stock `sshd` and `ssh`.
+- One fixed, unprivileged gateway account authenticates with an inbound key that grants access only to the gateway, never to an upstream target.
+- The requested ClawGuard service is the first token of `SSH_ORIGINAL_COMMAND`; a small root-owned `ForceCommand` wrapper validates the alias and calls the broker. Initial UX:
+  - interactive: `ssh -t gateway@clawguard -- production`;
+  - command: `ssh gateway@clawguard -- production -- uname -a`.
+- The broker, not the client or wrapper configuration, supplies the fixed host, port, upstream username and pinned known-host key.
+- `sshd` is hardened with public-key-only authentication, `DisableForwarding yes`, `MaxSessions 1`, no root login, no user rc/environment, no X11/agent/TCP/Unix forwarding, bounded authentication/session timeouts and a forced command.
+- SFTP/SCP subsystem compatibility, ProxyJump, port forwarding and multiple channels are outside the MVP.
 
-- The built-in `ssh-private-key` plugin owns the resolved upstream username, private key and optional passphrase in ClawGuard process memory.
-- No upstream private key, passphrase or derived secret is returned to the inbound client, logged, persisted by the plugin, or exposed through the admin API.
-- The gateway's own inbound host key is generated once under `data/ssh/` with mode `0600` when no configured key exists.
-- Inbound clients authenticate with an allowlisted public key loaded from a configured authorized-keys file. This client key grants access only to ClawGuard and is not accepted by upstream hosts; compromise still remains subject to human approval. Its fingerprint, never the key material, identifies the caller in audit.
+### Approval hook decision
 
-### Approval and session scope
+- PAM `account` + `pam_exec` is a valid OpenSSH authorization hook, but an external PAM helper cannot safely export the resulting session/lease id into the later forced-command process. Correlating by PID, TTY, username or client IP would introduce races and weak one-time semantics.
+- The MVP therefore performs approval in the root-owned `ForceCommand` wrapper. It runs only after OpenSSH public-key authentication, owns the complete approval/lease/upstream/cleanup lifecycle and cannot be bypassed because forwarding and alternative session paths are disabled.
+- PAM integration remains a later option if a native module or explicit, cryptographically bound handoff token is introduced.
 
-- SSH must fail closed if no interactive approver is configured/paired; it must not inherit HTTP's development-time auto-approval fallback.
-- Authenticate the inbound client before emitting an approval request.
-- Request approval only when the authenticated client asks for its single allowed `shell` or `exec` channel, for a concrete tuple: service, fixed upstream user, fixed host/port, action and session identifier.
-- The MVP approval is single-session and is not restored or reused from the normal method-wide approval cache.
+### ClawGuard broker
 
-### SSH capabilities
+- Add a disabled-by-default HTTP-over-Unix-socket broker beneath the same shared runtime volume used for agent sockets. Filesystem ownership/mode is the authentication boundary; no TCP listener or bearer token is added.
+- Only statically configured `protocol: ssh` services are accepted. SSH services are YAML-only in the MVP and cannot be added, edited, deleted or shadowed through admin SQLite overrides.
+- A session request contains only service alias, inbound client address and requested action (`shell` or `exec`). Client-supplied target/user/port/socket paths are never accepted.
+- Approval is requested after inbound OpenSSH authentication, when the forced wrapper starts, and is strictly one-time:
+  - no Telegram or unpaired/unhealthy Telegram means deny;
+  - no HTTP development auto-approval fallback;
+  - no lookup, persistence or reuse of normal method/path approval TTLs;
+  - the Telegram UI offers only `Approve this session` and `Deny`.
+- On approval the broker creates the agent lease and returns only lease id, socket path, fixed target metadata and a public `known_hosts` line.
+- Release is explicit on wrapper exit and enforced again by lease TTL and process shutdown cleanup.
 
-MVP supports:
+### Credential plugin and agent lease
 
-- one inbound connection selecting one configured SSH service;
-- at most one session/channel per inbound connection;
-- interactive shell with PTY and window-resize propagation;
-- non-interactive `exec`, with stdout, stderr, exit code and signal propagation;
-- idle, connection and maximum-session timeouts;
-- graceful shutdown of inbound and upstream connections.
+- Keep the HTTP `IAuthPlugin` unchanged. Add a separate SSH credential-plugin contract that can return only an upstream username and private key; it cannot override target, port or host verification.
+- The built-in plugin obtains key material from recursively resolved `pluginConfig` values, so existing Vault/static secret providers remain the source of truth.
+- ClawGuard starts a fresh standard `ssh-agent` per approved session, loads the key through `ssh-add -` stdin, and exposes only its Unix socket through a shared runtime volume.
+- The key is never returned by an HTTP response, written to a file, logged, included in audit data or exposed through the admin API.
+- MVP supports unencrypted in-memory OpenSSH private keys resolved from a protected secret backend. Encrypted-key/passphrase automation is deferred.
+- Lease directories are random, bounded beneath a configured runtime root, permission-restricted, owned for the fixed sidecar UID/GID, killed on release/TTL/shutdown and scrubbed after use.
 
-MVP explicitly rejects:
+### Target and host verification
 
-- SFTP and arbitrary subsystems;
-- direct, reverse and Unix-socket forwarding;
-- SSH agent and X11 forwarding;
-- arbitrary environment-variable injection;
-- client-selected upstream usernames, hosts or ports;
-- password, keyboard-interactive, hostbased and `none` inbound authentication.
-
-### Host verification and network policy
-
-- An upstream SHA-256 host-key fingerprint is mandatory. A missing verifier or mismatch is fatal; TOFU and auto-accept are forbidden.
-- `ssh:` is accepted only for services declared with `protocol: ssh`; HTTP runtime URL validation remains limited to HTTP(S).
-- Private SSH targets require an explicit SSH-specific opt-in and still use fixed configured targets. This must not weaken HTTP SSRF policy.
-- The SSH plugin may provide credentials only; it may not override host, port or target URL.
-- DNS validation covers IPv4 and IPv6 and fails closed on resolution errors; the current IPv4-only, fail-open runtime helper is not reused for SSH.
+- SSH services use a fixed `ssh://host:port` upstream and require a complete OpenSSH public host-key value, not TOFU.
+- ClawGuard constructs the exact `[host]:port key-type base64` known-hosts line; the wrapper uses `StrictHostKeyChecking=yes` and isolated global/user known-host files.
+- The service alias, target hostname, port, username and host key are validated at startup.
+- Private targets require an SSH-specific explicit opt-in without weakening HTTP SSRF settings.
+- The sidecar must eventually be egress-restricted to configured targets; for the experimental MVP the short-lived per-session agent limits credential exposure, but a compromised sidecar during an approved lease remains a documented residual risk.
 
 ### Audit and redaction
 
-- Add a dedicated SSH-session audit record containing session id, timestamps/duration, service, client IP, upstream host/port/user, approval result, channel type and terminal outcome.
-- Do not record private keys, passphrases, raw terminal streams, command stdin/stdout/stderr or arbitrary environment values.
-- Do not log full `exec` commands by default because command arguments may contain secrets.
+- Add a dedicated `ssh_sessions` table containing session id, timestamps/duration, service, client IP, upstream host/port/user, action, approval result, lease expiry, outcome and exit status.
+- Do not store private/public client keys, private keys, passphrases, terminal streams or full remote commands.
+- The wrapper may report only action type and final exit status; ClawGuard does not trust it to authorize or choose a target.
 
 ## Delivery milestones
 
-1. Persist loop state and security decisions on the experimental branch.
-2. Add protocol-aware types, configuration validation, SSH security helpers and the separate SSH plugin loader with unit tests.
-3. Add fail-closed one-time approval support and dedicated SSH audit storage/tests.
-4. Implement the SSH listener, inbound authentication, upstream connection and restricted shell/exec bridging.
-5. Add integration tests using in-process SSH servers, including denial and host-key mismatch paths.
-6. Document configuration, client use, experimental limitations and safe rollout; run full regression and final gap analysis.
+1. Persist the OpenSSH pivot and remove uncommitted `ssh2` transport work.
+2. Add protocol-aware config/security validation and the isolated SSH credential-plugin loader with tests.
+3. Add one-time fail-closed approval, SSH audit storage and the agent-lease manager with real-tool and negative tests.
+4. Add the authenticated broker API and hardened OpenSSH sidecar/wrapper.
+5. Add container and end-to-end tests for approval, denial, lease cleanup and host-key mismatch.
+6. Document configuration/client usage, run full regression/security gap analysis and commit each coherent iteration.
 
 ## Acceptance criteria
 
-- Existing HTTP configuration loads unchanged and all existing tests pass.
-- SSH is disabled by default and cannot start with incomplete or unsafe configuration.
-- A supported OpenSSH client can run an interactive shell and `ssh service@gateway command` through ClawGuard.
-- The upstream private key exists only in resolved ClawGuard/plugin memory and is never sent to the inbound client or written by the SSH plugin.
-- Invalid inbound identity, unknown service, absent/denied approval, unpinned or mismatched host key, and disallowed SSH channel types all fail closed.
-- Every attempted SSH session produces a useful metadata-only audit record.
-- Unit/integration tests cover the success path and the security-negative paths.
-- README and example YAML make the experimental boundary and operational setup unambiguous.
+- Existing HTTP YAML and all existing tests continue to work unchanged.
+- SSH and the broker are disabled by default and fail startup on incomplete or unsafe configuration.
+- The sidecar uses stock OpenSSH for both SSH legs; the Node application contains no SSH server or PTY/channel bridge.
+- An OpenSSH client can open an interactive shell and execute a command through a configured service after explicit approval.
+- The upstream private key is resolved only inside ClawGuard, passed to `ssh-add` through stdin, retained only in a short-lived agent process and never reaches the inbound client or filesystem.
+- Missing/invalid inbound authentication, unknown service, no approver, denial, invalid broker token, expired lease and host-key mismatch all fail closed.
+- Forwarding, extra sessions, arbitrary target selection and unsupported subsystems are rejected.
+- Every session attempt has a metadata-only audit record and every agent process/socket is reclaimed.
+- README, example YAML and sidecar documentation clearly state the experimental limits and residual risks.
 
 ## Stop condition
 
-The loop is complete only when the acceptance criteria pass, the backlog contains no MVP-critical item, documentation is updated, the working tree is clean, and the final independent gap analysis finds no missing security-critical behavior. External deployment and changes to real SSH servers are out of scope unless separately authorized.
+The loop is complete only when the MVP acceptance criteria pass, documentation is current, the todo has no MVP-critical item, the working tree is clean and a final independent security gap analysis finds no unresolved critical/high issue. Real deployment, firewall changes and modification of upstream SSH servers remain out of scope unless separately authorized.
