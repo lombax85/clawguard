@@ -163,17 +163,22 @@ async function main() {
   }
 
   // Graceful shutdown
-  function shutdown(): void {
+  let shuttingDown = false;
+  async function shutdown(): Promise<void> {
+    if (shuttingDown) return;
+    shuttingDown = true;
     console.log('\n🛑 Shutting down ClawGuard...');
-    telegram?.stop();
-    audit.close();
+    // Stop accepting new approval requests before waiting for Telegram's
+    // active long poll to finish.
     server.close();
     httpsServer?.close();
+    await telegram?.stop();
+    audit.close();
     process.exit(0);
   }
 
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', () => { void shutdown(); });
+  process.on('SIGTERM', () => { void shutdown(); });
 }
 
 main().catch((err) => {

@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+### Fixed
+- **Telegram 409 polling restart loop**: removed the scheduled/raw-`getUpdates` lock-reclaim path that could create two long-poll chains inside one ClawGuard process. Poll ownership recovery now performs a graceful serialized stop, waits 15 seconds, retries once without replacing a live poll, and opens a fail-closed circuit after a second conflict so a genuinely duplicated deployment cannot create an infinite request/log storm. Pending and new approvals are denied immediately while the circuit is open. Polling transport and shutdown are bounded, recovery timers cannot survive teardown, and the dashboard exposes conflict/retry/circuit state.
+- **Telegram polling dependency**: upgraded `node-telegram-bot-api` from 0.66 to 1.2 and removed the obsolete DefinitelyTyped package. Lockfile dependency updates resolve the audit findings present in the previous tree.
+
 ### Security
 - **Pairing commands restricted to the configured chat**: `/pair`, `/unpair`, `/status` and `/showlog` are now honored only when sent from the chat configured in `chatId`; messages from any other chat are silently ignored (and logged). This closes three issues with publicly reachable bots: (1) a stray `/unpair` from any chat could previously flip a global flag and disable all approvals (DoS) — pairing state is now derived per-chat from the database, not a mutable flag; (2) the pairing secret could be brute-forced from any chat — now only the configured chat can attempt, and attempts are additionally rate-limited (`PairThrottle`); (3) `/showlog` could be enabled from a guessed-paired foreign chat to siphon API-activity metadata.
 

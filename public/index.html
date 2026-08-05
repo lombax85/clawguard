@@ -1039,22 +1039,26 @@ function renderTelegramHealth(health) {
     el.textContent = 'Telegram notifications are disabled.';
     return;
   }
-  const healthy = health.polling && !health.restartingPolling && health.consecutivePollingErrors === 0;
+  const healthy = health.polling && !health.restartingPolling
+    && !health.pollingCircuitOpen && health.consecutivePollingErrors === 0;
   el.className = healthy ? 'notice success' : 'notice warning';
   el.innerHTML = `
     <div class="inline-actions" style="margin-bottom:8px;">
       <span class="badge ${health.polling ? 'green' : 'red'}">polling: ${health.polling ? 'on' : 'off'}</span>
-      <span class="badge ${health.restartingPolling ? 'orange' : 'blue'}">restart: ${health.restartingPolling ? 'running' : 'idle'}</span>
+      <span class="badge ${health.restartingPolling ? 'orange' : 'blue'}">recovery: ${health.restartingPolling ? 'running' : 'idle'}</span>
+      <span class="badge ${health.pollingCircuitOpen ? 'red' : (health.pollingConflict ? 'orange' : 'green')}">409 guard: ${health.pollingCircuitOpen ? 'paused' : (health.pollingConflict ? 'recovering' : 'clear')}</span>
       <span class="badge ${health.pendingCallbacks > 0 ? 'orange' : 'blue'}">pending callbacks: ${health.pendingCallbacks}</span>
       <span class="badge ${health.consecutivePollingErrors > 0 ? 'red' : 'green'}">polling errors: ${health.consecutivePollingErrors}</span>
     </div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;">
       <div>Last update: <code>${esc(formatMaybeDate(health.lastUpdateAt))}</code></div>
       <div>Last callback: <code>${esc(formatMaybeDate(health.lastCallbackAt))}</code></div>
-      <div>Last restart: <code>${esc(formatMaybeDate(health.lastPollingRestartAt))}</code></div>
-      <div>Last restart OK: <code>${esc(formatMaybeDate(health.lastPollingRestartOkAt))}</code></div>
+      <div>Last recovery: <code>${esc(formatMaybeDate(health.lastPollingRestartAt))}</code></div>
+      <div>Last retry started: <code>${esc(formatMaybeDate(health.lastPollingRestartOkAt))}</code></div>
+      <div>Next polling retry: <code>${esc(formatMaybeDate(health.nextPollingRetryAt))}</code></div>
       <div>Last polling error: <code>${esc(formatMaybeDate(health.lastPollingErrorAt))}</code></div>
     </div>
+    ${health.pollingCircuitOpen ? '<div style="margin-top:8px;color:var(--red);font-weight:600;">Telegram approvals unavailable: stop the duplicate instance, then restart ClawGuard.</div>' : ''}
     ${health.lastPollingError ? `<div style="margin-top:8px;color:var(--red);word-break:break-word;">${esc(health.lastPollingError)}</div>` : ''}
   `;
 }
