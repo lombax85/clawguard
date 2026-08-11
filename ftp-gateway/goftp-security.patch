@@ -8,6 +8,16 @@ index 254cbed..63863f2 100644
 -	"LPRT": commandLprt{},
 @@ -56 +53,0 @@ var defaultCommands = map[string]Command{
 -	"PORT": commandPort{},
+@@ -146,0 +144,4 @@ func (cmd commandAppe) Execute(sess *Session, param string) {
++		if sess.dataConn != nil {
++			_ = sess.dataConn.Close()
++			sess.dataConn = nil
++		}
+@@ -1508,0 +1510,4 @@ func (cmd commandStor) Execute(sess *Session, param string) {
++		if sess.dataConn != nil {
++			_ = sess.dataConn.Close()
++			sess.dataConn = nil
++		}
 diff --git a/data_socket.go b/data_socket.go
 index 276c4fa..6264e5c 100644
 --- a/data_socket.go
@@ -22,7 +32,7 @@ index 276c4fa..6264e5c 100644
 +	return leftTCP.IP.Equal(rightTCP.IP)
 +}
 +
-@@ -254,3 +263,15 @@ func (socket *passiveSocket) ListenAndServe() (err error) {
+@@ -254,3 +263,23 @@ func (socket *passiveSocket) ListenAndServe() (err error) {
 -		conn, err := listener.Accept()
 -		if err != nil {
 -			socket.err = err
@@ -35,6 +45,14 @@ index 276c4fa..6264e5c 100644
 +			if !sameTCPPeerIP(socket.sess.RemoteAddr(), conn.RemoteAddr()) {
 +				_ = conn.Close()
 +				continue
++			}
++			if tlsConn, ok := conn.(*tls.Conn); ok {
++				_ = tlsConn.SetDeadline(time.Now().Add(acceptTimeout))
++				if handshakeErr := tlsConn.Handshake(); handshakeErr != nil {
++					_ = conn.Close()
++					continue
++				}
++				_ = tlsConn.SetDeadline(time.Time{})
 +			}
 +			socket.err = nil
 +			socket.conn = conn

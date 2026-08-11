@@ -113,27 +113,56 @@ test('real rclone sidecar proxies FTP and explicit FTPS without exposing the ups
       assert.equal(closed.status, 200);
     }
 
-    const readOnlyRequest = openRequest('ftp', 'none', 'read_only');
-    const readOnlyOpened = gatewayCall(readOnlyRequest);
-    assert.equal(readOnlyOpened.status, 201, JSON.stringify(readOnlyOpened));
-    const existing = execFileSync('curl', [
-      '--silent', '--show-error', '--fail',
-      '--user', `${readOnlyRequest.gatewayCredentials.username}:${readOnlyRequest.gatewayCredentials.password}`,
-      'ftp://127.0.0.1:24210/ftp.txt',
-    ], { encoding: 'utf8' });
-    assert.equal(existing, 'payload-through-ftp');
-    assert.throws(() => execFileSync('curl', [
-      '--silent', '--show-error', '--fail',
-      '--user', `${readOnlyRequest.gatewayCredentials.username}:${readOnlyRequest.gatewayCredentials.password}`,
-      '--upload-file', '-', 'ftp://127.0.0.1:24210/read-only-denied.txt',
-    ], { input: 'must-not-be-written', encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }),
-    'read-only approval must block uploads');
-    const readOnlyClosed = gatewayCall(
-      undefined,
-      'DELETE',
-      `/session/${readOnlyRequest.sessionId}`,
-    );
-    assert.equal(readOnlyClosed.status, 200);
+    for (const [protocol, upstreamTls, curlTls] of [
+      ['ftp', 'none', []],
+      ['ftps', 'explicit', ['--ssl-reqd', '--insecure']],
+    ]) {
+      const readOnlyRequest = openRequest(protocol, upstreamTls, 'read_only');
+      const readOnlyOpened = gatewayCall(readOnlyRequest);
+      assert.equal(readOnlyOpened.status, 201, JSON.stringify(readOnlyOpened));
+      const existing = execFileSync('curl', [
+        '--silent', '--show-error', '--fail', ...curlTls,
+        '--user', `${readOnlyRequest.gatewayCredentials.username}:${readOnlyRequest.gatewayCredentials.password}`,
+        `ftp://127.0.0.1:24210/${protocol}.txt`,
+      ], { encoding: 'utf8' });
+      assert.equal(existing, `payload-through-${protocol}`);
+
+      for (const [operation, operationArgs] of [
+        ['STOR', []],
+        ['APPE', ['--append']],
+      ]) {
+        const deniedPath = `read-only-denied-${protocol}-${operation.toLowerCase()}.txt`;
+        let uploadError;
+        try {
+          execFileSync('curl', [
+            '--silent', '--show-error', '--fail', '--max-time', '5', ...curlTls,
+            ...operationArgs,
+            '--user', `${readOnlyRequest.gatewayCredentials.username}:${readOnlyRequest.gatewayCredentials.password}`,
+            '--upload-file', '-', `ftp://127.0.0.1:24210/${deniedPath}`,
+          ], { input: 'must-not-be-written', encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+        } catch (err) {
+          uploadError = err;
+        }
+        assert.ok(uploadError, `read-only ${protocol} approval must block ${operation}`);
+        assert.notEqual(uploadError.status, 28,
+          `read-only ${protocol} ${operation} rejection must not leave the client waiting for a timeout`);
+        assert.match(uploadError.stderr, /(?:450|550|read.?only|permission|denied)/i,
+          `read-only ${protocol} ${operation} rejection must return a meaningful FTP error`);
+        assert.throws(() => execFileSync('curl', [
+          '--silent', '--show-error', '--fail', ...curlTls,
+          '--user', `${readOnlyRequest.gatewayCredentials.username}:${readOnlyRequest.gatewayCredentials.password}`,
+          `ftp://127.0.0.1:24210/${deniedPath}`,
+        ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }),
+        `read-only ${protocol} ${operation} must not create an upstream file`);
+      }
+
+      const readOnlyClosed = gatewayCall(
+        undefined,
+        'DELETE',
+        `/session/${readOnlyRequest.sessionId}`,
+      );
+      assert.equal(readOnlyClosed.status, 200);
+    }
     failed = false;
   } finally {
     if (failed) compose(['logs', '--no-color', 'gateway', 'upstream']);
