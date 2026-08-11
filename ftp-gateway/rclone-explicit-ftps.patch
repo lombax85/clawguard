@@ -1,0 +1,13 @@
+diff --git a/cmd/serve/ftp/ftp.go b/cmd/serve/ftp/ftp.go
+index 678a69b50..b5b150c4c 100644
+--- a/cmd/serve/ftp/ftp.go
++++ b/cmd/serve/ftp/ftp.go
+@@ -226,0 +227,2 @@
++		ExplicitFTPS:   d.useTLS,
++		ForceTLS:       d.useTLS,
+@@ -234,0 +237,5 @@
++	// goftp/server v2.0.2 omits ForceTLS when it copies Options. Set the
++	// embedded server option after construction so USER/PASS can never be
++	// accepted before AUTH TLS on an FTPS listener.
++	d.srv.ForceTLS = d.useTLS
++

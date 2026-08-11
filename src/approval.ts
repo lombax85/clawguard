@@ -1,9 +1,11 @@
-import { Approval, ServiceConfig, PolicyRule, RequestMeta } from './types';
+import { Approval, ServiceConfig, PolicyRule, RequestMeta, FtpAccessMode } from './types';
 import { TelegramNotifier } from './telegram';
 import { WebhookNotifier } from './webhook';
 import { AuditLogger } from './audit';
 
 let requestCounter = 0;
+const SSH_SESSION_METHOD = 'SSH_SESSION';
+const FTP_SESSION_METHOD = 'FTP_SESSION';
 
 function generateRequestId(): string {
   return `req_${Date.now()}_${++requestCounter}`;
@@ -39,15 +41,22 @@ export class ApprovalManager {
 
   private restoreApprovals(): void {
     const saved = this.audit.getActiveApprovals();
+    let restoredCount = 0;
     for (const approval of saved) {
+      // Protocol-gateway approvals are deliberately one-shot. Ignore any
+      // legacy or accidentally persisted entry so it can never authorize a
+      // new SSH session or FTP lease after a restart.
+      if ([SSH_SESSION_METHOD, FTP_SESSION_METHOD].includes(approval.method.toUpperCase())) continue;
+
       const key = this.approvalKey(approval.service, approval.method, approval.path);
       this.activeApprovals.set(key, approval);
+      restoredCount++;
       const remaining = Math.round((approval.expiresAt - Date.now()) / 1000 / 60);
       const scope = approval.path ? `path=${approval.path}` : 'method-wide';
       console.log(`   ↻ Restored approval for ${approval.service} ${approval.method} (${scope}, ${remaining}min remaining)`);
     }
-    if (saved.length > 0) {
-      console.log(`   ✓ ${saved.length} approval(s) restored from database`);
+    if (restoredCount > 0) {
+      console.log(`   ✓ ${restoredCount} approval(s) restored from database`);
     }
   }
 
@@ -206,6 +215,179 @@ export class ApprovalManager {
     }
 
     console.log(`❌ Denied or timed out for ${service} (by: ${result.approvedBy})`);
+    return false;
+  }
+
+  /**
+   * Requests approval for exactly one SSH session.
+   *
+   * Unlike HTTP approvals, this path is always fail-closed and deliberately
+   * bypasses policy auto-approval, the active-approval cache, restored
+   * approvals, and approval persistence. A successful decision authorizes
+   * only the caller currently awaiting this promise.
+   */
+  async checkSshSessionApproval(
+    service: string,
+    serviceConfig: ServiceConfig,
+    path: string,
+    agentIp: string,
+    meta?: RequestMeta,
+    timeoutMs: number = this.approvalTimeout,
+    signal?: AbortSignal
+  ): Promise<boolean> {
+    // Keep the public signature aligned with checkApproval while making it
+    // explicit that SSH policy rules are not consulted.
+    void serviceConfig;
+
+    const requestId = generateRequestId();
+    console.log(`🔔 Requesting one-time SSH session approval: ${service}${path}`);
+
+    this.webhook?.notifyApprovalRequired(
+      requestId,
+      service,
+      SSH_SESSION_METHOD,
+      path,
+      agentIp,
+      meta
+    );
+
+    // SSH never inherits the HTTP development-mode fail-open behavior.
+    if (!this.telegram) {
+      console.log(`❌ SSH session denied for ${service}: Telegram is not configured`);
+      this.webhook?.notifyApprovalResolved(requestId, false, 'no_telegram');
+      return false;
+    }
+
+    if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
+      console.error(`❌ SSH session denied for ${service}: invalid approval timeout`);
+      this.webhook?.notifyApprovalResolved(requestId, false, 'invalid_timeout');
+      return false;
+    }
+
+    if (signal?.aborted) {
+      this.webhook?.notifyApprovalResolved(requestId, false, 'gateway_shutdown');
+      return false;
+    }
+
+    let timeout: NodeJS.Timeout | undefined;
+    let abortHandler: (() => void) | undefined;
+    const timeoutPromise = new Promise<{ approved: boolean; approvedBy: string }>((resolve) => {
+      timeout = setTimeout(() => {
+        this.telegram?.clearPendingRequest(requestId);
+        resolve({ approved: false, approvedBy: 'timeout' });
+      }, timeoutMs);
+    });
+    const abortPromise = new Promise<{ approved: boolean; approvedBy: string }>((resolve) => {
+      if (!signal) return;
+      abortHandler = () => {
+        this.telegram?.clearPendingRequest(requestId);
+        resolve({ approved: false, approvedBy: 'gateway_shutdown' });
+      };
+      signal.addEventListener('abort', abortHandler, { once: true });
+    });
+
+    let result: { approved: boolean; approvedBy: string };
+    try {
+      result = await Promise.race([
+        this.telegram.requestSshSessionApproval(requestId, service, path, agentIp, meta),
+        timeoutPromise,
+        abortPromise,
+      ]);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`❌ SSH approval request failed for ${service}: ${message}`);
+      result = { approved: false, approvedBy: 'telegram_error' };
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      if (signal && abortHandler) signal.removeEventListener('abort', abortHandler);
+      this.telegram.clearPendingRequest(requestId);
+    }
+
+    this.webhook?.notifyApprovalResolved(requestId, result.approved, result.approvedBy);
+
+    if (result.approved) {
+      console.log(`✅ One-time SSH session approved by ${result.approvedBy} for ${service}`);
+      return true;
+    }
+
+    console.log(`❌ SSH session denied for ${service} (by: ${result.approvedBy})`);
+    return false;
+  }
+
+  /**
+   * Requests approval for one bounded FTP/FTPS lease. It is fail-closed and
+   * never reads or writes the reusable HTTP approval cache.
+   */
+  async checkFtpSessionApproval(
+    service: string,
+    serviceConfig: ServiceConfig,
+    path: string,
+    agentIp: string,
+    meta?: RequestMeta,
+    timeoutMs: number = this.approvalTimeout,
+    signal?: AbortSignal
+  ): Promise<FtpAccessMode | false> {
+    void serviceConfig;
+    const requestId = generateRequestId();
+    console.log(`🔔 Requesting FTP/FTPS lease approval: ${service}${path}`);
+    this.webhook?.notifyApprovalRequired(requestId, service, FTP_SESSION_METHOD, path, agentIp, meta);
+
+    if (!this.telegram) {
+      console.log(`❌ FTP lease denied for ${service}: Telegram is not configured`);
+      this.webhook?.notifyApprovalResolved(requestId, false, 'no_telegram');
+      return false;
+    }
+    if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
+      this.webhook?.notifyApprovalResolved(requestId, false, 'invalid_timeout');
+      return false;
+    }
+    if (signal?.aborted) {
+      this.webhook?.notifyApprovalResolved(requestId, false, 'gateway_shutdown');
+      return false;
+    }
+
+    let timeout: NodeJS.Timeout | undefined;
+    let abortHandler: (() => void) | undefined;
+    const timeoutPromise = new Promise<{ approved: boolean; approvedBy: string; accessMode?: FtpAccessMode }>((resolve) => {
+      timeout = setTimeout(() => {
+        this.telegram?.clearPendingRequest(requestId);
+        resolve({ approved: false, approvedBy: 'timeout' });
+      }, timeoutMs);
+    });
+    const abortPromise = new Promise<{ approved: boolean; approvedBy: string; accessMode?: FtpAccessMode }>((resolve) => {
+      if (!signal) return;
+      abortHandler = () => {
+        this.telegram?.clearPendingRequest(requestId);
+        resolve({ approved: false, approvedBy: 'gateway_shutdown' });
+      };
+      signal.addEventListener('abort', abortHandler, { once: true });
+    });
+
+    let result: { approved: boolean; approvedBy: string; accessMode?: FtpAccessMode };
+    try {
+      result = await Promise.race([
+        this.telegram.requestFtpSessionApproval(requestId, service, path, agentIp, meta),
+        timeoutPromise,
+        abortPromise,
+      ]);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`❌ FTP approval request failed for ${service}: ${message}`);
+      result = { approved: false, approvedBy: 'telegram_error' };
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      if (signal && abortHandler) signal.removeEventListener('abort', abortHandler);
+      this.telegram.clearPendingRequest(requestId);
+    }
+
+    const effectiveApproval = result.approved
+      && (result.accessMode === 'read_only' || result.accessMode === 'read_write');
+    this.webhook?.notifyApprovalResolved(requestId, effectiveApproval, result.approvedBy);
+    if (effectiveApproval) {
+      console.log(`✅ FTP ${result.accessMode} lease approved by ${result.approvedBy} for ${service}`);
+      return result.accessMode!;
+    }
+    console.log(`❌ FTP lease denied for ${service} (by: ${result.approvedBy})`);
     return false;
   }
 

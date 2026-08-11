@@ -16,7 +16,8 @@ ClawGuard is a security gateway that sits between YOU (the OpenClaw agent) and e
 **YOU DO NOT HAVE REAL API TOKENS. This is intentional.**
 
 Your API calls go through ClawGuard, which:
-1. Asks the human operator for approval via Telegram
+1. Applies the configured policy and, when required, asks the human operator
+   for approval via Telegram
 2. Injects the real API token (which only ClawGuard knows)
 3. Forwards the request to the real API
 4. Returns the response to you
@@ -99,21 +100,32 @@ curl http://CLAWGUARD-IP:9090/todoist/rest/v2/tasks \
 Example — calling GitHub via ClawGuard:
 ```bash
 curl http://CLAWGUARD-IP:9090/github/user \
-  -H "X-ClawGuard-Key: the-agent-key"
+  -H "X-ClawGuard-Key: the-agent-key" \
+  -H "X-ClawGuard-User: alice@logotel.it" \
+  -H "X-ClawGuard-Reason: Inspect my GitHub profile"
 ```
 
 The real API token is injected by ClawGuard after the human approves.
 
 ### Mode B: Forwarder installed (transparent)
 
-If the forwarder is running on your machine, you don't need to change anything. Just call the normal API URLs:
+If the forwarder is running on your machine, keep the normal API URLs. The
+forwarder supplies the privately provisioned agent key, while the caller still
+adds request provenance:
 
 ```bash
-curl https://api.todoist.com/rest/v2/tasks
-curl https://api.github.com/user
+curl -k https://api.todoist.com/rest/v2/tasks \
+  -H "X-ClawGuard-User: alice@logotel.it" \
+  -H "X-ClawGuard-Reason: List today's tasks"
+curl -k https://api.github.com/user \
+  -H "X-ClawGuard-User: alice@logotel.it" \
+  -H "X-ClawGuard-Reason: Inspect my GitHub profile"
 ```
 
-The forwarder intercepts these calls via `/etc/hosts`, adds the `X-ClawGuard-Key` header, and routes them to ClawGuard. **You don't need to add any headers or change any URLs.**
+The forwarder intercepts these calls via `/etc/hosts`, adds the
+`X-ClawGuard-Key` header, and routes them to ClawGuard. It cannot infer who
+requested an operation or why, so applications must still send the two
+provenance headers. Use `curl -k` only while the forwarder's CA is not trusted.
 
 To check if the forwarder is running:
 ```bash
@@ -242,7 +254,9 @@ When you make an API call, ClawGuard sends a Telegram notification to the human 
 
 - If approved: you get the normal API response
 - If denied: you get HTTP 403 `{"error": "Approval denied or timed out"}`
-- If already approved: subsequent requests to the same service pass through instantly (approval lasts 1h/8h/24h depending on what the human chose)
+- If already covered by policy or a valid approval scope: the request may pass
+  without a new prompt (duration and path/method scope depend on the operator's
+  previous choice)
 
 ### Handle 403 gracefully
 
@@ -254,7 +268,8 @@ Before making API calls through ClawGuard, you need to know:
 
 1. **Is the forwarder running?** (Mode B) — if yes, just call normal URLs
 2. **ClawGuard IP and port** (Mode A) — e.g. `192.168.1.100:9090`
-3. **Agent key** — the `X-ClawGuard-Key` value
+3. **Whether the agent key has been provisioned privately** in the forwarder
+   or proxy configuration — never ask the human to paste or reveal its value
 4. **Which services are configured** — e.g. `todoist`, `github`, `weather`
 
 If you don't have this information, ask the user.
@@ -272,52 +287,121 @@ Key points:
 - Set up as a persistent service (systemd/launchd)
 - **DO NOT install the full project, DO NOT run npm install**
 
+## SSH and FTP/FTPS protocol gateways
+
+ClawGuard can also expose experimental, separately configured protocol
+gateways. These do not turn the HTTP forwarder into an SSH or FTP proxy:
+
+- SSH shell and single-command sessions enter a restricted stock-OpenSSH
+  sidecar. A forced command requests Telegram approval, and ClawGuard supplies
+  the configured upstream private key through a short-lived agent socket.
+- FTP and explicit FTPS use a short-lived, approved sidecar lease. The client
+  receives only an ephemeral gateway login, never the upstream password. The
+  Telegram operator chooses **Read only** or **Read/write** for every lease and
+  the returned `accessMode` records the enforced choice.
+- SFTP, SCP, SSH port/agent forwarding, active FTP, and implicit FTPS inbound
+  are not supported by the current experiment.
+
+The human operator must provide only the gateway endpoint, inbound SSH user,
+service alias, and verified gateway fingerprint. Never ask for or search for
+the upstream SSH private key or FTP password.
+
+SSH command shape:
+
+```bash
+ssh -p GATEWAY_PORT GATEWAY_USER@CLAWGUARD_HOST -- SERVICE_ALIAS -- command args
+```
+
+For FTP/FTPS listings, prefer the forwarder helper. It reads the privately
+provisioned agent key internally and automatically revokes the lease:
+
+```bash
+CLAWGUARD_USER="alice via OpenClaw" \
+CLAWGUARD_REASON="List release directory" \
+  ~/clawguard-forwarder/clawguard-ftp.js \
+  list SERVICE_ALIAS /releases --insecure
+```
+
+Every SSH session and FTP/FTPS lease requires a fresh Telegram decision. A
+denial or timeout is terminal; do not retry it automatically. See
+[ssh-gateway/README.md](../ssh-gateway/README.md) and
+[ftp-gateway/README.md](../ftp-gateway/README.md) for server-side setup.
+If an FTP lease is `read_only`, do not attempt uploads, deletes, renames or
+directory changes. Ask for a new lease only when the user actually needs write
+access, so Telegram can show a fresh read/write decision.
+
 ## Git operations (push, pull requests)
 
-**DO NOT use SSH keys or local Git credentials** — they bypass ClawGuard entirely.
+**For Git repository authentication, DO NOT use direct SSH keys or local Git
+credentials** — they bypass ClawGuard entirely. This rule does not prohibit
+the separately approved ClawGuard SSH access gateway described above.
 
-All Git operations on GitHub repositories should go through the **GitHub API**, which is routed through ClawGuard like any other API call. This ensures every push, branch creation, and PR is subject to human approval.
+All Git operations on GitHub repositories should go through the **GitHub API**,
+which is routed through ClawGuard like any other API call. Mutations are then
+subject to the service's configured policy and produce a Telegram decision
+whenever that policy requires approval.
 
 ### Push a commit via API
 
 ```bash
+# These examples assume the local HTTPS forwarder. It injects the agent key;
+# every request still carries provenance. Keep -k only until its CA is trusted.
+CG_USER='release-agent'
+CG_REASON='Publish reviewed ClawGuard changes'
+
 # 1. Create a blob for each modified file
 CONTENT=$(base64 -i path/to/file.ext)
-BLOB_SHA=$(curl -s -X POST 'https://api.github.com/repos/OWNER/REPO/git/blobs' \
+BLOB_SHA=$(curl -sk -X POST 'https://api.github.com/repos/OWNER/REPO/git/blobs' \
+  -H "X-ClawGuard-User: $CG_USER" \
+  -H "X-ClawGuard-Reason: $CG_REASON" \
   -H "Content-Type: application/json" \
   -d "{\"content\":\"$CONTENT\",\"encoding\":\"base64\"}" \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['sha'])")
 
 # 2. Get the current main branch SHA and its tree
-MAIN_SHA=$(curl -s 'https://api.github.com/repos/OWNER/REPO/git/refs/heads/main' \
+MAIN_SHA=$(curl -sk 'https://api.github.com/repos/OWNER/REPO/git/refs/heads/main' \
+  -H "X-ClawGuard-User: $CG_USER" \
+  -H "X-ClawGuard-Reason: Verify the current main ref before publishing" \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['object']['sha'])")
-BASE_TREE=$(curl -s "https://api.github.com/repos/OWNER/REPO/git/commits/$MAIN_SHA" \
+BASE_TREE=$(curl -sk "https://api.github.com/repos/OWNER/REPO/git/commits/$MAIN_SHA" \
+  -H "X-ClawGuard-User: $CG_USER" \
+  -H "X-ClawGuard-Reason: Read the base tree for the reviewed commit" \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['tree']['sha'])")
 
 # 3. Create a new tree with the changed file(s)
-TREE_SHA=$(curl -s -X POST 'https://api.github.com/repos/OWNER/REPO/git/trees' \
+TREE_SHA=$(curl -sk -X POST 'https://api.github.com/repos/OWNER/REPO/git/trees' \
+  -H "X-ClawGuard-User: $CG_USER" \
+  -H "X-ClawGuard-Reason: $CG_REASON" \
   -H "Content-Type: application/json" \
   -d "{\"base_tree\":\"$BASE_TREE\",\"tree\":[{\"path\":\"path/to/file.ext\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"$BLOB_SHA\"}]}" \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['sha'])")
 
 # 4. Create a commit
-COMMIT_SHA=$(curl -s -X POST 'https://api.github.com/repos/OWNER/REPO/git/commits' \
+COMMIT_SHA=$(curl -sk -X POST 'https://api.github.com/repos/OWNER/REPO/git/commits' \
+  -H "X-ClawGuard-User: $CG_USER" \
+  -H "X-ClawGuard-Reason: $CG_REASON" \
   -H "Content-Type: application/json" \
   -d "{\"message\":\"your commit message\",\"tree\":\"$TREE_SHA\",\"parents\":[\"$MAIN_SHA\"]}" \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['sha'])")
 
 # 5. Create a branch
-curl -s -X POST 'https://api.github.com/repos/OWNER/REPO/git/refs' \
+curl -sk -X POST 'https://api.github.com/repos/OWNER/REPO/git/refs' \
+  -H "X-ClawGuard-User: $CG_USER" \
+  -H "X-ClawGuard-Reason: $CG_REASON" \
   -H "Content-Type: application/json" \
   -d "{\"ref\":\"refs/heads/my-branch\",\"sha\":\"$COMMIT_SHA\"}"
 
 # 6. Create a Pull Request
-curl -s -X POST 'https://api.github.com/repos/OWNER/REPO/pulls' \
+curl -sk -X POST 'https://api.github.com/repos/OWNER/REPO/pulls' \
+  -H "X-ClawGuard-User: $CG_USER" \
+  -H "X-ClawGuard-Reason: Open the reviewed pull request" \
   -H "Content-Type: application/json" \
   -d '{"title":"PR title","body":"PR description","head":"my-branch","base":"main"}'
 ```
 
-Every one of these API calls goes through ClawGuard → the human sees and approves each one via Telegram. No code reaches GitHub without human approval.
+Every API call goes through ClawGuard. Whether it needs a new Telegram decision
+depends on the configured service policy and any valid approval scope; do not
+claim that every individual Git Database request necessarily prompts.
 
 ### Native Git clone/pull/push via HTTPS proxy (Mode C)
 
@@ -356,9 +440,12 @@ services:
 
 **Note:** Git clients send `CONNECT` without credentials first, then retry with `Proxy-Authorization` after receiving 407. ClawGuard handles this flow automatically since version 0.2.2.
 
-### Why not SSH?
+### Why not direct SSH for Git?
 
-SSH keys authenticate directly with GitHub, completely bypassing ClawGuard. If a prompt injection tricks the agent into running `git push` via SSH, the code goes to GitHub with **zero human oversight**. Using the API ensures ClawGuard intercepts every interaction.
+Direct Git SSH keys authenticate with GitHub without entering the ClawGuard
+SSH access gateway. If a prompt injection tricks the agent into running
+`git push` via direct SSH, the code reaches GitHub with **zero human
+oversight**. Use ClawGuard-routed HTTPS or the provider API for Git operations.
 
 ## Troubleshooting
 
@@ -369,7 +456,9 @@ The human didn't approve in time or denied the request. Ask them to check Telegr
 The service is not configured on ClawGuard. Ask the human to add it via the ClawGuard dashboard (`http://CLAWGUARD-IP:9090/__admin`) or in `clawguard.yaml`.
 
 ### "Invalid or missing X-ClawGuard-Key"
-Wrong agent key. Ask the human for the correct `server.agentKey` from ClawGuard config.
+The configured key is missing or does not match. Ask the human to verify and
+re-provision it privately; never ask them to paste the value and never print an
+existing configured key.
 
 ### Connection refused / timeout
 ClawGuard is not running or not reachable. Ask the human to check the ClawGuard server.

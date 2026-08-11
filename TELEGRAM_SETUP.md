@@ -131,6 +131,43 @@ Tap **Approve 1h** and the request goes through!
 - If ClawGuard was restarted, pending requests from before the restart are lost — send a new request
 - Buttons expire after the approval timeout (default: 120 seconds)
 
+### Repeated `409 Conflict: terminated by other getUpdates request`
+
+Telegram permits only one active long-polling consumer for a bot. Current
+ClawGuard pauses after a repeated conflict instead of fighting another poller
+forever. In that fail-closed state, pending approvals are denied, new approval
+requests fail immediately, and the admin health panel shows `409 guard: paused`.
+
+Check for an old container, replica or deployment using the same bot, without
+printing its environment or token:
+
+```bash
+docker ps -a --format '{{.ID}} {{.Names}} {{.Image}} {{.Status}}' | grep -i clawguard
+docker compose ps --all
+```
+
+Also check any previous host, Coolify application, Swarm/Kubernetes replica,
+systemd service or PM2 process. Stop the duplicate, then restart the intended
+ClawGuard instance. One bot cannot be shared by two long-polling ClawGuard
+replicas; use a distinct Telegram bot per independently running deployment.
+
+Run exactly one polling consumer per bot. During a deployment, stop the old
+instance before starting the replacement; an overlapping rolling deployment can
+trip the guard and intentionally pause the new instance. Once paused, removing
+the duplicate is not enough: restart the intended ClawGuard instance afterward.
+
+For monitoring, alert when `telegram.pollingCircuitOpen` is true **or** when
+`telegram.polling` is false in `GET /__status`. A successful outbound
+`sendMessage` does not prove that ClawGuard is receiving button callbacks; only
+the polling health does. ClawGuard deliberately does not issue a separate raw
+`getUpdates` request as a health check or lock-reclaim operation, because that
+would itself compete with the real long poll.
+
+Do not attach an automatic container-restart healthcheck to this conflict state.
+The ClawGuard process intentionally remains alive (and `restart: unless-stopped`
+therefore does not restart it); repeatedly restarting while the duplicate still
+exists would only create deployment thrashing.
+
 ### "Someone else can talk to my bot"
 Telegram bots are publicly reachable — anyone can DM your bot or add it to their own group. That's fine: ClawGuard only sends approval requests to the configured `chatId`, and only acts on `/pair`/`/unpair`/`/showlog` from that same chat. Messages from any other chat are received but ignored. To keep the secret strong:
 ```yaml

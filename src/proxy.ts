@@ -12,6 +12,8 @@ import { rewriteRequestAuth } from './auth-rewrite';
 import { applyPlugin } from './auth-plugins/apply';
 import { extractRequestMeta } from './request-meta';
 import { preserveRawBody } from './raw-body';
+import { FtpBroker } from './ftp-broker';
+import { createFtpRouter } from './ftp-router';
 
 /**
  * Validates that the client sent the correct dummy token.
@@ -59,12 +61,17 @@ export function createProxy(
   config: Config,
   approvalManager: ApprovalManager,
   audit: AuditLogger,
-  telegram?: TelegramNotifier
+  telegram?: TelegramNotifier,
+  ftpBroker?: FtpBroker
 ): express.Application {
   const app = express();
 
   // Preserve the exact request bytes, including gzip/deflate payloads.
   app.use(preserveRawBody());
+
+  if (ftpBroker && config.ftpGateway.allowInsecureHttpApi) {
+    app.use('/__ftp', createFtpRouter(config, ftpBroker));
+  }
 
   // ─── Admin panel ──────────────────────────────────────────
 
@@ -102,6 +109,21 @@ export function createProxy(
     res.json(audit.getRecentRequests(limit));
   });
 
+  app.get('/__audit/ftp', (req: Request, res: Response) => {
+    const agentKey = req.headers['x-clawguard-key'] as string | undefined;
+    if (agentKey !== config.server.agentKey) {
+      res.status(401).json({ error: 'Invalid or missing X-ClawGuard-Key' });
+      return;
+    }
+    res.setHeader('cache-control', 'no-store');
+    const limit = parseInt(req.query['limit'] as string) || 50;
+    // The opaque session ID is also the caller-held revocation capability.
+    // Keep it in the POST /__ftp/session response, but never disclose it to
+    // every holder of the shared audit-reader key.
+    const redacted = audit.getRecentFtpSessions(limit).map(({ id: _id, ...session }) => session);
+    res.json(redacted);
+  });
+
   // ─── Main proxy: /:service (root path) ────────────────────
 
   app.all('/:service', handleProxy(config, approvalManager, audit));
@@ -130,11 +152,20 @@ function resolveServiceByHost(
   if (!host) return null;
   const hostname = host.split(':')[0]; // strip port
   for (const [name, svc] of Object.entries(services)) {
+    if ((svc.protocol ?? 'http') !== 'http') continue;
     if (svc.hostnames?.some((h) => h === hostname)) {
       return { name, config: svc };
     }
   }
   return null;
+}
+
+// Test helper for the protocol boundary used by transparent host routing.
+export function __resolveServiceByHostForTests(
+  host: string | undefined,
+  services: Record<string, ServiceConfig>
+): { name: string; config: ServiceConfig } | null {
+  return resolveServiceByHost(host, services);
 }
 
 export function handleHostProxy(
@@ -198,6 +229,12 @@ export function handleHostProxy(
 
     const serviceName = match.name;
     const serviceConfig = match.config;
+
+    if ((serviceConfig.protocol ?? 'http') !== 'http') {
+      const protocol = serviceConfig.protocol === 'ssh' ? 'SSH' : 'FTP/FTPS';
+      res.status(404).json({ error: `${protocol} services are not available over the HTTP proxy` });
+      return;
+    }
     const meta = extractRequestMeta(req.headers);
 
     // Validate agent key if required
@@ -391,6 +428,13 @@ function handleProxy(
 
     if (!serviceConfig) {
       res.status(404).json({ error: `Unknown service: ${serviceName}` });
+      return;
+    }
+
+    // Protocol gateways are reachable only through their dedicated broker.
+    if ((serviceConfig.protocol ?? 'http') !== 'http') {
+      const protocol = serviceConfig.protocol === 'ssh' ? 'SSH' : 'FTP/FTPS';
+      res.status(404).json({ error: `${protocol} services are not available over the HTTP proxy` });
       return;
     }
 

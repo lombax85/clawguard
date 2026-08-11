@@ -1,9 +1,25 @@
-import TelegramBot from 'node-telegram-bot-api';
-import { TelegramConfig, RequestMeta } from './types';
+import TelegramBot, {
+  type InlineKeyboardMarkup,
+  type Message,
+  type SendMessageParams,
+  type User,
+} from 'node-telegram-bot-api';
+import { TelegramConfig, RequestMeta, FtpAccessMode } from './types';
 import { AuditLogger } from './audit';
 import { PairThrottle } from './pair-throttle';
+import {
+  TelegramPollingRecovery,
+  TelegramPollingRecoveryOptions,
+} from './telegram-polling-recovery';
 
-export type ApprovalCallback = (approved: boolean, ttlSeconds: number, approvedBy: string, pathScoped: boolean) => void;
+export type ApprovalCallback = (
+  approved: boolean,
+  ttlSeconds: number,
+  approvedBy: string,
+  pathScoped: boolean,
+  ftpAccessMode?: FtpAccessMode
+) => void;
+type SendMessageOptions = Omit<SendMessageParams, 'chat_id' | 'text'>;
 
 /**
  * Strips characters that would break Telegram's legacy Markdown parser
@@ -12,6 +28,36 @@ export type ApprovalCallback = (approved: boolean, ttlSeconds: number, approvedB
  */
 function sanitizeForTelegram(value: string): string {
   return value.replace(/[`*_[\]]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * The SSH approval keyboard intentionally has no TTL or reusable-scope
+ * choices: an approval is valid only for the session currently waiting.
+ */
+export function buildSshSessionApprovalKeyboard(requestId: string): InlineKeyboardMarkup {
+  return {
+    inline_keyboard: [
+      [
+        { text: '✅ Approve this session', callback_data: `approve_ssh_session:${requestId}` },
+        { text: '❌ Deny', callback_data: `deny:${requestId}` },
+      ],
+    ],
+  };
+}
+
+/** FTP/FTPS approvals authorize one bounded gateway lease, never a reusable HTTP scope. */
+export function buildFtpSessionApprovalKeyboard(requestId: string): InlineKeyboardMarkup {
+  return {
+    inline_keyboard: [
+      [
+        { text: '👁 Read only', callback_data: `approve_ftp_read_only:${requestId}` },
+        { text: '✍️ Read/write', callback_data: `approve_ftp_read_write:${requestId}` },
+      ],
+      [
+        { text: '❌ Deny', callback_data: `deny:${requestId}` },
+      ],
+    ],
+  };
 }
 
 /** Renders optional provenance (who/why) as Markdown lines, or [] if absent. */
@@ -36,6 +82,15 @@ export interface TelegramHealth {
   lastPollingRestartAt: string | null;
   lastPollingRestartOkAt: string | null;
   lastPollingRestartErrorAt: string | null;
+  pollingConflict: boolean;
+  pollingCircuitOpen: boolean;
+  nextPollingRetryAt: string | null;
+}
+
+export interface TelegramNotifierDependencies {
+  /** Test seam; production always constructs the real Telegram client. */
+  bot?: TelegramBot;
+  pollingRecoveryOptions?: TelegramPollingRecoveryOptions;
 }
 
 export class TelegramNotifier {
@@ -46,31 +101,52 @@ export class TelegramNotifier {
   private pendingTexts: Map<string, string> = new Map(); // requestId → original message text
   // Per-chat `/pair` brute-force throttle.
   private pairThrottle = new PairThrottle();
-  private restartingPolling = false;
-  private pollingRestartTimer: ReturnType<typeof setInterval> | undefined;
+  private pollingRecovery: TelegramPollingRecovery;
   private consecutivePollingErrors = 0;
   private lastPollingErrorAt: number | null = null;
   private lastPollingError: string | null = null;
-  private lastPollingRestartAt: number | null = null;
-  private lastPollingRestartOkAt: number | null = null;
-  private lastPollingRestartErrorAt: number | null = null;
   private lastUpdateAt: number | null = null;
   private lastCallbackAt: number | null = null;
 
-  constructor(config: TelegramConfig, audit: AuditLogger) {
+  constructor(
+    config: TelegramConfig,
+    audit: AuditLogger,
+    dependencies: TelegramNotifierDependencies = {}
+  ) {
     this.config = config;
     this.audit = audit;
-    this.bot = new TelegramBot(config.botToken, {
+    this.bot = dependencies.bot ?? new TelegramBot(config.botToken, {
       polling: {
         autoStart: true,
         interval: 1000,
-        params: { timeout: 10 },
+        params: { timeout: 5 },
+      },
+      // node-telegram-bot-api 1.2 does not currently wire stopPolling's
+      // cancellation signal into getUpdates. Keep the request below Docker's
+      // usual 10-second shutdown grace while allowing the 5-second long poll.
+      request: { timeoutMs: 8_000 },
+    });
+    const recoveryOptions = dependencies.pollingRecoveryOptions ?? {};
+    this.pollingRecovery = new TelegramPollingRecovery(this.bot, {
+      ...recoveryOptions,
+      log: (level, message) => {
+        recoveryOptions.log?.(level, message);
+        if (level === 'error') console.error(`❌ ${message}`);
+        else if (level === 'warn') console.warn(`⚠️ ${message}`);
+        else console.log(`✅ ${message}`);
+      },
+      onStable: () => {
+        this.consecutivePollingErrors = 0;
+        recoveryOptions.onStable?.();
+      },
+      onCircuitOpen: () => {
+        this.failPendingApprovals('telegram_polling_unavailable');
+        recoveryOptions.onCircuitOpen?.();
       },
     });
     this.setupPollingDiagnostics();
     this.setupCallbackHandler();
     this.setupPairingHandler();
-    this.startPollingWatchdog();
 
     // Pairing status is derived live from the DB (per-chat), not a mutable flag.
     if (config.pairing.enabled) {
@@ -107,12 +183,22 @@ export class TelegramNotifier {
   private setupPollingDiagnostics(): void {
     this.bot.on('message', () => {
       this.lastUpdateAt = Date.now();
+      this.consecutivePollingErrors = 0;
+      this.pollingRecovery.noteHealthy();
     });
     this.bot.on('polling_error', (err) => {
       const message = err instanceof Error ? err.stack || err.message : String(err);
       this.lastPollingErrorAt = Date.now();
       this.lastPollingError = message;
-      console.error('❌ Telegram polling_error:', message);
+      this.consecutivePollingErrors++;
+      if (this.isPollingConflict(err)) {
+        if (this.pollingRecovery.handleConflict()) {
+          console.error('❌ Telegram polling conflict (409): another getUpdates request is active');
+        }
+      } else {
+        this.pollingRecovery.notePollingError();
+        console.error('❌ Telegram polling_error:', message);
+      }
     });
     this.bot.on('error', (err) => {
       console.error('❌ Telegram error:', err instanceof Error ? err.stack || err.message : err);
@@ -126,99 +212,14 @@ export class TelegramNotifier {
     return timestamp ? new Date(timestamp).toISOString() : null;
   }
 
-  private async withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      return await Promise.race([
-        promise,
-        new Promise<T>((_resolve, reject) => {
-          timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
-        }),
-      ]);
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
-  }
-
-  private async restartPolling(reason: string): Promise<void> {
-    if (this.restartingPolling) return;
-    this.restartingPolling = true;
-    this.lastPollingRestartAt = Date.now();
-    console.log(`🔄 Restarting Telegram polling (${reason})`);
-    try {
-      // Cancel the current long-poll instead of waiting for it. Waiting here can
-      // deadlock if the polling request is already wedged, which leaves button
-      // callbacks unprocessed while sendMessage still works.
-      await this.withTimeout(
-        this.bot.stopPolling({ cancel: true, reason: `ClawGuard restart: ${reason}` }),
-        5000,
-        'Telegram stopPolling',
-      );
-
-      // Reclaim the Telegram getUpdates lock with a short-poll.
-      // Even after stopPolling(), Telegram may still hold the
-      // server-side lock for longer than our polling timeout.
-      // A getUpdates with timeout=0 forces Telegram to recognise
-      // this client as the active one, terminating any stale lock.
-      try {
-        const url = `https://api.telegram.org/bot${this.config.botToken}/getUpdates?timeout=0&limit=1&offset=-1`;
-        await fetch(url, { signal: AbortSignal.timeout(5000) });
-        console.log(`🔓 Telegram lock reclaimed (${reason})`);
-      } catch (err) {
-        // Non-fatal: worst case we get a transient 409 on next poll
-        console.warn(`⚠️ Lock reclaim failed (non-fatal):`, err instanceof Error ? err.message : err);
-      }
-
-      const startPromise = this.bot.startPolling({ restart: true });
-      startPromise.catch((err) => {
-        this.lastPollingRestartErrorAt = Date.now();
-        console.error(`❌ Telegram startPolling error (${reason}):`, err instanceof Error ? err.stack || err.message : err);
-      });
-      this.consecutivePollingErrors = 0;
-      this.lastPollingRestartOkAt = Date.now();
-      console.log(`✅ Telegram polling restarted (${reason})`);
-    } catch (err) {
-      this.lastPollingRestartErrorAt = Date.now();
-      console.error(`❌ Polling restart failed (${reason}):`, err instanceof Error ? err.stack || err.message : err);
-    } finally {
-      this.restartingPolling = false;
-    }
-  }
-
-  private startPollingWatchdog(): void {
-    const MAX_CONSECUTIVE_ERRORS = 3;
-    const RESET_AFTER_MS = 60_000;
-    let lastErrorAt = 0;
-
-    this.bot.on('polling_error', async (err) => {
-      const msg = err instanceof Error ? err.message : String(err);
-      const isConflict = msg.includes('409 Conflict');
-      if (this.restartingPolling) {
-        console.warn(`⚠️ Telegram polling error during restart: ${msg}`);
-        return;
-      }
-
-      const now = Date.now();
-      if (now - lastErrorAt > RESET_AFTER_MS) {
-        this.consecutivePollingErrors = 0;
-      }
-      lastErrorAt = now;
-      this.consecutivePollingErrors++;
-
-      if (isConflict || this.consecutivePollingErrors >= MAX_CONSECUTIVE_ERRORS) {
-        const restartReason = isConflict ? 'telegram-409-conflict' : 'watchdog';
-        await this.restartPolling(restartReason);
-      }
-    });
-
-    // ─── Proactive polling restart ─────────────────────────
-    // node-telegram-bot-api long-polling can silently die (TCP/NAT
-    // timeout) without emitting polling_error. Periodically cycle
-    // the connection to keep it fresh.
-    const PROACTIVE_RESTART_MS = 30 * 60 * 1000; // every 30 minutes
-    this.pollingRestartTimer = setInterval(() => {
-      this.restartPolling('scheduled');
-    }, PROACTIVE_RESTART_MS);
+  private isPollingConflict(err: unknown): boolean {
+    const message = err instanceof Error ? err.message : String(err);
+    const response = (err as {
+      response?: { status?: number; statusCode?: number };
+    } | null)?.response;
+    return response?.status === 409
+      || response?.statusCode === 409
+      || message.includes('409 Conflict');
   }
 
   clearPendingRequest(requestId: string): void {
@@ -226,20 +227,40 @@ export class TelegramNotifier {
     this.pendingTexts.delete(requestId);
   }
 
+  private failPendingApprovals(approvedBy: string): void {
+    const pending = [...this.pendingCallbacks.values()];
+    this.pendingCallbacks.clear();
+    this.pendingTexts.clear();
+    for (const callback of pending) {
+      try {
+        callback(false, 0, approvedBy, false);
+      } catch (err) {
+        console.error(`❌ Telegram pending approval reject error: ${err instanceof Error ? err.stack || err.message : err}`);
+      }
+    }
+    if (pending.length > 0) {
+      console.error(`❌ Denied ${pending.length} pending approval(s): Telegram polling is unavailable`);
+    }
+  }
+
   getHealth(): TelegramHealth {
+    const recovery = this.pollingRecovery.getState();
     return {
       paired: this.isConfiguredChatPaired(),
       polling: this.bot.isPolling(),
-      restartingPolling: this.restartingPolling,
+      restartingPolling: recovery.recovering,
       pendingCallbacks: this.pendingCallbacks.size,
       consecutivePollingErrors: this.consecutivePollingErrors,
       lastUpdateAt: this.iso(this.lastUpdateAt),
       lastCallbackAt: this.iso(this.lastCallbackAt),
       lastPollingErrorAt: this.iso(this.lastPollingErrorAt),
       lastPollingError: this.lastPollingError,
-      lastPollingRestartAt: this.iso(this.lastPollingRestartAt),
-      lastPollingRestartOkAt: this.iso(this.lastPollingRestartOkAt),
-      lastPollingRestartErrorAt: this.iso(this.lastPollingRestartErrorAt),
+      lastPollingRestartAt: this.iso(recovery.lastRecoveryAt),
+      lastPollingRestartOkAt: this.iso(recovery.lastRecoveryOkAt),
+      lastPollingRestartErrorAt: this.iso(recovery.lastRecoveryErrorAt),
+      pollingConflict: recovery.conflictCount > 0,
+      pollingCircuitOpen: recovery.circuitOpen,
+      nextPollingRetryAt: this.iso(recovery.nextRetryAt),
     };
   }
 
@@ -358,7 +379,7 @@ export class TelegramNotifier {
    * When `allowedApprovers` is unset/empty, anyone in the paired chat is allowed
    * (backwards-compatible). Entries may be numeric user ids or @usernames.
    */
-  private isAllowedApprover(from: TelegramBot.User | undefined): boolean {
+  private isAllowedApprover(from: User | undefined): boolean {
     const list = this.config.allowedApprovers;
     if (!list || list.length === 0) return true;
     if (!from) return false;
@@ -371,8 +392,8 @@ export class TelegramNotifier {
   }
 
   /** Send options shared by all approval-related messages (adds the group topic thread). */
-  private sendOptions(extra?: TelegramBot.SendMessageOptions): TelegramBot.SendMessageOptions {
-    const opts: TelegramBot.SendMessageOptions = { parse_mode: 'Markdown', ...extra };
+  private sendOptions(extra?: SendMessageOptions): SendMessageOptions {
+    const opts: SendMessageOptions = { parse_mode: 'Markdown', ...extra };
     if (this.config.messageThreadId !== undefined) {
       opts.message_thread_id = this.config.messageThreadId;
     }
@@ -386,6 +407,8 @@ export class TelegramNotifier {
       if (!query.data || !query.message) return;
       this.lastCallbackAt = Date.now();
       this.lastUpdateAt = this.lastCallbackAt;
+      this.consecutivePollingErrors = 0;
+      this.pollingRecovery.noteHealthy();
 
       const chatId = query.message.chat.id.toString();
 
@@ -425,16 +448,44 @@ export class TelegramNotifier {
         return;
       }
 
+      // Claim the decision synchronously, before the first await below. This
+      // makes a received human decision atomic with respect to circuit-open
+      // draining and ensures concurrent/double taps cannot resolve it twice.
+      this.pendingCallbacks.delete(requestId);
+
       const userName = query.from.first_name || query.from.username || 'unknown';
       const originalText = this.pendingTexts.get(requestId) || '';
       const editOpts = { chat_id: query.message.chat.id, message_id: query.message.message_id, parse_mode: 'Markdown' as const };
       let approved = false;
       let ttlSeconds = 0;
       let pathScoped = false;
+      let ftpAccessMode: FtpAccessMode | undefined;
       let ackText = '⚠️ Unknown action';
       let finalText = `${originalText}\n\n⚠️ *Unknown action* by ${userName}`;
 
       switch (action) {
+        case 'approve_ssh_session':
+          approved = true;
+          // Deliberately zero: SSH decisions are consumed directly by the
+          // waiting session and are never stored as TTL approvals.
+          ttlSeconds = 0;
+          ackText = '✅ Approved for this SSH session';
+          finalText = `${originalText}\n\n✅ *Approved for this SSH session* by ${userName}`;
+          break;
+        case 'approve_ftp_read_only':
+          approved = true;
+          ttlSeconds = 0;
+          ftpAccessMode = 'read_only';
+          ackText = '✅ Approved read-only FTP lease';
+          finalText = `${originalText}\n\n✅ *Approved read-only FTP lease* by ${userName}`;
+          break;
+        case 'approve_ftp_read_write':
+          approved = true;
+          ttlSeconds = 0;
+          ftpAccessMode = 'read_write';
+          ackText = '✅ Approved read/write FTP lease';
+          finalText = `${originalText}\n\n✅ *Approved read/write FTP lease* by ${userName}`;
+          break;
         case 'approve_once':
           approved = true;
           ttlSeconds = 1;
@@ -507,7 +558,7 @@ export class TelegramNotifier {
       }
 
       try {
-        callback(approved, ttlSeconds, userName, pathScoped);
+        callback(approved, ttlSeconds, userName, pathScoped, ftpAccessMode);
       } catch (err) {
         console.error(`❌ Telegram approval resolve error: ${err instanceof Error ? err.stack || err.message : err}`);
       }
@@ -536,6 +587,16 @@ export class TelegramNotifier {
     if (!this.isConfiguredChatPaired()) {
       console.log('❌ Cannot request approval: configured Telegram chat is not paired');
       return { approved: false, ttlSeconds: 0, approvedBy: 'unpaired', pathScoped: false };
+    }
+
+    if (this.pollingRecovery.getState().circuitOpen) {
+      console.error('❌ Cannot request approval: Telegram polling is paused after repeated 409 conflicts');
+      return {
+        approved: false,
+        ttlSeconds: 0,
+        approvedBy: 'telegram_polling_unavailable',
+        pathScoped: false,
+      };
     }
 
     return new Promise((resolve) => {
@@ -601,6 +662,123 @@ export class TelegramNotifier {
   }
 
   /**
+   * Request a one-time SSH session decision. This is separate from the HTTP
+   * approval UI so reusable TTL buttons can never be presented for SSH.
+   */
+  async requestSshSessionApproval(
+    requestId: string,
+    service: string,
+    path: string,
+    agentIp: string,
+    meta?: RequestMeta
+  ): Promise<{ approved: boolean; approvedBy: string }> {
+    if (!this.isConfiguredChatPaired()) {
+      console.log('❌ Cannot request SSH approval: configured Telegram chat is not paired');
+      return { approved: false, approvedBy: 'unpaired' };
+    }
+    if (this.pollingRecovery.getState().circuitOpen) {
+      console.error('❌ Cannot request SSH approval: Telegram polling is unavailable');
+      return { approved: false, approvedBy: 'telegram_polling_unavailable' };
+    }
+
+    return new Promise((resolve) => {
+      const callback: ApprovalCallback = (approved, _ttlSeconds, approvedBy) => {
+        resolve({ approved, approvedBy });
+      };
+
+      this.pendingCallbacks.set(requestId, callback);
+
+      const text: string = [
+        `🛡️ *ClawGuard — SSH Session Approval*`,
+        ``,
+        `🔹 Service: *${sanitizeForTelegram(service)}*`,
+        `🔹 Session: \`${sanitizeForTelegram(path)}\``,
+        ...metaLines(meta),
+        `🔹 Agent IP: \`${sanitizeForTelegram(agentIp)}\``,
+        `🔹 Time: ${new Date().toLocaleString('it-IT', { timeZone: 'Europe/Rome' })}`,
+        `🔹 Request ID: \`${requestId}\``,
+        ``,
+        `This approval is valid for this SSH session only.`,
+      ].join('\n');
+
+      this.pendingTexts.set(requestId, text);
+
+      (async () => {
+        const sent = await this.safeSendMessage(this.config.chatId, text, this.sendOptions({
+          reply_markup: buildSshSessionApprovalKeyboard(requestId),
+        }));
+
+        if (!sent) {
+          this.clearPendingRequest(requestId);
+          resolve({ approved: false, approvedBy: 'telegram_error' });
+          return;
+        }
+
+        console.log(`📤 Telegram SSH approval request sent: requestId=${requestId} service=${service}`);
+      })().catch((err) => {
+        console.error(`❌ Telegram requestSshSessionApproval error: ${err instanceof Error ? err.stack || err.message : err}`);
+        this.clearPendingRequest(requestId);
+        resolve({ approved: false, approvedBy: 'telegram_error' });
+      });
+    });
+  }
+
+  /** Request a one-time decision for one bounded FTP/FTPS gateway lease. */
+  async requestFtpSessionApproval(
+    requestId: string,
+    service: string,
+    path: string,
+    agentIp: string,
+    meta?: RequestMeta
+  ): Promise<{ approved: boolean; approvedBy: string; accessMode?: FtpAccessMode }> {
+    if (!this.isConfiguredChatPaired()) {
+      console.log('❌ Cannot request FTP approval: configured Telegram chat is not paired');
+      return { approved: false, approvedBy: 'unpaired' };
+    }
+    if (this.pollingRecovery.getState().circuitOpen) {
+      console.error('❌ Cannot request FTP approval: Telegram polling is unavailable');
+      return { approved: false, approvedBy: 'telegram_polling_unavailable' };
+    }
+
+    return new Promise((resolve) => {
+      const callback: ApprovalCallback = (approved, _ttlSeconds, approvedBy, _pathScoped, accessMode) => {
+        resolve({ approved, approvedBy, accessMode });
+      };
+      this.pendingCallbacks.set(requestId, callback);
+
+      const text: string = [
+        `🛡️ *ClawGuard — FTP/FTPS Lease Approval*`,
+        ``,
+        `🔹 Service: *${sanitizeForTelegram(service)}*`,
+        `🔹 Lease: \`${sanitizeForTelegram(path)}\``,
+        ...metaLines(meta),
+        `🔹 Agent IP: \`${sanitizeForTelegram(agentIp)}\``,
+        `🔹 Time: ${new Date().toLocaleString('it-IT', { timeZone: 'Europe/Rome' })}`,
+        `🔹 Request ID: \`${requestId}\``,
+        ``,
+        `Choose read-only or read/write access for this one time-bounded FTP gateway lease.`,
+      ].join('\n');
+      this.pendingTexts.set(requestId, text);
+
+      (async () => {
+        const sent = await this.safeSendMessage(this.config.chatId, text, this.sendOptions({
+          reply_markup: buildFtpSessionApprovalKeyboard(requestId),
+        }));
+        if (!sent) {
+          this.clearPendingRequest(requestId);
+          resolve({ approved: false, approvedBy: 'telegram_error' });
+          return;
+        }
+        console.log(`📤 Telegram FTP approval request sent: requestId=${requestId} service=${service}`);
+      })().catch((err) => {
+        console.error(`❌ Telegram requestFtpSessionApproval error: ${err instanceof Error ? err.stack || err.message : err}`);
+        this.clearPendingRequest(requestId);
+        resolve({ approved: false, approvedBy: 'telegram_error' });
+      });
+    });
+  }
+
+  /**
    * Emit an info-only notification for a call that was auto-approved
    * (by policy or an existing approval). Gated per-chat by /showlog.
    */
@@ -638,8 +816,8 @@ export class TelegramNotifier {
   private async safeSendMessage(
     chatId: string,
     text: string,
-    options?: TelegramBot.SendMessageOptions
-  ): Promise<TelegramBot.Message | null> {
+    options?: SendMessageOptions
+  ): Promise<Message | null> {
     try {
       return await this.bot.sendMessage(chatId, text, options);
     } catch (err) {
@@ -668,8 +846,7 @@ export class TelegramNotifier {
 
   // ─── Lifecycle ─────────────────────────────────────────────
 
-  stop(): void {
-    if (this.pollingRestartTimer) clearInterval(this.pollingRestartTimer);
-    this.bot.stopPolling();
+  async stop(): Promise<void> {
+    await this.pollingRecovery.stop();
   }
 }

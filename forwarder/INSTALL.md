@@ -13,10 +13,12 @@ The forwarder is a tiny HTTPS interceptor that runs on YOUR machine (the agent m
 
 You need from the human operator:
 1. **ClawGuard server IP and port** (e.g. `192.168.1.100:9090`)
-2. **Agent key** (the `server.agentKey` value from ClawGuard config)
+2. **A privately provisioned agent key** in `forwarder.json` (the agent must
+   never ask the operator to paste or reveal its value)
 3. **Which domains to intercept** (e.g. `api.github.com`, `api.openweathermap.org`)
 
-If you don't have these, ask the user before proceeding.
+If the key is missing, ask the operator to configure it privately; do not ask
+for the value and do not print or inspect an existing configured key.
 
 ## Step-by-step installation
 
@@ -133,6 +135,7 @@ Edit `forwarder.json`:
 ```json
 {
   "clawguard": "http://192.168.1.100:9090",
+  "ftpApi": "https://192.168.1.100:9443",
   "agentKey": "the-agent-key-from-clawguard-config",
   "listenHost": "127.0.0.1",
   "listenPort": 443,
@@ -146,7 +149,10 @@ Edit `forwarder.json`:
 
 **Important fields:**
 - `clawguard` — the IP:port of the ClawGuard server (NOT localhost, it's on another machine)
-- `agentKey` — must match `server.agentKey` in ClawGuard's `clawguard.yaml`
+- `ftpApi` — optional FTP/FTPS lease API used by `clawguard-ftp.js`; omit it
+  when FTP is not configured
+- `agentKey` — must match `server.agentKey` in ClawGuard's `clawguard.yaml`;
+  the human operator provisions it privately and agents must not read or print it
 - `routes` — maps each intercepted domain to the service name configured in ClawGuard
 
 ### Step 5: Add /etc/hosts entries
@@ -196,6 +202,38 @@ ClawGuard asks for Telegram approval → injects real token → calls real API
        ↓
 Response flows back through the chain
 ```
+
+## SSH and FTP/FTPS protocol gateways
+
+The HTTPS forwarder handles HTTP APIs only. Experimental SSH and FTP/FTPS
+services use dedicated sidecars and endpoints; they do not pass through the
+domain routes above.
+
+For a safe FTP or explicit-FTPS directory listing, use the bundled helper:
+
+```bash
+CLAWGUARD_USER="alice via OpenClaw" \
+CLAWGUARD_REASON="List release directory" \
+  ./clawguard-ftp.js list production-files /releases --insecure
+```
+
+The helper reads the already-provisioned `agentKey` internally, never prints
+it, passes the ephemeral FTP credential to curl over standard input rather
+than process arguments, validates the returned `accessMode`, and revokes the
+lease after the listing. Telegram offers **Read only** and **Read/write** for
+each lease; a listing needs only read-only approval. Remove `--insecure` after
+installing a trusted certificate for the FTP gateway.
+
+Run `./clawguard-ftp.js --help` for the lower-level `lease` and `revoke`
+commands. `lease` intentionally prints credential-bearing JSON and should be
+used only when a separate FTP client must consume the lease. A consumer must
+honor `accessMode: read_only` and request a fresh lease before performing any
+mutation. SFTP is not FTP and is not supported by the current experiment.
+
+SSH clients connect directly to the restricted OpenSSH sidecar, where a forced
+command requests ClawGuard approval and ClawGuard supplies an ephemeral agent
+socket. See [ssh-gateway/README.md](../ssh-gateway/README.md) and
+[ftp-gateway/README.md](../ftp-gateway/README.md).
 
 **Example: a prompt injection tries to delete a GitHub repo.**
 The agent (compromised by a malicious prompt) calls `DELETE https://api.github.com/repos/mycompany/production-api`. The forwarder sends this to ClawGuard. ClawGuard sends you a Telegram notification:

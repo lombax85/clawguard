@@ -1,0 +1,19 @@
+FROM alpine:3.22
+
+RUN apk add --no-cache openssh-server \
+    && addgroup -g 10002 deploy \
+    && adduser -D -u 10002 -G deploy -h /home/deploy -s /bin/sh deploy \
+    && passwd -d deploy \
+    && mkdir -p /home/deploy/.ssh /run/sshd \
+    && chown deploy:deploy /home/deploy /home/deploy/.ssh \
+    && chmod 0700 /home/deploy/.ssh
+
+COPY upstream-sshd_config /etc/ssh/sshd_config
+COPY upstream-entrypoint.sh /usr/local/sbin/e2e-upstream-entrypoint
+
+RUN chmod 0600 /etc/ssh/sshd_config \
+    && chmod 0755 /usr/local/sbin/e2e-upstream-entrypoint
+
+EXPOSE 2222
+
+ENTRYPOINT ["/usr/local/sbin/e2e-upstream-entrypoint"]

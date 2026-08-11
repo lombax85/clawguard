@@ -1,0 +1,90 @@
+diff --git a/cmd.go b/cmd.go
+index 254cbed..63863f2 100644
+--- a/cmd.go
++++ b/cmd.go
+@@ -40 +39,0 @@ var defaultCommands = map[string]Command{
+-	"EPRT": commandEprt{},
+@@ -44 +42,0 @@ var defaultCommands = map[string]Command{
+-	"LPRT": commandLprt{},
+@@ -56 +53,0 @@ var defaultCommands = map[string]Command{
+-	"PORT": commandPort{},
+diff --git a/data_socket.go b/data_socket.go
+index 276c4fa..6264e5c 100644
+--- a/data_socket.go
++++ b/data_socket.go
+@@ -212,0 +213,9 @@ func (socket *passiveSocket) Close() error {
++func sameTCPPeerIP(left, right net.Addr) bool {
++	leftTCP, leftOK := left.(*net.TCPAddr)
++	rightTCP, rightOK := right.(*net.TCPAddr)
++	if !leftOK || !rightOK || leftTCP.IP == nil || rightTCP.IP == nil {
++		return false
++	}
++	return leftTCP.IP.Equal(rightTCP.IP)
++}
++
+@@ -254,3 +263,15 @@ func (socket *passiveSocket) ListenAndServe() (err error) {
+-		conn, err := listener.Accept()
+-		if err != nil {
+-			socket.err = err
++		for {
++			conn, acceptErr := listener.Accept()
++			if acceptErr != nil {
++				socket.err = acceptErr
++				return
++			}
++			if !sameTCPPeerIP(socket.sess.RemoteAddr(), conn.RemoteAddr()) {
++				_ = conn.Close()
++				continue
++			}
++			socket.err = nil
++			socket.conn = conn
++			socket.reader = ratelimit.Reader(socket.conn, socket.sess.server.rateLimiter)
++			socket.writer = ratelimit.Writer(socket.conn, socket.sess.server.rateLimiter)
++			_ = listener.Close()
+@@ -259,5 +279,0 @@ func (socket *passiveSocket) ListenAndServe() (err error) {
+-		socket.err = nil
+-		socket.conn = conn
+-		socket.reader = ratelimit.Reader(socket.conn, socket.sess.server.rateLimiter)
+-		socket.writer = ratelimit.Writer(socket.conn, socket.sess.server.rateLimiter)
+-		_ = listener.Close()
+diff --git a/server.go b/server.go
+index 8809c76..d87eaf4 100644
+--- a/server.go
++++ b/server.go
+@@ -98,0 +99,4 @@ var ErrServerClosed = errors.New("ftp: Server closed")
++// Each ClawGuard lease runs one dedicated server process. Keep enough control
++// connections for ordinary clients while bounding pre-authentication goroutines.
++const maxConcurrentControlConnections = 8
++
+@@ -283,0 +288 @@ func (server *Server) Serve(l net.Listener) error {
++	controlSlots := make(chan struct{}, maxConcurrentControlConnections)
+@@ -298,0 +304,7 @@ func (server *Server) Serve(l net.Listener) error {
++		select {
++		case controlSlots <- struct{}{}:
++			// Capacity is returned when this control session terminates.
++		default:
++			_ = tcpConn.Close()
++			continue
++		}
+@@ -300 +312,4 @@ func (server *Server) Serve(l net.Listener) error {
+-		go ftpConn.Serve()
++		go func() {
++			defer func() { <-controlSlots }()
++			ftpConn.Serve()
++		}()
+diff --git a/session.go b/session.go
+index a5ae5a1..9ff1345 100644
+--- a/session.go
++++ b/session.go
+@@ -144 +144,7 @@ func (sess *Session) Serve() {
+-		line, err := sess.controlReader.ReadString('\n')
++		lineBytes, err := sess.controlReader.ReadSlice('\n')
++		if err == bufio.ErrBufferFull {
++			// The reader's fixed buffer is the command-size limit. Close after a
++			// protocol error rather than retaining an attacker-controlled line.
++			sess.writeMessage(500, "Command line too long")
++			break
++		}
+@@ -152 +158 @@ func (sess *Session) Serve() {
+-		sess.receiveLine(line)
++		sess.receiveLine(string(lineBytes))

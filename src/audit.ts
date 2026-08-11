@@ -1,5 +1,116 @@
 import Database from 'better-sqlite3';
-import { AuditEntry, Approval, DashboardStats, ServiceConfig } from './types';
+import { AuditEntry, Approval, DashboardStats, FtpAccessMode, ServiceConfig } from './types';
+
+export type SshSessionAction = 'shell' | 'exec';
+
+export interface SshSessionStart {
+  id: string;
+  startedAt?: string;
+  service: string;
+  clientIp: string;
+  targetHost?: string | null;
+  targetPort?: number | null;
+  upstreamUser?: string | null;
+  action: SshSessionAction;
+  approved?: boolean;
+  outcome?: string;
+  leaseExpiresAt?: string | null;
+}
+
+export interface SshSessionUpdate {
+  targetHost?: string | null;
+  targetPort?: number | null;
+  upstreamUser?: string | null;
+  approved?: boolean;
+  outcome?: string;
+  leaseExpiresAt?: string | null;
+  exitStatus?: number | null;
+  closeReason?: string | null;
+}
+
+export interface SshSessionFinalize extends SshSessionUpdate {
+  endedAt?: string;
+  outcome: string;
+}
+
+export interface SshSessionRecord {
+  id: string;
+  startedAt: string;
+  updatedAt: string;
+  endedAt: string | null;
+  durationMs: number | null;
+  service: string;
+  clientIp: string;
+  targetHost: string | null;
+  targetPort: number | null;
+  upstreamUser: string | null;
+  action: SshSessionAction;
+  approved: boolean;
+  outcome: string;
+  leaseExpiresAt: string | null;
+  exitStatus: number | null;
+  closeReason: string | null;
+}
+
+export interface FtpSessionStart {
+  id: string;
+  startedAt?: string;
+  service: string;
+  protocol: 'ftp' | 'ftps';
+  accessMode?: FtpAccessMode | null;
+  clientIp: string;
+  targetHost?: string | null;
+  targetPort?: number | null;
+  upstreamUser?: string | null;
+  controlPort?: number | null;
+  approved?: boolean;
+  outcome?: string;
+  leaseExpiresAt?: string | null;
+}
+
+export interface FtpSessionUpdate {
+  accessMode?: FtpAccessMode | null;
+  targetHost?: string | null;
+  targetPort?: number | null;
+  upstreamUser?: string | null;
+  controlPort?: number | null;
+  approved?: boolean;
+  outcome?: string;
+  leaseExpiresAt?: string | null;
+  closeReason?: string | null;
+}
+
+export interface FtpSessionFinalize extends FtpSessionUpdate {
+  endedAt?: string;
+  outcome: string;
+}
+
+export interface FtpSessionRecord {
+  id: string;
+  startedAt: string;
+  updatedAt: string;
+  endedAt: string | null;
+  durationMs: number | null;
+  service: string;
+  protocol: 'ftp' | 'ftps';
+  accessMode: FtpAccessMode | null;
+  clientIp: string;
+  targetHost: string | null;
+  targetPort: number | null;
+  upstreamUser: string | null;
+  controlPort: number | null;
+  approved: boolean;
+  outcome: string;
+  leaseExpiresAt: string | null;
+  closeReason: string | null;
+}
+
+function normalizeCloseReason(value: string | null | undefined): string | null | undefined {
+  if (value === undefined || value === null) return value;
+  // Close reasons are metadata, not a transcript. Keep them single-line and
+  // bounded so accidental error dumps cannot turn the audit DB into a stream log.
+  return value.replace(/\s+/g, ' ').trim().slice(0, 1024);
+}
 
 export class AuditLogger {
   private db: Database.Database;
@@ -49,6 +160,49 @@ export class AuditLogger {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS ssh_sessions (
+        id TEXT PRIMARY KEY,
+        started_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        ended_at TEXT,
+        service TEXT NOT NULL,
+        client_ip TEXT NOT NULL,
+        target_host TEXT,
+        target_port INTEGER,
+        upstream_user TEXT,
+        action TEXT NOT NULL CHECK (action IN ('shell', 'exec')),
+        approved INTEGER NOT NULL DEFAULT 0,
+        outcome TEXT NOT NULL,
+        lease_expires_at TEXT,
+        exit_status INTEGER,
+        close_reason TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_ssh_sessions_started_at
+      ON ssh_sessions(started_at DESC);
+
+      CREATE TABLE IF NOT EXISTS ftp_sessions (
+        id TEXT PRIMARY KEY,
+        started_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        ended_at TEXT,
+        service TEXT NOT NULL,
+        protocol TEXT NOT NULL CHECK (protocol IN ('ftp', 'ftps')),
+        access_mode TEXT CHECK (access_mode IN ('read_only', 'read_write')),
+        client_ip TEXT NOT NULL,
+        target_host TEXT,
+        target_port INTEGER,
+        upstream_user TEXT,
+        control_port INTEGER,
+        approved INTEGER NOT NULL DEFAULT 0,
+        outcome TEXT NOT NULL,
+        lease_expires_at TEXT,
+        close_reason TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_ftp_sessions_started_at
+      ON ftp_sessions(started_at DESC);
+
     `);
 
     // Add columns if they don't exist (migration for existing DBs)
@@ -62,6 +216,7 @@ export class AuditLogger {
     // Optional request provenance (multi-user): who triggered the call and why.
     try { this.db.exec('ALTER TABLE requests ADD COLUMN request_user TEXT'); } catch { /* already exists */ }
     try { this.db.exec('ALTER TABLE requests ADD COLUMN request_reason TEXT'); } catch { /* already exists */ }
+    try { this.db.exec("ALTER TABLE ftp_sessions ADD COLUMN access_mode TEXT CHECK (access_mode IN ('read_only', 'read_write'))"); } catch { /* already exists */ }
   }
 
   // ─── Request logging ──────────────────────────────────────
@@ -227,6 +382,212 @@ export class AuditLogger {
   }
 
   // ─── Queries ───────────────────────────────────────────────
+
+  startSshSession(entry: SshSessionStart): void {
+    if (!entry.id.trim()) throw new Error('SSH session id is required');
+    if (entry.action !== 'shell' && entry.action !== 'exec') {
+      throw new Error(`Invalid SSH session action: ${entry.action}`);
+    }
+    if (entry.targetPort !== undefined && entry.targetPort !== null
+      && (!Number.isInteger(entry.targetPort) || entry.targetPort < 1 || entry.targetPort > 65535)) {
+      throw new Error(`Invalid SSH target port: ${entry.targetPort}`);
+    }
+
+    const now = entry.startedAt ?? new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO ssh_sessions (
+        id, started_at, updated_at, service, client_ip, target_host, target_port,
+        upstream_user, action, approved, outcome, lease_expires_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      entry.id, now, now, entry.service, entry.clientIp, entry.targetHost ?? null,
+      entry.targetPort ?? null, entry.upstreamUser ?? null, entry.action, entry.approved ? 1 : 0,
+      entry.outcome ?? 'pending_approval', entry.leaseExpiresAt ?? null
+    );
+  }
+
+  updateSshSession(id: string, update: SshSessionUpdate): boolean {
+    return this.applySshSessionUpdate(id, update, undefined);
+  }
+
+  finalizeSshSession(id: string, final: SshSessionFinalize): boolean {
+    return this.applySshSessionUpdate(id, final, final.endedAt ?? new Date().toISOString());
+  }
+
+  private applySshSessionUpdate(
+    id: string,
+    update: SshSessionUpdate,
+    endedAt: string | undefined
+  ): boolean {
+    const assignments = ['updated_at = ?'];
+    const values: unknown[] = [new Date().toISOString()];
+
+    if (endedAt !== undefined) {
+      assignments.push('ended_at = ?');
+      values.push(endedAt);
+    }
+    if (update.approved !== undefined) {
+      assignments.push('approved = ?');
+      values.push(update.approved ? 1 : 0);
+    }
+    if (update.targetHost !== undefined) {
+      assignments.push('target_host = ?');
+      values.push(update.targetHost);
+    }
+    if (update.targetPort !== undefined) {
+      if (update.targetPort !== null
+        && (!Number.isInteger(update.targetPort) || update.targetPort < 1 || update.targetPort > 65535)) {
+        throw new Error(`Invalid SSH target port: ${update.targetPort}`);
+      }
+      assignments.push('target_port = ?');
+      values.push(update.targetPort);
+    }
+    if (update.upstreamUser !== undefined) {
+      assignments.push('upstream_user = ?');
+      values.push(update.upstreamUser);
+    }
+    if (update.outcome !== undefined) {
+      assignments.push('outcome = ?');
+      values.push(update.outcome);
+    }
+    if (update.leaseExpiresAt !== undefined) {
+      assignments.push('lease_expires_at = ?');
+      values.push(update.leaseExpiresAt);
+    }
+    if (update.exitStatus !== undefined) {
+      assignments.push('exit_status = ?');
+      values.push(update.exitStatus);
+    }
+    if (update.closeReason !== undefined) {
+      assignments.push('close_reason = ?');
+      values.push(normalizeCloseReason(update.closeReason));
+    }
+
+    values.push(id);
+    const result = this.db.prepare(`
+      UPDATE ssh_sessions SET ${assignments.join(', ')} WHERE id = ?
+    `).run(...values);
+    return result.changes > 0;
+  }
+
+  getRecentSshSessions(limit: number = 50): SshSessionRecord[] {
+    const safeLimit = Math.max(1, Math.min(Math.trunc(limit) || 50, 1000));
+    const rows = this.db.prepare(`
+      SELECT
+        id,
+        started_at AS startedAt,
+        updated_at AS updatedAt,
+        ended_at AS endedAt,
+        CASE
+          WHEN ended_at IS NULL THEN NULL
+          ELSE CAST(ROUND((julianday(ended_at) - julianday(started_at)) * 86400000) AS INTEGER)
+        END AS durationMs,
+        service,
+        client_ip AS clientIp,
+        target_host AS targetHost,
+        target_port AS targetPort,
+        upstream_user AS upstreamUser,
+        action,
+        approved,
+        outcome,
+        lease_expires_at AS leaseExpiresAt,
+        exit_status AS exitStatus,
+        close_reason AS closeReason
+      FROM ssh_sessions
+      ORDER BY started_at DESC
+      LIMIT ?
+    `).all(safeLimit) as Array<Omit<SshSessionRecord, 'approved'> & { approved: number }>;
+
+    return rows.map((row) => ({ ...row, approved: row.approved === 1 }));
+  }
+
+  startFtpSession(entry: FtpSessionStart): void {
+    if (!entry.id.trim()) throw new Error('FTP session id is required');
+    if (entry.protocol !== 'ftp' && entry.protocol !== 'ftps') throw new Error('Invalid FTP session protocol');
+    if (entry.accessMode !== undefined && entry.accessMode !== null
+      && entry.accessMode !== 'read_only' && entry.accessMode !== 'read_write') {
+      throw new Error('Invalid FTP access mode');
+    }
+    for (const [label, port] of [['target', entry.targetPort], ['control', entry.controlPort]] as const) {
+      if (port !== undefined && port !== null
+        && (!Number.isInteger(port) || port < 1 || port > 65535)) {
+        throw new Error(`Invalid FTP ${label} port: ${port}`);
+      }
+    }
+    const now = entry.startedAt ?? new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO ftp_sessions (
+        id, started_at, updated_at, service, protocol, access_mode, client_ip, target_host,
+        target_port, upstream_user, control_port, approved, outcome, lease_expires_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      entry.id, now, now, entry.service, entry.protocol, entry.accessMode ?? null, entry.clientIp,
+      entry.targetHost ?? null, entry.targetPort ?? null, entry.upstreamUser ?? null,
+      entry.controlPort ?? null, entry.approved ? 1 : 0,
+      entry.outcome ?? 'pending_approval', entry.leaseExpiresAt ?? null
+    );
+  }
+
+  updateFtpSession(id: string, update: FtpSessionUpdate): boolean {
+    return this.applyFtpSessionUpdate(id, update, undefined);
+  }
+
+  finalizeFtpSession(id: string, final: FtpSessionFinalize): boolean {
+    return this.applyFtpSessionUpdate(id, final, final.endedAt ?? new Date().toISOString());
+  }
+
+  private applyFtpSessionUpdate(
+    id: string,
+    update: FtpSessionUpdate,
+    endedAt: string | undefined
+  ): boolean {
+    const assignments = ['updated_at = ?'];
+    const values: unknown[] = [new Date().toISOString()];
+    if (endedAt !== undefined) { assignments.push('ended_at = ?'); values.push(endedAt); }
+    if (update.approved !== undefined) { assignments.push('approved = ?'); values.push(update.approved ? 1 : 0); }
+    if (update.accessMode !== undefined) {
+      if (update.accessMode !== null
+        && update.accessMode !== 'read_only'
+        && update.accessMode !== 'read_write') throw new Error('Invalid FTP access mode');
+      assignments.push('access_mode = ?');
+      values.push(update.accessMode);
+    }
+    if (update.targetHost !== undefined) { assignments.push('target_host = ?'); values.push(update.targetHost); }
+    for (const [field, column, port] of [
+      ['target', 'target_port', update.targetPort],
+      ['control', 'control_port', update.controlPort],
+    ] as const) {
+      if (port !== undefined) {
+        if (port !== null && (!Number.isInteger(port) || port < 1 || port > 65535)) {
+          throw new Error(`Invalid FTP ${field} port: ${port}`);
+        }
+        assignments.push(`${column} = ?`);
+        values.push(port);
+      }
+    }
+    if (update.upstreamUser !== undefined) { assignments.push('upstream_user = ?'); values.push(update.upstreamUser); }
+    if (update.outcome !== undefined) { assignments.push('outcome = ?'); values.push(update.outcome); }
+    if (update.leaseExpiresAt !== undefined) { assignments.push('lease_expires_at = ?'); values.push(update.leaseExpiresAt); }
+    if (update.closeReason !== undefined) { assignments.push('close_reason = ?'); values.push(normalizeCloseReason(update.closeReason)); }
+    values.push(id);
+    const result = this.db.prepare(`UPDATE ftp_sessions SET ${assignments.join(', ')} WHERE id = ?`).run(...values);
+    return result.changes > 0;
+  }
+
+  getRecentFtpSessions(limit: number = 50): FtpSessionRecord[] {
+    const safeLimit = Math.max(1, Math.min(Math.trunc(limit) || 50, 1000));
+    const rows = this.db.prepare(`
+      SELECT id, started_at AS startedAt, updated_at AS updatedAt, ended_at AS endedAt,
+        CASE WHEN ended_at IS NULL THEN NULL
+          ELSE CAST(ROUND((julianday(ended_at) - julianday(started_at)) * 86400000) AS INTEGER)
+        END AS durationMs,
+        service, protocol, access_mode AS accessMode, client_ip AS clientIp, target_host AS targetHost,
+        target_port AS targetPort, upstream_user AS upstreamUser, control_port AS controlPort,
+        approved, outcome, lease_expires_at AS leaseExpiresAt, close_reason AS closeReason
+      FROM ftp_sessions ORDER BY started_at DESC LIMIT ?
+    `).all(safeLimit) as Array<Omit<FtpSessionRecord, 'approved'> & { approved: number }>;
+    return rows.map((row) => ({ ...row, approved: row.approved === 1 }));
+  }
 
   getRecentRequests(limit: number = 50): unknown[] {
     return this.db.prepare(`

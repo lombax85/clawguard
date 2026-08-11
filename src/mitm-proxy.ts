@@ -155,6 +155,9 @@ function resolveServiceByHostname(
   services: Record<string, ServiceConfig>
 ): { name: string; config: ServiceConfig } | null {
   for (const [name, svc] of Object.entries(services)) {
+    // Protocol gateways have separate data paths and must never be selected
+    // by the HTTPS MITM resolver.
+    if ((svc.protocol ?? 'http') !== 'http') continue;
     // Check explicit hostnames
     if (svc.hostnames?.some((h) => h === hostname)) {
       return { name, config: svc };
@@ -170,6 +173,14 @@ function resolveServiceByHostname(
     }
   }
   return null;
+}
+
+// Test helper: keep protocol isolation verifiable without opening a TLS MITM.
+export function __resolveServiceByHostnameForTests(
+  hostname: string,
+  services: Record<string, ServiceConfig>
+): { name: string; config: ServiceConfig } | null {
+  return resolveServiceByHostname(hostname, services);
 }
 
 /**
@@ -342,6 +353,13 @@ function handleMitmRequest(
   audit: AuditLogger,
   clientIp: string
 ): void {
+  if ((serviceConfig.protocol ?? 'http') !== 'http') {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    const protocol = serviceConfig.protocol === 'ssh' ? 'SSH' : 'FTP/FTPS';
+    res.end(JSON.stringify({ error: `${protocol} services are not available over the HTTP proxy` }));
+    return;
+  }
+
   // Collect request body
   const bodyChunks: Buffer[] = [];
   req.on('data', (chunk: Buffer) => bodyChunks.push(chunk));

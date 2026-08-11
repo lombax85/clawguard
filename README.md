@@ -51,7 +51,15 @@ Agent Machine (untrusted)          Secure Machine (trusted)
 
 - **Zero-knowledge tokens** — Your agent runs with dummy credentials. Real API keys live only on ClawGuard's machine, in a YAML file the agent can't access. Even if the agent is fully compromised, your secrets are safe.
 
-- **2FA approval via Telegram** — Every sensitive API call triggers a push notification on your phone with service, method, and path. Approve (1h / 8h / 24h), deny, or let it timeout. Like 2FA for humans, but for your AI agent.
+- **2FA approval via Telegram** — Sensitive API calls trigger a notification
+  when required by policy, with service, method, path and provenance. Choose a
+  bounded method/path scope, deny, or let it time out. Like 2FA for humans, but
+  for your AI agent.
+
+- **Approved SSH and FTP/FTPS access** — Optional stock-protocol sidecars keep
+  upstream SSH keys and FTP passwords on the trusted machine. SSH is
+  host-key-pinned; each FTP lease is explicitly approved as read-only or
+  read/write.
 
 - **Self-installing on agents** — Give your OpenClaw agent the [installation guide](./openclaw/INSTALL.md) and it sets up its own ClawGuard connection — no manual agent-side configuration needed.
 
@@ -105,7 +113,7 @@ Machine B can be a Raspberry Pi on your desk, a VPS, a Docker container on your 
 git clone https://github.com/lombax85/clawguard.git
 cd clawguard
 cp clawguard.yaml.example clawguard.yaml
-mkdir -p data
+mkdir -p data/ssh-gateway
 ```
 
 **Edit `clawguard.yaml`** — change these values immediately:
@@ -123,8 +131,19 @@ notifications:
 > **Security warning:** the `agentKey` is the only thing preventing unauthorized access to ClawGuard. The `pairing.secret` prevents strangers from approving requests via your Telegram bot. Generate strong random values for both — for example: `openssl rand -hex 24`
 
 ```bash
-TELEGRAM_BOT_TOKEN=your-bot-token docker compose up -d
+printf 'TELEGRAM_BOT_TOKEN=%s\n' 'replace-with-your-bot-token' > .env
+chmod 600 .env
+docker compose up -d --build
+docker compose ps
+docker compose logs --tail=100 clawguard
 ```
+
+`.env`, `clawguard.yaml`, the database and generated keys are ignored local
+deployment state; never commit them. Plain `docker compose up -d` and
+`docker compose down` manage ClawGuard plus both protocol sidecars. The SSH
+sidecar starts fail-closed with no accepted client keys until you create
+`data/ssh-gateway/authorized_keys`; the FTP sidecar exposes no usable session
+until ClawGuard grants a bounded lease.
 
 > **Docker networking note:** When running in Docker, requests from your host machine arrive with the Docker bridge IP (typically `172.17.0.1`), not `127.0.0.1`. To access the admin dashboard, add your Docker bridge IP to `allowedIPs` in `clawguard.yaml`.
 
@@ -370,6 +389,225 @@ discord-com:
 ```
 
 Copy the snippet into your `clawguard.yaml`, replace the placeholder with your real token, add the hostname to `security.allowedUpstreams`, and restart.
+
+---
+
+## SSH Access Gateway (experimental)
+
+The experimental SSH mode uses **stock OpenSSH on both SSH legs**. A hardened
+Linux `sshd` sidecar authenticates the inbound public key and forces every
+session through ClawGuard; after one Telegram approval, ClawGuard loads the
+upstream private key into a fresh, short-lived `ssh-agent`. The sidecar's stock
+`ssh` client then connects to the fixed, host-key-pinned upstream target.
+
+```text
+SSH client -> OpenSSH sidecar -> ClawGuard approval broker
+           -> per-session ssh-agent -> OpenSSH client -> upstream sshd
+```
+
+The upstream private key stays inside ClawGuard: it is passed to `ssh-add`
+through stdin, is not written as a private-key file, and is never returned to
+the inbound client. The shared volume contains only the broker socket and
+short-lived agent sockets.
+
+### Enable the SSH gateway
+
+1. On the trusted ClawGuard host, create the inbound `authorized_keys` file.
+   This key authenticates only to the restricted gateway account; it is not an
+   upstream credential. The complete Compose stack can start without this
+   file, but the SSH sidecar then denies every login until a key is installed.
+
+   ```bash
+   mkdir -p ./data/ssh-gateway
+   cp ~/.ssh/id_ed25519.pub ./data/ssh-gateway/authorized_keys
+   chmod 600 ./data/ssh-gateway/authorized_keys
+   ```
+
+   Compose mounts the host directory `./data/ssh-gateway` read-only. After
+   adding or changing `authorized_keys` on an already running installation,
+   recreate the SSH sidecar so its entrypoint installs the new public keys:
+
+   ```bash
+   docker compose up -d --force-recreate clawguard-ssh
+   ```
+
+2. Configure and pair Telegram, set `sshBroker.enabled: true`, and uncomment an
+   SSH service like the one in `clawguard.yaml.example`. An SSH service must use
+   `protocol: ssh`, an exact `ssh://host:port` target, the `ssh-agent-key`
+   credential plugin, and a complete pinned host public key. Add a public
+   target hostname to `security.allowedUpstreams`; a private/LAN target also
+   requires the explicit `ssh.allowPrivateTarget: true` opt-in.
+
+3. Resolve `auth.pluginConfig.privateKey` from a protected secret backend (for
+   example a Vault reference), then start the complete Compose stack:
+
+   ```bash
+   docker compose up -d --build
+   docker compose logs clawguard-ssh
+   ```
+
+   The log prints the persistent **inbound** gateway host-key fingerprint.
+   Verify it through a trusted channel when enrolling the client. The gateway
+   account has fixed UID/GID `10001`, matching the broker socket ownership.
+
+### Connect
+
+Use the configured service alias as the first forced-command argument. An
+interactive session needs a TTY:
+
+```bash
+ssh -t gateway@CLAWGUARD_HOST -p 2222 -- production-ssh
+```
+
+Execute one remote command by separating it from the service with a second
+`--`:
+
+```bash
+ssh gateway@CLAWGUARD_HOST -p 2222 -- production-ssh -- uname -a
+```
+
+Each attempt produces a new Telegram request. SSH approval is deliberately
+one-time: it does not use HTTP policy auto-approval or cached approval windows.
+No configured/paired Telegram approver, denial, bot failure, or timeout all
+deny the session without creating a credential lease.
+
+Credential retrieval is also bounded by `credentialTimeoutMs`; broker shutdown
+aborts cooperative plugins immediately and does not wait forever for a plugin
+that ignores the signal.
+
+The signing capability expires after `leaseTtlSeconds`; an already
+authenticated OpenSSH channel can continue until it exits or reaches the
+absolute `maxSessionSeconds` limit. Capacity remains reserved for the live
+session, and the broker has bounded cleanup for a missing completion callback.
+
+### MVP boundaries and residual risk
+
+- Port forwarding, agent forwarding, Unix-socket forwarding, X11, extra
+  channels, `ProxyJump`, SCP and SFTP are disabled or unsupported.
+- The upstream host key is pinned as the complete OpenSSH public key;
+  fingerprints alone and trust-on-first-use are rejected. Obtain and verify
+  the key independently before configuration.
+- The upstream key never reaches the inbound SSH client. However, a compromised
+  sidecar could use an approved session's agent socket for the lease lifetime
+  against any reachable host that accepts that same key. Keep leases short and
+  restrict sidecar egress to configured targets in a real deployment.
+- Destination-constrained agent keys are not yet enabled in this experiment;
+  use a distinct, narrowly scoped upstream key per service before production.
+- The SSH feature is experimental. It is intended for isolated testing before
+  production hardening and an independent deployment-specific security review.
+
+See [ssh-gateway/README.md](./ssh-gateway/README.md) for the sidecar's trust
+boundaries, lifecycle, and troubleshooting notes.
+
+Run the real two-leg OpenSSH regression suite with
+`bash scripts/test-ssh-gateway-e2e.sh` (Docker required).
+
+---
+
+## FTP/FTPS Access Gateway (experimental)
+
+FTP/FTPS follows the same sidecar pattern as SSH without reimplementing the
+protocol in ClawGuard. After a one-time Telegram approval, ClawGuard retrieves
+the fixed service credentials through a dedicated plugin and asks a hardened
+Linux sidecar to start one isolated, time-bounded rclone FTP server. The client
+receives only random gateway credentials; the upstream password never leaves
+the trusted ClawGuard/sidecar boundary.
+
+```text
+FTP client -> per-lease rclone server -> pinned relay -> upstream FTP server
+                         ^
+                         |
+              ClawGuard approval + credentials
+```
+
+Configure a YAML-only service and the disabled-by-default gateway:
+
+```yaml
+services:
+  production-files:
+    protocol: ftps
+    upstream: ftps://ftp.example.com:21
+    auth:
+      type: plugin
+      pluginPath: ftp-password
+      pluginConfig:
+        username: deploy
+        password: "vault:secret/data/ftp/production#password"
+    policy:
+      default: require_approval
+    ftp:
+      allowPrivateTarget: false
+      tlsMode: explicit       # upstream: explicit or implicit
+      root: uploads
+      noCheckCertificate: false
+
+admin:
+  enabled: true
+  https:
+    enabled: true
+    hostnames: [clawguard.example.com]
+
+ftpGateway:
+  enabled: true
+  publicHost: clawguard.example.com
+  allowInsecureHttpApi: false
+```
+
+Inbound `protocol: ftps` is always explicit FTPS (`AUTH TLS`); the upstream may
+be explicit or implicit. Plain `protocol: ftp` is also supported but sends the
+ephemeral gateway login and file contents without transport encryption. The
+Compose defaults bind both experimental gateways to host loopback and expose a
+single FTP lease. Start them with:
+
+```bash
+docker compose up -d --build
+```
+
+Remote clients require deliberate non-loopback port bindings and matching FTP
+passive-address, certificate-hostname, port-range, and concurrency settings;
+see `ftp-gateway/README.md`.
+
+For a LAN deployment, keep host-specific values out of the versioned Compose
+file by setting one value in the ignored `.env`:
+
+```dotenv
+CLAWGUARD_GATEWAY_BIND_IP=192.168.1.50
+```
+
+This address becomes the SSH/FTP bind address, passive FTP address, and default
+FTPS certificate identity. In the ignored `clawguard.yaml`, it can also drive
+the lease response with `ftpGateway.publicHost: "${CLAWGUARD_GATEWAY_BIND_IP}"`.
+`CLAWGUARD_FTP_PUBLIC_IP` and `CLAWGUARD_FTP_TLS_HOSTNAME` remain available as
+explicit overrides for deployments where those addresses differ.
+
+Minting a lease is a separate authenticated HTTPS call, so approval happens
+before the FTP client connects. Telegram presents two approval choices:
+**Read only** or **Read/write**. Read-only is enforced by the per-lease rclone
+server, not merely recorded as audit metadata.
+
+```bash
+curl -sk -X POST "https://CLAWGUARD_HOST:9443/__ftp/session" \
+  -H "X-ClawGuard-Key: YOUR_AGENT_KEY" \
+  -H "X-ClawGuard-User: setup-test" \
+  -H "X-ClawGuard-Reason: verify the FTP gateway" \
+  -H "Content-Type: application/json" \
+  --data '{"service":"production-files"}'
+```
+
+The response contains the bounded gateway host, port, username, password, TLS
+mode, selected `accessMode` (`read_only` or `read_write`), expiry, and lease
+id. A client must not attempt mutations when the operator selected read-only;
+request a new lease and a fresh approval if write access becomes necessary.
+Enable `admin.https` to use the TLS endpoint.
+Port 9090 exposes this API only with `allowInsecureHttpApi: true`, intended for
+localhost or a separately protected transport. Control and passive port ranges
+must be reachable one-to-one. The gateway accepts passive FTP only, rejects
+active-mode commands, and accepts passive data connections only from the same
+source address as the authenticated control connection.
+
+See [ftp-gateway/README.md](./ftp-gateway/README.md) for full configuration,
+client examples, trust boundaries, certificate handling, revocation, and the
+real FTP/FTPS E2E test.
 
 ---
 
@@ -755,6 +993,9 @@ Path-prefix routing (`/:service/*`) cleanly disambiguates those services. Host-b
 | `/:service/*` | Agent key | Proxy to configured service |
 | `/__status` | Agent key | Active approvals and services |
 | `/__audit` | Agent key | Recent request log |
+| `POST /__ftp/session` | Agent key + fresh Telegram decision | Mint one bounded FTP/FTPS lease |
+| `DELETE /__ftp/session/:id` | Agent key + opaque lease ID | Revoke the caller-held FTP/FTPS lease |
+| `/__audit/ftp` | Agent key | Recent FTP metadata, with lease IDs redacted |
 | `/__admin` | PIN (IP restricted) | Web dashboard |
 
 ## Telegram Bot Commands
@@ -771,6 +1012,7 @@ Path-prefix routing (`/:service/*`) cleanly disambiguates those services. Host-b
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token (referenced in config as `${TELEGRAM_BOT_TOKEN}`) |
 | `CLAWGUARD_CONFIG` | Path to config file (default: `./clawguard.yaml`) |
+| `CLAWGUARD_GATEWAY_BIND_IP` | Optional host bind/passive address for remote SSH and FTP clients; defaults to loopback |
 
 ## Compared to Alternatives
 

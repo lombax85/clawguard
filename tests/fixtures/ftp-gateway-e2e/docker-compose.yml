@@ -1,0 +1,50 @@
+services:
+  upstream:
+    build:
+      context: ../../../ftp-gateway
+    entrypoint: ["/bin/sh", "/test/upstream.sh"]
+    volumes:
+      - ./upstream.sh:/test/upstream.sh:ro
+      - upstream-data:/srv
+      - upstream-state:/data
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 2121 && nc -z 127.0.0.1 2990"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+
+  gateway:
+    build:
+      context: ../../../ftp-gateway
+    depends_on:
+      upstream:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:24210:21210"
+      - "127.0.0.1:30000-30009:30000-30009"
+    environment:
+      - CLAWGUARD_FTP_CONTROL_PORT_START=21210
+      - CLAWGUARD_FTP_CONTROL_PORT_END=21210
+      - CLAWGUARD_FTP_PASSIVE_PORT_START=30000
+      - CLAWGUARD_FTP_PASSIVE_PORTS_PER_SESSION=10
+      - CLAWGUARD_FTP_MAX_SESSIONS=1
+      - CLAWGUARD_FTP_MAX_SESSION_SECONDS=120
+      - CLAWGUARD_FTP_PUBLIC_IP=127.0.0.1
+      - CLAWGUARD_FTP_TLS_HOSTNAME=localhost
+    volumes:
+      - gateway-runtime:/run/clawguard-ftp
+      - gateway-tls:/data
+      - ./call-gateway.js:/test/call-gateway.js:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"]
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  upstream-data:
+  upstream-state:
+  gateway-runtime:
+  gateway-tls:

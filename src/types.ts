@@ -8,7 +8,31 @@ export interface PolicyRule {
   action: 'auto_approve' | 'require_approval';
 }
 
+export type ServiceProtocol = 'http' | 'ssh' | 'ftp' | 'ftps';
+
+export interface SshServiceConfig {
+  // Complete OpenSSH public host key (`keytype base64`), never a TOFU fingerprint.
+  knownHostKey: string;
+  // Private/link-local/loopback literals and DNS answers require this explicit opt-in.
+  allowPrivateTarget: boolean;
+}
+
+export type FtpTlsMode = 'explicit' | 'implicit';
+
+export interface FtpServiceConfig {
+  // Private/link-local/loopback literals and DNS answers require this explicit opt-in.
+  allowPrivateTarget: boolean;
+  // FTPS upstream mode. Required for protocol: ftps and forbidden for plain FTP.
+  tlsMode?: FtpTlsMode;
+  // Fixed directory exposed as the session root; clients cannot override it.
+  root?: string;
+  // Explicit, per-service escape hatch for private/self-signed upstream FTPS.
+  noCheckCertificate?: boolean;
+}
+
 export interface ServiceConfig {
+  // Optional in input for backward compatibility; loadConfig normalizes it to `http`.
+  protocol?: ServiceProtocol;
   upstream: string;
   auth: {
     type: 'bearer' | 'header' | 'query' | 'basic' | 'url' | 'oauth2_client_credentials' | 'oauth2_authorization_code' | 'body_json' | 'plugin';
@@ -39,6 +63,8 @@ export interface ServiceConfig {
     rules?: PolicyRule[];
   };
   hostnames?: string[]; // for host-based routing (forward proxy / /etc/hosts mode)
+  ssh?: SshServiceConfig;
+  ftp?: FtpServiceConfig;
 }
 
 // ─── Security ────────────────────────────────────────────────
@@ -167,6 +193,43 @@ export interface TransparentProxyConfig {
   httpsPort: number;
 }
 
+// ─── SSH credential broker (experimental) ──────────────────
+
+export interface SshBrokerConfig {
+  enabled: boolean;
+  socketPath: string;
+  runtimeDir: string;
+  gatewayUid: number;
+  gatewayGid: number;
+  approvalTimeoutMs: number;
+  credentialTimeoutMs: number;
+  leaseTtlSeconds: number;
+  maxSessionSeconds: number;
+  sshAgentPath: string;
+  sshAddPath: string;
+  maxConcurrentLeases: number;
+}
+
+// ─── FTP/FTPS lease gateway (experimental) ─────────────────
+
+export type FtpAccessMode = 'read_only' | 'read_write';
+
+export interface FtpGatewayConfig {
+  enabled: boolean;
+  socketPath: string;
+  publicHost: string;
+  allowInsecureHttpApi: boolean;
+  approvalTimeoutMs: number;
+  credentialTimeoutMs: number;
+  gatewayTimeoutMs: number;
+  sessionTtlSeconds: number;
+  maxConcurrentSessions: number;
+  controlPortStart: number;
+  controlPortEnd: number;
+  passivePortStart: number;
+  passivePortsPerSession: number;
+}
+
 // ─── Config (root) ──────────────────────────────────────────
 
 export interface Config {
@@ -184,6 +247,8 @@ export interface Config {
   admin: AdminConfig;
   proxy: ProxyConfig;
   transparentProxy: TransparentProxyConfig;
+  sshBroker: SshBrokerConfig;
+  ftpGateway: FtpGatewayConfig;
   secrets?: SecretsConfig;
 }
 

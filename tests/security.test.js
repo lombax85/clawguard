@@ -21,6 +21,14 @@ test('isPrivateIP recognizes common private and public IPv4', () => {
   assert.equal(isPrivateIP('8.8.8.8'), false);
 });
 
+test('isPrivateIP blocks IPv4-mapped IPv6 addresses', () => {
+  assert.equal(isPrivateIP('::ffff:127.0.0.1'), true);
+  assert.equal(isPrivateIP('::ffff:7f00:1'), true);
+  // Mapped public addresses are rejected conservatively instead of being
+  // reinterpreted inconsistently by downstream networking APIs.
+  assert.equal(isPrivateIP('::ffff:8.8.8.8'), true);
+});
+
 test('isAllowedUpstream supports exact domain and subdomain', () => {
   assert.equal(isAllowedUpstream('api.github.com', ['api.github.com']), true);
   assert.equal(isAllowedUpstream('sub.todoist.com', ['todoist.com']), true);

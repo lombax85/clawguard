@@ -118,6 +118,52 @@ services:
   #   policy:
   #     default: require_approval
 
+  # ─── Experimental SSH access gateway ────────────────────
+  # SSH services are YAML-only and always require one explicit Telegram
+  # approval per session. The key is resolved inside ClawGuard and is never
+  # returned to the inbound SSH client or written to a private-key file.
+  #
+  # production-ssh:
+  #   protocol: ssh
+  #   upstream: ssh://ssh.example.com:22       # fixed host AND explicit port
+  #   auth:
+  #     type: plugin
+  #     pluginPath: ssh-agent-key
+  #     pluginConfig:
+  #       username: deploy                     # fixed upstream account
+  #       privateKey: "vault:secret/data/ssh/production#privateKey"
+  #   policy:
+  #     default: require_approval              # SSH never reuses cached HTTP approvals
+  #   ssh:
+  #     # Replace this complete key with the upstream sshd host public key,
+  #     # obtained and verified through a trusted channel. Fingerprints alone
+  #     # and trust-on-first-use are intentionally rejected.
+  #     knownHostKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
+  #     allowPrivateTarget: false              # set true explicitly for a private/LAN target
+
+  # ─── Experimental FTP/FTPS access gateway ────────────────
+  # One explicit Telegram approval chooses read-only or read/write access and
+  # creates one bounded lease. The client gets only random gateway credentials;
+  # this plugin's upstream password remains inside ClawGuard and the private
+  # FTP sidecar.
+  #
+  # production-files:
+  #   protocol: ftps
+  #   upstream: ftps://ftp.example.com:21      # exact host AND explicit port
+  #   auth:
+  #     type: plugin
+  #     pluginPath: ftp-password
+  #     pluginConfig:
+  #       username: deploy
+  #       password: "vault:secret/data/ftp/production#password"
+  #   policy:
+  #     default: require_approval              # FTP never reuses cached HTTP approvals
+  #   ftp:
+  #     allowPrivateTarget: false              # true is required for a private/LAN target
+  #     tlsMode: explicit                      # upstream FTPS: explicit or implicit
+  #     root: uploads                          # optional normalized relative root
+  #     noCheckCertificate: false              # insecure upstream-only opt-in
+
   # ─── AWS SigV4 (e.g. CloudTrail LookupEvents) ───────────
   # Signs requests with AWS Signature Version 4. Keep these IAM keys read-only.
   # aws-cloudtrail:
@@ -288,7 +334,8 @@ admin:
   # and the Push API are gated to "secure contexts" (https or http://localhost),
   # so a plain http://LAN-IP:9090 dashboard cannot enable Web Push.
   #
-  # When enabled, a second listener serves the admin UI only over TLS.
+  # When enabled, a second listener serves the admin UI and the authenticated
+  # FTP lease API over TLS.
   # The leaf cert is signed by the same CA in `data/ca/` that ClawGuard
   # uses for MITM mode — trust this CA once in your Keychain (macOS) or
   # browser to avoid TLS warnings.
@@ -317,6 +364,43 @@ proxy:
   caDir: ./data/ca              # CA cert/key stored here (auto-generated on first run)
   discovery: false              # enable discovery handling for unknown hosts
   discoveryPolicy: block        # block (default) | silent_allow (explicit opt-in)
+
+# ─── Experimental SSH credential broker ─────────────────────
+# Disabled by default. The sidecar follows the normal Compose lifecycle, while
+# this switch controls whether ClawGuard serves SSH broker requests.
+sshBroker:
+  enabled: false
+  runtimeDir: /run/clawguard-ssh
+  socketPath: /run/clawguard-ssh/broker.sock
+  gatewayUid: 10001
+  gatewayGid: 10001
+  approvalTimeoutMs: 90000
+  credentialTimeoutMs: 30000   # bounded plugin retrieval; 1000..300000
+  leaseTtlSeconds: 120          # lifetime of the signing capability, not the authenticated channel
+  maxSessionSeconds: 3600       # absolute wrapper limit; 10..86400
+  sshAgentPath: /usr/bin/ssh-agent
+  sshAddPath: /usr/bin/ssh-add
+  maxConcurrentLeases: 10       # pending approvals + live sessions
+
+# ─── Experimental FTP/FTPS lease gateway ────────────────────
+# Disabled by default. The sidecar follows the normal Compose lifecycle, while
+# this switch controls whether ClawGuard creates FTP/FTPS leases.
+ftpGateway:
+  enabled: false
+  socketPath: /run/clawguard-ftp/gateway.sock
+  # Use "${CLAWGUARD_GATEWAY_BIND_IP}" when clients connect through the
+  # deployment-specific address configured in the ignored .env.
+  publicHost: localhost         # address returned to approved FTP clients
+  allowInsecureHttpApi: false   # true only behind another protected transport
+  approvalTimeoutMs: 90000
+  credentialTimeoutMs: 30000
+  gatewayTimeoutMs: 10000
+  sessionTtlSeconds: 3600       # hard lifetime of server process and credentials
+  maxConcurrentSessions: 1     # safe local default; expand ports and sidecar together
+  controlPortStart: 21210
+  controlPortEnd: 21210
+  passivePortStart: 30000
+  passivePortsPerSession: 10
 
 # ─── Secret providers ────────────────────────────────────────
 # External secret backends for resolving token references.

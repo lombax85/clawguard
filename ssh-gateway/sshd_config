@@ -1,0 +1,47 @@
+Port 2222
+ListenAddress 0.0.0.0
+AddressFamily any
+
+HostKey /data/ssh_host_ed25519_key
+PidFile /run/sshd.pid
+
+AllowUsers gateway
+AuthenticationMethods publickey
+PubkeyAuthentication yes
+HostbasedAuthentication no
+IgnoreRhosts yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+PermitRootLogin no
+StrictModes yes
+UsePAM no
+
+AuthorizedKeysFile .ssh/authorized_keys
+ForceCommand /usr/local/bin/clawguard-force-command
+PermitTTY yes
+PermitUserEnvironment no
+PermitUserRC no
+
+DisableForwarding yes
+AllowAgentForwarding no
+AllowStreamLocalForwarding no
+AllowTcpForwarding no
+GatewayPorts no
+PermitListen none
+PermitOpen none
+PermitTunnel no
+X11Forwarding no
+
+MaxAuthTries 3
+MaxSessions 1
+LoginGraceTime 120
+ClientAliveInterval 30
+ClientAliveCountMax 3
+ChannelTimeout session=15m
+UnusedConnectionTimeout 30s
+
+UseDNS no
+PrintMotd no
+LogLevel VERBOSE
+Subsystem sftp internal-sftp
