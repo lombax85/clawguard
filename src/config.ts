@@ -125,6 +125,33 @@ export function normalizeFtpConfiguration(config: Config): void {
   config.ftpGateway = { ...DEFAULT_FTP_GATEWAY, ...(config.ftpGateway || {}) };
 }
 
+export function validateHttpConfiguration(config: Config): string[] {
+  const errors: string[] = [];
+  for (const [name, service] of Object.entries(config.services || {})) {
+    const protocol = service.protocol ?? 'http';
+    if (protocol !== 'http') {
+      if (service.http !== undefined) {
+        errors.push(`${protocol.toUpperCase()} service "${name}" must not define service.http`);
+      }
+      continue;
+    }
+    if (!service.http) continue;
+    if (service.http.allowPrivateTarget !== undefined
+      && typeof service.http.allowPrivateTarget !== 'boolean') {
+      errors.push(`HTTP service "${name}" http.allowPrivateTarget must be true or false`);
+    }
+    if (service.http.noCheckCertificate !== undefined
+      && typeof service.http.noCheckCertificate !== 'boolean') {
+      errors.push(`HTTP service "${name}" http.noCheckCertificate must be true or false`);
+    }
+    if (service.http.noCheckCertificate === true
+      && !service.upstream.startsWith('https://')) {
+      errors.push(`HTTP service "${name}" http.noCheckCertificate is valid only for an HTTPS upstream`);
+    }
+  }
+  return errors;
+}
+
 export function validateFtpConfiguration(config: Config): string[] {
   const errors: string[] = [];
   const services = Object.entries(config.services || {});
@@ -372,6 +399,12 @@ export async function loadConfig(configPath: string): Promise<Config> {
   config.transparentProxy = { ...DEFAULT_TRANSPARENT_PROXY, ...(config.transparentProxy || {}) };
   normalizeSshConfiguration(config);
   normalizeFtpConfiguration(config);
+
+  const httpErrors = validateHttpConfiguration(config);
+  if (httpErrors.length > 0) {
+    for (const error of httpErrors) console.error(`❌ ${error}`);
+    process.exit(1);
+  }
 
   const sshErrors = validateSshConfiguration(config);
   if (sshErrors.length > 0) {

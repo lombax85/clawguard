@@ -118,6 +118,40 @@ services:
   #   policy:
   #     default: require_approval
 
+  # ─── VMware ESXi SOAP API ───────────────────────────────
+  # The agent sends dummy Login credentials. ClawGuard injects the real values
+  # only after the request has been classified, keeps the upstream VMware
+  # cookie in gateway memory, and returns an opaque ClawGuard session cookie.
+  # Mutating or unrecognized SOAP methods always require one approval for that
+  # exact request, regardless of cached approvals or broader policy rules.
+  #
+  # vmware-esxi:
+  #   upstream: https://192.168.88.3             # fixed ESXi management IP
+  #   hostnames:
+  #     - esxi.clawguard.local                   # optional forwarder alias
+  #   http:
+  #     allowPrivateTarget: true                 # YAML-only explicit LAN opt-in
+  #     # Verify and record the ESXi certificate SHA-256 fingerprint through a
+  #     # trusted channel before enabling this for a self-signed certificate.
+  #     noCheckCertificate: true
+  #   auth:
+  #     type: plugin
+  #     token: "unused"
+  #     pluginPath: vmware-esxi
+  #     pluginConfig:
+  #       username: "vault:secret/data/vmware/esxi#username"
+  #       password: "vault:secret/data/vmware/esxi#password"
+  #       sessionTtlSeconds: 1800
+  #   policy:
+  #     default: require_approval
+  #     rules:
+  #       - match: { method: GET, path: /sdk/read/ }
+  #         action: auto_approve
+  #       - match: { method: POST, path: /sdk/read/ }
+  #         action: auto_approve
+  #       - match: { method: POST, path: /sdk/session/ }
+  #         action: auto_approve
+
   # ─── Experimental SSH access gateway ────────────────────
   # SSH services are YAML-only and always require one explicit Telegram
   # approval per session. The key is resolved inside ClawGuard and is never
@@ -312,6 +346,7 @@ security:
     - graph.microsoft.com
     - slack.com
     # - cloudtrail.eu-west-1.amazonaws.com   # needed for aws-cloudtrail example above
+    # - 192.168.88.3                         # fixed ESXi target; also set service.http.allowPrivateTarget
   blockPrivateIPs: true
   followRedirects: false
   maxPayloadLogSize: 10240

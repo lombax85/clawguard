@@ -10,7 +10,11 @@ import { CertManager } from './cert-manager';
 import { validateRuntimeUrl, validateUpstreamUrl, resolveAndCheckPrivateIP } from './security';
 import { rewriteRequestAuth } from './auth-rewrite';
 import { TelegramNotifier } from './telegram';
-import { applyPlugin } from './auth-plugins/apply';
+import {
+  applyPlugin,
+  applyPluginResponseHeaders,
+  describePluginRequest,
+} from './auth-plugins/apply';
 import { extractRequestMeta } from './request-meta';
 
 // ─── Discovery host tracking ─────────────────────────────────
@@ -373,7 +377,10 @@ function handleMitmRequest(
     const upstreamUrl = new URL(requestPath, serviceConfig.upstream);
 
     // SSRF check
-    const runtimeCheck = validateRuntimeUrl(upstreamUrl.toString(), serviceConfig.upstream, config.security);
+    const runtimeCheck = validateRuntimeUrl(
+      upstreamUrl.toString(), serviceConfig.upstream, config.security,
+      serviceConfig.http?.allowPrivateTarget === true
+    );
     if (!runtimeCheck.valid) {
       console.error(`🚫 SSRF blocked (MITM): ${runtimeCheck.reason}`);
       audit.logRequest({
@@ -387,9 +394,31 @@ function handleMitmRequest(
       return;
     }
 
+    // Plugin request description is side-effect free and runs before approval.
+    const incomingHeaders: Record<string, string> = {};
+    for (const [key, value] of Object.entries(req.headers)) {
+      if (typeof value === 'string') incomingHeaders[key] = value;
+      else if (Array.isArray(value)) incomingHeaders[key] = value.join(', ');
+    }
+    let approvalInfo;
+    if (serviceConfig.auth.type === 'plugin') {
+      try {
+        approvalInfo = await describePluginRequest(
+          serviceName, serviceConfig, incomingHeaders, body,
+          upstreamUrl, method, requestPath
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Unknown plugin description error';
+        console.error(`❌ Plugin request description error (MITM) for ${serviceName}: ${message}`);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: `Auth plugin description error: ${message}` }));
+        return;
+      }
+    }
+
     // Check approval
     const approved = await approvalManager.checkApproval(
-      serviceName, serviceConfig, method, requestPath, clientIp, meta
+      serviceName, serviceConfig, method, requestPath, clientIp, meta, approvalInfo
     );
 
     if (!approved) {
@@ -418,6 +447,8 @@ function handleMitmRequest(
     }
 
     let requestBody: Buffer = body;
+    let pluginRequestState: unknown;
+    let pluginAuditRequestBody: string | null | undefined;
 
     // ─── Plugin auth ─────────────────────────────────────────
     if (serviceConfig.auth.type === 'plugin') {
@@ -427,6 +458,8 @@ function handleMitmRequest(
           upstreamUrl, method, requestPath, config.security, serviceConfig.upstream
         );
         requestBody = pluginResult.body;
+        pluginRequestState = pluginResult.requestState;
+        pluginAuditRequestBody = pluginResult.auditRequestBody;
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Unknown plugin error';
         console.error(`❌ Plugin error (MITM) for ${serviceName}: ${message}`);
@@ -474,10 +507,13 @@ function handleMitmRequest(
     }
 
     forwardHeaders['host'] = upstreamUrl.host;
+    forwardHeaders['content-length'] = String(requestBody.length);
 
     // Audit: capture request body
     let requestBodyLog: string | null = null;
-    if (config.audit.logPayload && requestBody.length > 0) {
+    if (pluginAuditRequestBody !== undefined) {
+      requestBodyLog = pluginAuditRequestBody;
+    } else if (config.audit.logPayload && requestBody.length > 0) {
       const maxSize = config.security.maxPayloadLogSize || 10240;
       const bodyStr = requestBody.toString('utf-8');
       requestBodyLog = bodyStr.length > maxSize
@@ -491,16 +527,37 @@ function handleMitmRequest(
     const proxyReq = transport.request(upstreamUrl.toString(), {
       method,
       headers: forwardHeaders,
-    }, (proxyRes) => {
+      ...(isHttps && serviceConfig.http?.noCheckCertificate === true
+        ? { rejectUnauthorized: false } : {}),
+    }, async (proxyRes) => {
+      let responseHeaders: Record<string, string | string[] | undefined> = { ...proxyRes.headers };
+      let pluginAuditResponseBody: string | null | undefined;
+      if (serviceConfig.auth.type === 'plugin') {
+        try {
+          const result = await applyPluginResponseHeaders(
+            serviceName, serviceConfig, method, requestPath,
+            proxyRes.statusCode || 0, responseHeaders, pluginRequestState
+          );
+          responseHeaders = result.headers;
+          pluginAuditResponseBody = result.auditResponseBody;
+        } catch (err) {
+          proxyRes.resume();
+          const message = err instanceof Error ? err.message : 'Unknown plugin response error';
+          console.error(`❌ Plugin response error (MITM) for ${serviceName}: ${message}`);
+          res.writeHead(502, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: `Auth plugin response error: ${message}` }));
+          return;
+        }
+      }
       // Capture response for audit
       const responseChunks: Buffer[] = [];
-      if (config.audit.logPayload) {
+      if (config.audit.logPayload && pluginAuditResponseBody === undefined) {
         proxyRes.on('data', (chunk: Buffer) => responseChunks.push(chunk));
       }
 
       proxyRes.on('end', () => {
-        let responseBodyLog: string | null = null;
-        if (config.audit.logPayload && responseChunks.length > 0) {
+        let responseBodyLog: string | null = pluginAuditResponseBody ?? null;
+        if (pluginAuditResponseBody === undefined && config.audit.logPayload && responseChunks.length > 0) {
           const maxSize = config.security.maxPayloadLogSize || 10240;
           const bodyStr = Buffer.concat(responseChunks).toString('utf-8');
           responseBodyLog = bodyStr.length > maxSize
@@ -517,7 +574,7 @@ function handleMitmRequest(
 
       // Forward response headers and body
       const resHeaders: Record<string, string | string[]> = {};
-      for (const [key, value] of Object.entries(proxyRes.headers)) {
+      for (const [key, value] of Object.entries(responseHeaders)) {
         if (value) resHeaders[key] = value;
       }
       res.writeHead(proxyRes.statusCode || 502, resHeaders);
@@ -584,6 +641,7 @@ function handleDiscoveryMitm(
 
     // Discovery SSRF/runtime safety checks:
     // 1) allowlist + protocol checks
+    // Discovery never inherits a configured service's private-target opt-in.
     const upstreamCheck = validateUpstreamUrl(upstreamUrl.toString(), config.security);
     if (!upstreamCheck.valid) {
       audit.logRequest({

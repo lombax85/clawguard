@@ -73,6 +73,22 @@ function rejectNonHttpServiceMutation(service: Partial<ServiceConfig> | undefine
   return true;
 }
 
+function hasSensitiveHttpTargetException(service: Partial<ServiceConfig> | undefined): boolean {
+  return service?.http?.allowPrivateTarget === true
+    || service?.http?.noCheckCertificate === true;
+}
+
+function rejectSensitiveHttpTargetMutation(
+  service: Partial<ServiceConfig> | undefined,
+  res: Response
+): boolean {
+  if (!hasSensitiveHttpTargetException(service)) return false;
+  res.status(403).json({
+    error: 'HTTP private-target and TLS verification exceptions are YAML-only',
+  });
+  return true;
+}
+
 export function createAdminRouter(
   config: Config,
   approvalManager: ApprovalManager,
@@ -186,7 +202,7 @@ export function createAdminRouter(
         hostnames: svc.hostnames,
         ssh: svc.ssh,
         ftp: svc.ftp,
-        yamlOnly: (svc.protocol ?? 'http') !== 'http',
+        yamlOnly: (svc.protocol ?? 'http') !== 'http' || hasSensitiveHttpTargetException(svc),
       };
     }
     res.json(services);
@@ -208,7 +224,8 @@ export function createAdminRouter(
       return;
     }
 
-    if (rejectNonHttpServiceMutation(body.config, res)) return;
+    if (rejectNonHttpServiceMutation(body.config, res)
+      || rejectSensitiveHttpTargetMutation(body.config, res)) return;
 
     if (config.services[body.name]) {
       res.status(409).json({ error: `Service "${body.name}" already exists` });
@@ -216,7 +233,11 @@ export function createAdminRouter(
     }
 
     // Validate upstream
-    const validation = validateUpstreamUrl(body.config.upstream, config.security);
+    const validation = validateUpstreamUrl(
+      body.config.upstream,
+      config.security,
+      body.config.http?.allowPrivateTarget === true
+    );
     if (!validation.valid) {
       res.status(400).json({ error: validation.reason });
       return;
@@ -247,7 +268,9 @@ export function createAdminRouter(
     }
 
     if (rejectNonHttpServiceMutation(config.services[name], res)
-      || rejectNonHttpServiceMutation(body.config, res)) return;
+      || rejectNonHttpServiceMutation(body.config, res)
+      || rejectSensitiveHttpTargetMutation(config.services[name], res)
+      || rejectSensitiveHttpTargetMutation(body.config, res)) return;
 
     // Merge with existing
     const updated: ServiceConfig = {
@@ -259,7 +282,11 @@ export function createAdminRouter(
 
     // Validate upstream if changed
     if (body.config?.upstream) {
-      const validation = validateUpstreamUrl(body.config.upstream, config.security);
+      const validation = validateUpstreamUrl(
+        body.config.upstream,
+        config.security,
+        body.config.http?.allowPrivateTarget === true
+      );
       if (!validation.valid) {
         res.status(400).json({ error: validation.reason });
         return;
@@ -281,7 +308,8 @@ export function createAdminRouter(
       return;
     }
 
-    if (rejectNonHttpServiceMutation(config.services[name], res)) return;
+    if (rejectNonHttpServiceMutation(config.services[name], res)
+      || rejectSensitiveHttpTargetMutation(config.services[name], res)) return;
 
     audit.deleteServiceOverride(name);
     delete config.services[name];

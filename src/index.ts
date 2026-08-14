@@ -60,7 +60,11 @@ async function main() {
       if ((config.services[name]?.protocol ?? 'http') !== 'http'
         || (svcConfig.protocol ?? 'http') !== 'http'
         || svcConfig.ssh !== undefined
-        || svcConfig.ftp !== undefined) {
+        || svcConfig.ftp !== undefined
+        || config.services[name]?.http?.allowPrivateTarget === true
+        || config.services[name]?.http?.noCheckCertificate === true
+        || svcConfig.http?.allowPrivateTarget === true
+        || svcConfig.http?.noCheckCertificate === true) {
         console.warn(`   ⚠️  Service override ignored: ${name} (protocol gateways are YAML-only)`);
         continue;
       }
@@ -69,7 +73,11 @@ async function main() {
         continue;
       }
       // Validate override against current allowlist
-      const validation = validateUpstreamUrl(svcConfig.upstream, config.security);
+      const validation = validateUpstreamUrl(
+        svcConfig.upstream,
+        config.security,
+        false
+      );
       if (!validation.valid) {
         console.warn(`   ⚠️  Service override skipped: ${name} — ${validation.reason}`);
         console.warn(`      Add "${new URL(svcConfig.upstream).hostname}" to security.allowedUpstreams in clawguard.yaml to enable it`);

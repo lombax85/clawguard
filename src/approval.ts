@@ -1,4 +1,11 @@
-import { Approval, ServiceConfig, PolicyRule, RequestMeta, FtpAccessMode } from './types';
+import {
+  Approval,
+  ServiceConfig,
+  PolicyRule,
+  RequestMeta,
+  RequestApprovalInfo,
+  FtpAccessMode,
+} from './types';
 import { TelegramNotifier } from './telegram';
 import { WebhookNotifier } from './webhook';
 import { AuditLogger } from './audit';
@@ -133,19 +140,26 @@ export class ApprovalManager {
     method: string,
     path: string,
     agentIp: string,
-    meta?: RequestMeta
+    meta?: RequestMeta,
+    approvalInfo?: RequestApprovalInfo
   ): Promise<boolean> {
-    const action = this.getAction(serviceConfig, method, path);
+    const approvalPath = approvalInfo?.approvalPath || path;
+    const oneTime = approvalInfo?.oneTime === true;
+    const action = oneTime
+      ? 'require_approval'
+      : this.getAction(serviceConfig, method, approvalPath);
 
     // Auto-approve based on policy
     if (action === 'auto_approve') {
-      console.log(`✅ Auto-approved: ${method} ${service}${path}`);
-      this.telegram?.notifyAutoApproved(service, method, path, agentIp, 'policy:auto_approve', meta);
+      console.log(`✅ Auto-approved: ${method} ${service}${approvalPath}`);
+      this.telegram?.notifyAutoApproved(
+        service, method, approvalPath, agentIp, 'policy:auto_approve', meta, approvalInfo
+      );
       return true;
     }
 
     // Check existing approval (exact path first, then method-wide)
-    const existing = this.findActiveApproval(service, method, path);
+    const existing = oneTime ? null : this.findActiveApproval(service, method, approvalPath);
     if (existing) {
       const remaining = Math.round((existing.expiresAt - Date.now()) / 1000 / 60);
       const scope = existing.path ? `path=${existing.path}` : 'method-wide';
@@ -153,16 +167,22 @@ export class ApprovalManager {
       const reason = existing.path
         ? `approval:path (${remaining}min left)`
         : `approval:method-wide (${remaining}min left)`;
-      this.telegram?.notifyAutoApproved(service, method, path, agentIp, reason, meta);
+      this.telegram?.notifyAutoApproved(
+        service, method, approvalPath, agentIp, reason, meta, approvalInfo
+      );
       return true;
     }
 
     // Request new approval
-    console.log(`🔔 Requesting approval for: ${method} ${service}${path}`);
+    console.log(`🔔 Requesting approval for: ${method} ${service}${approvalPath}`);
 
     // No notification channel configured — auto-approve (test/dev mode)
     // The webhook is informational-only and cannot approve, so it doesn't count here.
     if (!this.telegram) {
+      if (oneTime) {
+        console.log(`❌ One-time request denied for ${service}: Telegram is not configured`);
+        return false;
+      }
       console.log(`✅ Auto-approved (no notification channel): ${method} ${service}${path}`);
       const approval: Approval = {
         service,
@@ -180,7 +200,9 @@ export class ApprovalManager {
     const requestId = generateRequestId();
 
     // Fire-and-forget side notification (e.g. user-defined webhook integration)
-    this.webhook?.notifyApprovalRequired(requestId, service, method, path, agentIp, meta);
+    this.webhook?.notifyApprovalRequired(
+      requestId, service, method, approvalPath, agentIp, meta, approvalInfo
+    );
 
     const timeoutPromise = new Promise<{ approved: boolean; ttlSeconds: number; approvedBy: string; pathScoped: boolean }>((resolve) => {
       setTimeout(() => {
@@ -190,7 +212,9 @@ export class ApprovalManager {
     });
 
     const result = await Promise.race([
-      this.telegram.requestApproval(requestId, service, method, path, agentIp, meta),
+      this.telegram.requestApproval(
+        requestId, service, method, approvalPath, agentIp, meta, approvalInfo
+      ),
       timeoutPromise,
     ]);
 
@@ -198,7 +222,11 @@ export class ApprovalManager {
     this.webhook?.notifyApprovalResolved(requestId, result.approved, result.approvedBy);
 
     if (result.approved) {
-      const scopedPath = result.pathScoped ? path : null;
+      if (oneTime) {
+        console.log(`✅ One-time request approved by ${result.approvedBy} for ${service} ${approvalPath}`);
+        return true;
+      }
+      const scopedPath = result.pathScoped ? approvalPath : null;
       const approval: Approval = {
         service,
         method: method.toUpperCase(),

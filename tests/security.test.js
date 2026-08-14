@@ -56,6 +56,26 @@ test('validateUpstreamUrl rejects private IP when blockPrivateIPs=true', () => {
   assert.match(result.reason || '', /private IP/i);
 });
 
+test('validateUpstreamUrl allows one explicitly opted-in private HTTP target', () => {
+  const result = validateUpstreamUrl('https://192.168.88.3/sdk', {
+    ...baseSecurity,
+    allowedUpstreams: ['192.168.88.3'],
+  }, true);
+  assert.equal(result.valid, true);
+});
+
+test('validateRuntimeUrl keeps private-target opt-in pinned to configured host', () => {
+  const security = { ...baseSecurity, allowedUpstreams: ['192.168.88.3', '192.168.88.4'] };
+  assert.equal(validateRuntimeUrl(
+    'https://192.168.88.3/sdk', 'https://192.168.88.3', security, true
+  ).valid, true);
+  const mismatch = validateRuntimeUrl(
+    'https://192.168.88.4/sdk', 'https://192.168.88.3', security, true
+  );
+  assert.equal(mismatch.valid, false);
+  assert.match(mismatch.reason || '', /Path traversal detected/);
+});
+
 test('validateRuntimeUrl rejects host mismatch (path traversal protection)', () => {
   const result = validateRuntimeUrl(
     'https://evil.com/api',

@@ -65,7 +65,8 @@ export function isAllowedUpstream(hostname: string, allowedUpstreams: string[]):
 
 export function validateUpstreamUrl(
   urlString: string,
-  security: SecurityConfig
+  security: SecurityConfig,
+  allowPrivateTarget: boolean = false
 ): { valid: boolean; reason?: string } {
   let parsed: URL;
   try {
@@ -83,7 +84,7 @@ export function validateUpstreamUrl(
   }
 
   // Check private IPs
-  if (security.blockPrivateIPs && isPrivateIP(parsed.hostname)) {
+  if (security.blockPrivateIPs && isPrivateIP(parsed.hostname) && !allowPrivateTarget) {
     return {
       valid: false,
       reason: `Upstream "${parsed.hostname}" resolves to a private IP (blocked by security policy)`,
@@ -337,7 +338,11 @@ export function validateAllUpstreams(config: Config): void {
       ? validateSshService(service, security)
       : service.protocol === 'ftp' || service.protocol === 'ftps'
         ? validateFtpService(service, security)
-        : validateUpstreamUrl(service.upstream, security);
+        : validateUpstreamUrl(
+          service.upstream,
+          security,
+          service.http?.allowPrivateTarget === true
+        );
     if (!result.valid) {
       console.error(`❌ Security violation for service "${name}": ${result.reason}`);
       process.exit(1);
@@ -370,7 +375,8 @@ export function validateAllUpstreams(config: Config): void {
 export function validateRuntimeUrl(
   constructedUrl: string,
   originalUpstream: string,
-  security: SecurityConfig
+  security: SecurityConfig,
+  allowPrivateTarget: boolean = false
 ): { valid: boolean; reason?: string } {
   let constructed: URL;
   let original: URL;
@@ -391,7 +397,7 @@ export function validateRuntimeUrl(
   }
 
   // Re-validate against security policy
-  return validateUpstreamUrl(constructedUrl, security);
+  return validateUpstreamUrl(constructedUrl, security, allowPrivateTarget);
 }
 
 /**

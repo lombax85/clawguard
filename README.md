@@ -61,6 +61,11 @@ Agent Machine (untrusted)          Secure Machine (trusted)
   host-key-pinned; each FTP lease is explicitly approved as read-only or
   read/write.
 
+- **VMware ESXi action approvals** — The built-in SOAP plugin shows the parsed
+  operation, risk, managed-object reference and safe parameters before a
+  decision. Mutations are one-request approvals, while VMware credentials and
+  the real session cookie stay on ClawGuard.
+
 - **Self-installing on agents** — Give your OpenClaw agent the [installation guide](./openclaw/INSTALL.md) and it sets up its own ClawGuard connection — no manual agent-side configuration needed.
 
 - **Docker-first, separate machine** — ClawGuard runs in Docker on a machine the agent can't access. A Raspberry Pi, a NAS, a VPS — anything reachable over HTTP but not via SSH. This is critical: if the agent can read ClawGuard's config, the whole model breaks.
@@ -611,6 +616,83 @@ real FTP/FTPS E2E test.
 
 ---
 
+## VMware ESXi SOAP gateway
+
+The built-in `vmware-esxi` auth plugin supports clients such as pyVmomi without
+giving the agent the ESXi password or its real `vmware_soap_session` cookie.
+The client logs in with placeholders; after ClawGuard classifies the SOAP body,
+the plugin replaces only the `Login` username/password and forwards the request
+to the fixed ESXi `/sdk` endpoint. The upstream cookie is retained in gateway
+memory and represented to the client by a random
+`clawguard_esxi_session` cookie. Restarting ClawGuard invalidates these opaque
+sessions.
+
+Approval messages are derived from the request that will be sent upstream and
+can include:
+
+- a friendly action and the authoritative SOAP method;
+- risk (`read`, `session`, `write`, `destructive`, or `unknown`);
+- managed-object references such as `VirtualMachine vm-42`;
+- safe operation parameters such as snapshot name, quiesce, memory, vCPU, or
+  guest OS values;
+- caller provenance from `X-ClawGuard-User` and `X-ClawGuard-Reason`.
+
+Read-only and session operations can be auto-approved by policy. Every write,
+destructive, oversized, empty, or unrecognized SOAP operation is forced to one
+fresh Telegram decision for that exact request: it cannot use a cached approval
+and the decision is not persisted. Ticket/session-export methods such as
+`AcquireCloneTicket`, `AcquireGenericServiceTicket`, `CloneSession`, and
+impersonation/token login are blocked.
+
+Configure the service only in `clawguard.yaml`; private-target and TLS
+verification exceptions are intentionally YAML-only and cannot be added,
+changed, or deleted through admin service overrides:
+
+```yaml
+services:
+  vmware-esxi:
+    upstream: https://192.168.88.3
+    hostnames: [esxi.clawguard.local]
+    http:
+      allowPrivateTarget: true
+      noCheckCertificate: true
+    auth:
+      type: plugin
+      token: unused
+      pluginPath: vmware-esxi
+      pluginConfig:
+        username: "vault:secret/data/vmware/esxi#username"
+        password: "vault:secret/data/vmware/esxi#password"
+        sessionTtlSeconds: 1800
+    policy:
+      default: require_approval
+      rules:
+        - match: { method: GET, path: /sdk/read/ }
+          action: auto_approve
+        - match: { method: POST, path: /sdk/read/ }
+          action: auto_approve
+        - match: { method: POST, path: /sdk/session/ }
+          action: auto_approve
+
+security:
+  allowedUpstreams: [192.168.88.3]
+```
+
+Keep `blockPrivateIPs: true` globally: `http.allowPrivateTarget` opens only the
+configured service's fixed private host, and runtime URL validation prevents a
+plugin or redirect from changing it. `noCheckCertificate` affects only this
+HTTPS upstream. Before enabling it for a self-signed ESXi certificate, compare
+and record the certificate SHA-256 fingerprint through a trusted channel.
+Prefer a trusted internal CA when available.
+
+For transparent host routing, map the agent-side forwarder alias to the service
+name (for example `esxi.clawguard.local: vmware-esxi`) and make the client use
+`https://esxi.clawguard.local/sdk`. The opaque cookie is `Secure`, so the client
+leg must use HTTPS. The credentials in the client's SOAP `Login` body remain
+dummy values.
+
+---
+
 ## Try It: Safe First Test with httpbin
 
 Before connecting real services, test the full approval flow with [httpbin.org](https://httpbin.org) — a free echo API that mirrors back your request. No signup, no API key, works instantly. The best part: httpbin's `/headers` endpoint shows you exactly what headers ClawGuard injected.
@@ -635,7 +717,7 @@ security:
     # ... your other domains
 ```
 
-> ClawGuard supports several auth injection modes: `bearer`, `header`, `query`, `basic`, `url`, `oauth2_client_credentials`, `body_json`, and `plugin`. Built-in plugins include `oauth2-authcode` and `aws-sigv4` for APIs such as AWS CloudTrail.
+> ClawGuard supports several auth injection modes: `bearer`, `header`, `query`, `basic`, `url`, `oauth2_client_credentials`, `body_json`, and `plugin`. Built-in plugins include `oauth2-authcode`, `aws-sigv4`, and `vmware-esxi`.
 
 ### OAuth2 auth-code services: Microsoft Graph / Outlook
 

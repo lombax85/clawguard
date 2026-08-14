@@ -19,6 +19,13 @@ export interface SshServiceConfig {
 
 export type FtpTlsMode = 'explicit' | 'implicit';
 
+export interface HttpServiceConfig {
+  // Private/link-local/loopback literals require this explicit per-service opt-in.
+  allowPrivateTarget?: boolean;
+  // Explicit upstream-only escape hatch for private/self-signed HTTPS services.
+  noCheckCertificate?: boolean;
+}
+
 export interface FtpServiceConfig {
   // Private/link-local/loopback literals and DNS answers require this explicit opt-in.
   allowPrivateTarget: boolean;
@@ -63,6 +70,7 @@ export interface ServiceConfig {
     rules?: PolicyRule[];
   };
   hostnames?: string[]; // for host-based routing (forward proxy / /etc/hosts mode)
+  http?: HttpServiceConfig;
   ssh?: SshServiceConfig;
   ftp?: FtpServiceConfig;
 }
@@ -124,6 +132,19 @@ export interface TelegramConfig {
 export interface RequestMeta {
   user?: string;    // who triggered the request (name/email)
   reason?: string;  // short description of what the request does
+}
+
+// Optional, plugin-derived and already sanitized context for a human approval.
+// `approvalPath` is a logical scope used for policy/cache matching; `path`
+// remains the real upstream path used for forwarding and audit.
+export interface RequestApprovalInfo {
+  approvalPath?: string;
+  action?: string;
+  risk?: 'read' | 'session' | 'write' | 'destructive' | 'unknown';
+  target?: string;
+  details?: Array<{ label: string; value: string }>;
+  // Force a fresh, non-persisted decision for exactly the waiting request.
+  oneTime?: boolean;
 }
 
 // ─── Outbound webhook (fire-and-forget side notification) ──
