@@ -1,6 +1,6 @@
 import nodePath from 'path';
 import { URL } from 'url';
-import { ServiceConfig, SecurityConfig } from '../types';
+import { RequestApprovalInfo, ServiceConfig, SecurityConfig } from '../types';
 import { validateRuntimeUrl } from '../security';
 import { getPlugin, getPluginDataDir } from './loader';
 
@@ -8,6 +8,83 @@ export interface PluginApplyResult {
   headers: Record<string, string>;
   body: Buffer;
   upstreamUrl: URL;
+  requestState?: unknown;
+  auditRequestBody?: string | null;
+}
+
+export interface PluginResponseHeadersResult {
+  headers: Record<string, string | string[] | undefined>;
+  auditResponseBody?: string | null;
+}
+
+function pluginContext(
+  serviceName: string,
+  serviceConfig: ServiceConfig,
+  headers: Record<string, string>,
+  body: Buffer,
+  upstreamUrl: URL,
+  method: string,
+  path: string
+) {
+  const plugin = getPlugin(serviceName);
+  if (!plugin) {
+    throw new Error(`Plugin not loaded for service "${serviceName}". Cannot forward without auth.`);
+  }
+  return {
+    plugin,
+    context: {
+      serviceName,
+      method,
+      path,
+      headers: { ...headers },
+      body,
+      upstreamUrl: upstreamUrl.toString(),
+      dataDir: getPluginDataDir(plugin.name, nodePath.resolve('data/plugins')),
+      config: serviceConfig.auth.pluginConfig || {},
+    },
+  };
+}
+
+export async function describePluginRequest(
+  serviceName: string,
+  serviceConfig: ServiceConfig,
+  headers: Record<string, string>,
+  body: Buffer,
+  upstreamUrl: URL,
+  method: string,
+  path: string
+): Promise<RequestApprovalInfo | undefined> {
+  const { plugin, context } = pluginContext(
+    serviceName, serviceConfig, headers, body, upstreamUrl, method, path
+  );
+  if (!plugin.describeRequest) return undefined;
+  return plugin.describeRequest(context);
+}
+
+export async function applyPluginResponseHeaders(
+  serviceName: string,
+  serviceConfig: ServiceConfig,
+  method: string,
+  path: string,
+  statusCode: number,
+  headers: Record<string, string | string[] | undefined>,
+  requestState?: unknown
+): Promise<PluginResponseHeadersResult> {
+  const plugin = getPlugin(serviceName);
+  if (!plugin) {
+    throw new Error(`Plugin not loaded for service "${serviceName}". Cannot forward without auth.`);
+  }
+  if (!plugin.rewriteResponseHeaders) return { headers };
+  return plugin.rewriteResponseHeaders({
+    serviceName,
+    method,
+    path,
+    statusCode,
+    headers: { ...headers },
+    requestState,
+    dataDir: getPluginDataDir(plugin.name, nodePath.resolve('data/plugins')),
+    config: serviceConfig.auth.pluginConfig || {},
+  });
 }
 
 /**
@@ -26,22 +103,10 @@ export async function applyPlugin(
   security: SecurityConfig,
   configuredUpstream: string
 ): Promise<PluginApplyResult> {
-  const plugin = getPlugin(serviceName);
-  if (!plugin) {
-    throw new Error(`Plugin not loaded for service "${serviceName}". Cannot forward without auth.`);
-  }
-
-  const pluginDataDir = getPluginDataDir(plugin.name, nodePath.resolve('data/plugins'));
-  const result = await plugin.rewriteRequest({
-    serviceName,
-    method,
-    path,
-    headers: { ...forwardHeaders },  // defensive copy — plugin cannot mutate caller's headers
-    body: requestBody,
-    upstreamUrl: upstreamUrl.toString(),
-    dataDir: pluginDataDir,
-    config: serviceConfig.auth.pluginConfig || {},
-  });
+  const { plugin, context } = pluginContext(
+    serviceName, serviceConfig, forwardHeaders, requestBody, upstreamUrl, method, path
+  );
+  const result = await plugin.rewriteRequest(context);
 
   Object.assign(forwardHeaders, result.headers);
   requestBody = result.body;
@@ -62,7 +127,10 @@ export async function applyPlugin(
     upstreamUrl.password = '';
 
     // Re-validate after plugin override to prevent SSRF bypass
-    const recheck = validateRuntimeUrl(upstreamUrl.toString(), configuredUpstream, security);
+    const recheck = validateRuntimeUrl(
+      upstreamUrl.toString(), configuredUpstream, security,
+      serviceConfig.http?.allowPrivateTarget === true
+    );
     if (!recheck.valid) {
       throw new Error(`Plugin URL override blocked by security policy: ${recheck.reason}`);
     }
@@ -70,5 +138,11 @@ export async function applyPlugin(
 
   console.log(`   🔌 Plugin "${plugin.name}" applied for ${serviceName}`);
 
-  return { headers: forwardHeaders, body: requestBody, upstreamUrl };
+  return {
+    headers: forwardHeaders,
+    body: requestBody,
+    upstreamUrl,
+    requestState: result.requestState,
+    auditRequestBody: result.auditRequestBody,
+  };
 }

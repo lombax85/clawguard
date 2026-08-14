@@ -19,7 +19,7 @@ function sanitizePluginName(name: string): string {
 }
 
 /** Built-in plugin names that ship with ClawGuard */
-const BUILTIN_PLUGINS = new Set(['echo', 'oauth2-authcode', 'aws-sigv4']);
+const BUILTIN_PLUGINS = new Set(['echo', 'oauth2-authcode', 'aws-sigv4', 'vmware-esxi']);
 
 /**
  * Resolves a plugin module path.

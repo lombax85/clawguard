@@ -9,7 +9,11 @@ import { TelegramNotifier } from './telegram';
 import { createAdminRouter } from './admin';
 import { validateRuntimeUrl } from './security';
 import { rewriteRequestAuth } from './auth-rewrite';
-import { applyPlugin } from './auth-plugins/apply';
+import {
+  applyPlugin,
+  applyPluginResponseHeaders,
+  describePluginRequest,
+} from './auth-plugins/apply';
 import { extractRequestMeta } from './request-meta';
 import { preserveRawBody } from './raw-body';
 import { FtpBroker } from './ftp-broker';
@@ -267,17 +271,43 @@ export function handleHostProxy(
     // ─── SSRF check ──────────────────────────────────────────
 
     const upstreamUrl = new URL(upstreamPath, serviceConfig.upstream);
-    const runtimeCheck = validateRuntimeUrl(upstreamUrl.toString(), serviceConfig.upstream, config.security);
+    const runtimeCheck = validateRuntimeUrl(
+      upstreamUrl.toString(), serviceConfig.upstream, config.security,
+      serviceConfig.http?.allowPrivateTarget === true
+    );
     if (!runtimeCheck.valid) {
       console.error(`🚫 SSRF blocked (host-mode): ${runtimeCheck.reason}`);
       res.status(403).json({ error: 'Request blocked by security policy' });
       return;
     }
 
+    // ─── Plugin request description (no auth injection) ─────
+
+    const incomingHeaders: Record<string, string> = {};
+    for (const [key, value] of Object.entries(req.headers)) {
+      if (typeof value === 'string') incomingHeaders[key] = value;
+      else if (Array.isArray(value)) incomingHeaders[key] = value.join(', ');
+    }
+    const incomingBody = (req.body && Buffer.isBuffer(req.body)) ? req.body : Buffer.alloc(0);
+    let approvalInfo;
+    if (serviceConfig.auth.type === 'plugin') {
+      try {
+        approvalInfo = await describePluginRequest(
+          serviceName, serviceConfig, incomingHeaders, incomingBody,
+          upstreamUrl, req.method, upstreamPath
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Unknown plugin description error';
+        console.error(`❌ Plugin request description error (host-mode) for ${serviceName}: ${message}`);
+        res.status(500).json({ error: `Auth plugin description error: ${message}` });
+        return;
+      }
+    }
+
     // ─── Approval ────────────────────────────────────────────
 
     const approved = await approvalManager.checkApproval(
-      serviceName, serviceConfig, req.method, upstreamPath, agentIp, meta
+      serviceName, serviceConfig, req.method, upstreamPath, agentIp, meta, approvalInfo
     );
 
     if (!approved) {
@@ -307,7 +337,9 @@ export function handleHostProxy(
         else if (Array.isArray(value)) forwardHeaders[key] = value.join(', ');
       }
 
-      let requestBody = (req.body && Buffer.isBuffer(req.body)) ? req.body : Buffer.alloc(0);
+      let requestBody = incomingBody;
+      let pluginRequestState: unknown;
+      let pluginAuditRequestBody: string | null | undefined;
 
       // ─── Plugin auth ─────────────────────────────────────────
       if (serviceConfig.auth.type === 'plugin') {
@@ -317,6 +349,8 @@ export function handleHostProxy(
             upstreamUrl, req.method, upstreamPath, config.security, serviceConfig.upstream
           );
           requestBody = pluginResult.body;
+          pluginRequestState = pluginResult.requestState;
+          pluginAuditRequestBody = pluginResult.auditRequestBody;
         } catch (err) {
           const message = err instanceof Error ? err.message : 'Unknown plugin error';
           console.error(`❌ Plugin error (host-mode) for ${serviceName}: ${message}`);
@@ -347,9 +381,12 @@ export function handleHostProxy(
       }
 
       forwardHeaders['host'] = upstreamUrl.host;
+      forwardHeaders['content-length'] = String(requestBody.length);
 
       let requestBodyLog: string | null = null;
-      if (config.audit.logPayload && requestBody.length > 0) {
+      if (pluginAuditRequestBody !== undefined) {
+        requestBodyLog = pluginAuditRequestBody;
+      } else if (config.audit.logPayload && requestBody.length > 0) {
         const maxSize = config.security.maxPayloadLogSize || 10240;
         const bodyStr = requestBody.toString('utf-8');
         requestBodyLog = bodyStr.length > maxSize
@@ -357,15 +394,36 @@ export function handleHostProxy(
       }
 
       const proxyReq = transport.request(upstreamUrl.toString(), {
-        method: req.method, headers: forwardHeaders,
-      }, (proxyRes) => {
+        method: req.method,
+        headers: forwardHeaders,
+        ...(isHttps && serviceConfig.http?.noCheckCertificate === true
+          ? { rejectUnauthorized: false } : {}),
+      }, async (proxyRes) => {
+        let responseHeaders: Record<string, string | string[] | undefined> = { ...proxyRes.headers };
+        let pluginAuditResponseBody: string | null | undefined;
+        if (serviceConfig.auth.type === 'plugin') {
+          try {
+            const result = await applyPluginResponseHeaders(
+              serviceName, serviceConfig, req.method, upstreamPath,
+              proxyRes.statusCode || 0, responseHeaders, pluginRequestState
+            );
+            responseHeaders = result.headers;
+            pluginAuditResponseBody = result.auditResponseBody;
+          } catch (err) {
+            proxyRes.resume();
+            const message = err instanceof Error ? err.message : 'Unknown plugin response error';
+            console.error(`❌ Plugin response error (host-mode) for ${serviceName}: ${message}`);
+            res.status(502).json({ error: `Auth plugin response error: ${message}` });
+            return;
+          }
+        }
         const responseChunks: Buffer[] = [];
-        if (config.audit.logPayload) {
+        if (config.audit.logPayload && pluginAuditResponseBody === undefined) {
           proxyRes.on('data', (chunk: Buffer) => responseChunks.push(chunk));
         }
         proxyRes.on('end', () => {
-          let responseBodyLog: string | null = null;
-          if (config.audit.logPayload && responseChunks.length > 0) {
+          let responseBodyLog: string | null = pluginAuditResponseBody ?? null;
+          if (pluginAuditResponseBody === undefined && config.audit.logPayload && responseChunks.length > 0) {
             const maxSize = config.security.maxPayloadLogSize || 10240;
             const bodyStr = Buffer.concat(responseChunks).toString('utf-8');
             responseBodyLog = bodyStr.length > maxSize
@@ -381,7 +439,7 @@ export function handleHostProxy(
         });
 
         res.status(proxyRes.statusCode || 502);
-        for (const [key, value] of Object.entries(proxyRes.headers)) {
+        for (const [key, value] of Object.entries(responseHeaders)) {
           if (value) res.setHeader(key, value as string | string[]);
         }
         proxyRes.pipe(res);
@@ -469,7 +527,10 @@ function handleProxy(
     // ─── SSRF check: validate constructed URL ───────────────
 
     const upstreamUrl = new URL(upstreamPath, serviceConfig.upstream);
-    const runtimeCheck = validateRuntimeUrl(upstreamUrl.toString(), serviceConfig.upstream, config.security);
+    const runtimeCheck = validateRuntimeUrl(
+      upstreamUrl.toString(), serviceConfig.upstream, config.security,
+      serviceConfig.http?.allowPrivateTarget === true
+    );
     if (!runtimeCheck.valid) {
       console.error(`🚫 SSRF blocked: ${runtimeCheck.reason}`);
       audit.logRequest({
@@ -487,6 +548,35 @@ function handleProxy(
       return;
     }
 
+    // ─── Plugin request description (no auth injection) ─────
+
+    const incomingHeaders: Record<string, string> = {};
+    for (const [key, value] of Object.entries(req.headers)) {
+      if (typeof value === 'string') incomingHeaders[key] = value;
+      else if (Array.isArray(value)) incomingHeaders[key] = value.join(', ');
+    }
+    const incomingBody = (req.body && Buffer.isBuffer(req.body)) ? req.body : Buffer.alloc(0);
+    let approvalInfo;
+    if (serviceConfig.auth.type === 'plugin') {
+      try {
+        approvalInfo = await describePluginRequest(
+          serviceName, serviceConfig, incomingHeaders, incomingBody,
+          upstreamUrl, req.method, upstreamPath
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Unknown plugin description error';
+        console.error(`❌ Plugin request description error for ${serviceName}: ${message}`);
+        audit.logRequest({
+          timestamp: new Date().toISOString(), service: serviceName,
+          method: req.method, path: upstreamPath, approved: false,
+          responseStatus: 500, agentIp,
+          requestUser: meta.user, requestReason: meta.reason,
+        });
+        res.status(500).json({ error: `Auth plugin description error: ${message}` });
+        return;
+      }
+    }
+
     // ─── Check approval ─────────────────────────────────────
 
     const approved = await approvalManager.checkApproval(
@@ -495,7 +585,8 @@ function handleProxy(
       req.method,
       upstreamPath,
       agentIp,
-      meta
+      meta,
+      approvalInfo
     );
 
     if (!approved) {
@@ -535,7 +626,9 @@ function handleProxy(
       }
 
       // Rewrite body for oauth2_client_credentials (replaces dummy secrets with real ones)
-      let requestBody = (req.body && Buffer.isBuffer(req.body)) ? req.body : Buffer.alloc(0);
+      let requestBody = incomingBody;
+      let pluginRequestState: unknown;
+      let pluginAuditRequestBody: string | null | undefined;
 
       // ─── Plugin auth ─────────────────────────────────────────
       if (serviceConfig.auth.type === 'plugin') {
@@ -545,6 +638,8 @@ function handleProxy(
             upstreamUrl, req.method, upstreamPath, config.security, serviceConfig.upstream
           );
           requestBody = pluginResult.body;
+          pluginRequestState = pluginResult.requestState;
+          pluginAuditRequestBody = pluginResult.auditRequestBody;
         } catch (err) {
           const message = err instanceof Error ? err.message : 'Unknown plugin error';
           console.error(`❌ Plugin error for ${serviceName}: ${message}`);
@@ -581,10 +676,13 @@ function handleProxy(
       }
 
       forwardHeaders['host'] = upstreamUrl.host;
+      forwardHeaders['content-length'] = String(requestBody.length);
 
       // Capture request body for audit
       let requestBodyLog: string | null = null;
-      if (config.audit.logPayload && requestBody.length > 0) {
+      if (pluginAuditRequestBody !== undefined) {
+        requestBodyLog = pluginAuditRequestBody;
+      } else if (config.audit.logPayload && requestBody.length > 0) {
         const maxSize = config.security.maxPayloadLogSize || 10240;
         const bodyStr = requestBody.toString('utf-8');
         requestBodyLog = bodyStr.length > maxSize
@@ -597,8 +695,34 @@ function handleProxy(
         {
           method: req.method,
           headers: forwardHeaders,
+          ...(isHttps && serviceConfig.http?.noCheckCertificate === true
+            ? { rejectUnauthorized: false } : {}),
         },
-        (proxyRes) => {
+        async (proxyRes) => {
+          let responseHeaders: Record<string, string | string[] | undefined> = { ...proxyRes.headers };
+          let pluginAuditResponseBody: string | null | undefined;
+          if (serviceConfig.auth.type === 'plugin') {
+            try {
+              const result = await applyPluginResponseHeaders(
+                serviceName, serviceConfig, req.method, upstreamPath,
+                proxyRes.statusCode || 0, responseHeaders, pluginRequestState
+              );
+              responseHeaders = result.headers;
+              pluginAuditResponseBody = result.auditResponseBody;
+            } catch (err) {
+              proxyRes.resume();
+              const message = err instanceof Error ? err.message : 'Unknown plugin response error';
+              console.error(`❌ Plugin response error for ${serviceName}: ${message}`);
+              audit.logRequest({
+                timestamp: new Date().toISOString(), service: serviceName,
+                method: req.method, path: upstreamPath, approved: true,
+                responseStatus: 502, agentIp, requestBody: requestBodyLog,
+                requestUser: meta.user, requestReason: meta.reason,
+              });
+              res.status(502).json({ error: `Auth plugin response error: ${message}` });
+              return;
+            }
+          }
           // Don't follow redirects if disabled
           if (!config.security.followRedirects && proxyRes.statusCode && proxyRes.statusCode >= 300 && proxyRes.statusCode < 400) {
             const location = proxyRes.headers['location'];
@@ -606,7 +730,8 @@ function handleProxy(
               const redirectCheck = validateRuntimeUrl(
                 new URL(location, upstreamUrl.toString()).toString(),
                 serviceConfig.upstream,
-                config.security
+                config.security,
+                serviceConfig.http?.allowPrivateTarget === true
               );
               if (!redirectCheck.valid) {
                 console.error(`🚫 Redirect blocked: ${redirectCheck.reason}`);
@@ -630,15 +755,15 @@ function handleProxy(
 
           // Capture response body for audit
           const responseChunks: Buffer[] = [];
-          if (config.audit.logPayload) {
+          if (config.audit.logPayload && pluginAuditResponseBody === undefined) {
             proxyRes.on('data', (chunk: Buffer) => {
               responseChunks.push(chunk);
             });
           }
 
           proxyRes.on('end', () => {
-            let responseBodyLog: string | null = null;
-            if (config.audit.logPayload && responseChunks.length > 0) {
+            let responseBodyLog: string | null = pluginAuditResponseBody ?? null;
+            if (pluginAuditResponseBody === undefined && config.audit.logPayload && responseChunks.length > 0) {
               const maxSize = config.security.maxPayloadLogSize || 10240;
               const bodyStr = Buffer.concat(responseChunks).toString('utf-8');
               responseBodyLog = bodyStr.length > maxSize
@@ -663,7 +788,7 @@ function handleProxy(
 
           // Forward response
           res.status(proxyRes.statusCode || 502);
-          for (const [key, value] of Object.entries(proxyRes.headers)) {
+          for (const [key, value] of Object.entries(responseHeaders)) {
             if (value) res.setHeader(key, value as string | string[]);
           }
           proxyRes.pipe(res);

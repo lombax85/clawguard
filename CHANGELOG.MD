@@ -22,12 +22,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - **Telegram polling dependency**: upgraded `node-telegram-bot-api` from 0.66 to 1.2 and removed the obsolete DefinitelyTyped package. Lockfile dependency updates resolve the audit findings present in the previous tree.
 
 ### Security
+- **VMware ESXi credential and session isolation**: added a built-in SOAP auth
+  plugin that injects `Login` credentials only after request classification,
+  retains the real VMware session cookie in gateway memory, exposes only an
+  opaque cookie to clients, redacts SOAP payloads from audit storage, and
+  blocks VMware ticket/session-export methods. Mutating, destructive, and
+  unknown SOAP calls are fail-closed one-request approvals that never reuse or
+  persist an approval. Private HTTP targets and per-service TLS verification
+  exceptions require explicit YAML configuration and cannot be introduced by
+  admin/SQLite service overrides.
 - **FTP data-plane hardening**: active-mode `PORT`/`EPRT`/`LPRT` commands are removed, passive data connections must come from the authenticated control peer, and unauthenticated control connections plus command-line memory are bounded. Exact dependency-level tests run while building the pinned rclone/goftp image.
 - **FTP lease lifecycle and ownership**: ambiguous sidecar activation failures now trigger compensating cleanup, and the audit endpoint redacts lease IDs so one shared agent-key holder cannot enumerate and revoke another task's lease.
 - **SSH handoff lifecycle**: the forced-command wrapper must acknowledge a validated broker response before the session is considered active; a lost handoff promptly releases the short-lived agent and its capacity slot.
 - **Pairing commands restricted to the configured chat**: `/pair`, `/unpair`, `/status` and `/showlog` are now honored only when sent from the chat configured in `chatId`; messages from any other chat are silently ignored (and logged). This closes three issues with publicly reachable bots: (1) a stray `/unpair` from any chat could previously flip a global flag and disable all approvals (DoS) — pairing state is now derived per-chat from the database, not a mutable flag; (2) the pairing secret could be brute-forced from any chat — now only the configured chat can attempt, and attempts are additionally rate-limited (`PairThrottle`); (3) `/showlog` could be enabled from a guessed-paired foreign chat to siphon API-activity metadata.
 
 ### Added
+- **Action-aware plugin approval contract and VMware ESXi SOAP plugin**:
+  plugins can describe the authoritative logical path, friendly action, risk,
+  target and bounded safe details before credential injection. Response-header
+  rewriting allows credential plugins to broker upstream session cookies
+  without buffering response bodies. The ESXi plugin identifies managed-object
+  references and common safe operation parameters for Telegram/webhook
+  approvals.
 - **Request provenance for multi-user instances**: clients (e.g. OpenClaw) can attach two optional headers to any request — `X-ClawGuard-User` (who triggered it) and `X-ClawGuard-Reason` (what it does). They are surfaced in the **Telegram approval message**, persisted to the **audit log** (`request_user` / `request_reason` columns) and shown in the dashboard request history, and included in the outbound-webhook payload. Both headers are stripped before the request is forwarded upstream, so they never leak to the real API. Accepting them is optional (a missing header is not rejected); the OpenClaw install guide instructs agents to always send them.
 - **Telegram group approvals**: `notifications.telegram.chatId` may be a group/supergroup id, so approval requests can be posted to a shared room instead of only a 1:1 chat (pair the group with `/pair <secret>` inside it). New optional `messageThreadId` posts approvals into a specific forum topic, and `allowedApprovers` (list of @usernames / numeric user ids) restricts who may tap Approve/Deny in a shared group — empty/unset preserves the previous "anyone paired can approve" behavior.
 - **Telegram polling health diagnostics**: admin/API status now exposes Telegram health (`polling`, `restartingPolling`, pending callbacks, last update/callback, last polling error, restart timestamps) so callback stalls can be diagnosed without relying only on process logs.

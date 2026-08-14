@@ -66,6 +66,19 @@ function makeFtpService() {
   };
 }
 
+function makePrivateHttpService() {
+  return {
+    upstream: 'https://192.168.88.3',
+    auth: {
+      type: 'plugin',
+      pluginPath: 'vmware-esxi',
+      pluginConfig: { username: 'root', password: 'MUST_NOT_LEAVE_ADMIN_API' },
+    },
+    policy: { default: 'require_approval' },
+    http: { allowPrivateTarget: true, noCheckCertificate: true },
+  };
+}
+
 function fakeApprovalManager() {
   return {
     getActiveCount: () => 0,
@@ -185,6 +198,64 @@ test('admin editable mode rejects creating FTP/FTPS services', async () => {
     assert.match((await res.json()).error, /FTP\/FTPS services are YAML-only/i);
     assert.equal(audit.calls.saveServiceOverride.length, 0);
     assert.equal(config.services.files, undefined);
+  });
+});
+
+test('admin editable mode rejects private-target and TLS exceptions', async () => {
+  const config = makeConfig(false);
+  await withAdminServer(config, async (base, audit) => {
+    const res = await fetch(`${base}/api/services`, {
+      method: 'POST',
+      headers: { 'x-clawguard-pin': '1234', 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'vmware-esxi', config: makePrivateHttpService() }),
+    });
+
+    assert.equal(res.status, 403);
+    assert.match((await res.json()).error, /YAML-only/i);
+    assert.equal(audit.calls.saveServiceOverride.length, 0);
+    assert.equal(config.services['vmware-esxi'], undefined);
+  });
+});
+
+test('admin cannot modify or delete a YAML private-target HTTP service', async () => {
+  const config = makeConfig(false);
+  config.services['vmware-esxi'] = makePrivateHttpService();
+
+  await withAdminServer(config, async (base, audit) => {
+    const update = await fetch(`${base}/api/services/vmware-esxi`, {
+      method: 'PUT',
+      headers: { 'x-clawguard-pin': '1234', 'content-type': 'application/json' },
+      body: JSON.stringify({ config: { policy: { default: 'auto_approve' } } }),
+    });
+    assert.equal(update.status, 403);
+    assert.match((await update.json()).error, /YAML-only/i);
+
+    const remove = await fetch(`${base}/api/services/vmware-esxi`, {
+      method: 'DELETE',
+      headers: { 'x-clawguard-pin': '1234' },
+    });
+    assert.equal(remove.status, 403);
+    assert.match((await remove.json()).error, /YAML-only/i);
+    assert.equal(audit.calls.saveServiceOverride.length, 0);
+    assert.equal(audit.calls.deleteServiceOverride.length, 0);
+    assert.ok(config.services['vmware-esxi']);
+  });
+});
+
+test('admin GET marks private-target HTTP services YAML-only without plugin secrets', async () => {
+  const config = makeConfig(false);
+  config.services['vmware-esxi'] = makePrivateHttpService();
+
+  await withAdminServer(config, async (base) => {
+    const res = await fetch(`${base}/api/services`, {
+      headers: { 'x-clawguard-pin': '1234' },
+    });
+
+    const raw = await res.text();
+    const services = JSON.parse(raw);
+    assert.equal(services['vmware-esxi'].yamlOnly, true);
+    assert.equal(services['vmware-esxi'].auth.pluginConfig, undefined);
+    assert.equal(raw.includes('MUST_NOT_LEAVE_ADMIN_API'), false);
   });
 });
 

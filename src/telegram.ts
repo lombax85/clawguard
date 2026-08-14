@@ -4,7 +4,7 @@ import TelegramBot, {
   type SendMessageParams,
   type User,
 } from 'node-telegram-bot-api';
-import { TelegramConfig, RequestMeta, FtpAccessMode } from './types';
+import { TelegramConfig, RequestMeta, RequestApprovalInfo, FtpAccessMode } from './types';
 import { AuditLogger } from './audit';
 import { PairThrottle } from './pair-throttle';
 import {
@@ -66,6 +66,27 @@ function metaLines(meta?: RequestMeta): string[] {
   const lines: string[] = [];
   if (meta.user) lines.push(`👤 User: *${sanitizeForTelegram(meta.user)}*`);
   if (meta.reason) lines.push(`📝 Reason: _${sanitizeForTelegram(meta.reason)}_`);
+  return lines;
+}
+
+export function approvalInfoLines(info?: RequestApprovalInfo): string[] {
+  if (!info) return [];
+  const lines: string[] = [];
+  if (info.action) lines.push(`⚙️ Action: *${sanitizeForTelegram(info.action).slice(0, 160)}*`);
+  if (info.risk) {
+    const riskIcon = info.risk === 'read' ? '👁'
+      : info.risk === 'session' ? '🔐'
+        : info.risk === 'destructive' ? '🧨'
+          : info.risk === 'write' ? '✍️' : '❓';
+    lines.push(`${riskIcon} Risk: *${sanitizeForTelegram(info.risk)}*`);
+  }
+  if (info.target) lines.push(`🎯 Target: *${sanitizeForTelegram(info.target).slice(0, 240)}*`);
+  for (const item of (info.details || []).slice(0, 10)) {
+    const label = sanitizeForTelegram(item.label).slice(0, 50);
+    const value = sanitizeForTelegram(item.value).slice(0, 220);
+    if (label && value) lines.push(`▫️ ${label}: ${value}`);
+  }
+  if (info.oneTime) lines.push('⏱ Scope: *this request only*');
   return lines;
 }
 
@@ -581,7 +602,8 @@ export class TelegramNotifier {
     method: string,
     path: string,
     agentIp: string,
-    meta?: RequestMeta
+    meta?: RequestMeta,
+    approvalInfo?: RequestApprovalInfo
   ): Promise<{ approved: boolean; ttlSeconds: number; approvedBy: string; pathScoped: boolean }> {
     // If the configured chat isn't paired, deny immediately
     if (!this.isConfiguredChatPaired()) {
@@ -612,6 +634,7 @@ export class TelegramNotifier {
         `🔹 Service: *${service}*`,
         `🔹 Method: \`${method}\``,
         `🔹 Path: \`${path}\``,
+        ...approvalInfoLines(approvalInfo),
         ...metaLines(meta),
         `🔹 Agent IP: \`${agentIp}\``,
         `🔹 Time: ${new Date().toLocaleString('it-IT', { timeZone: 'Europe/Rome' })}`,
@@ -623,7 +646,12 @@ export class TelegramNotifier {
       (async () => {
         const sent = await this.safeSendMessage(this.config.chatId, text, this.sendOptions({
           reply_markup: {
-            inline_keyboard: [
+            inline_keyboard: approvalInfo?.oneTime ? [
+              [
+                { text: '✅ Approve this request', callback_data: `approve_once:${requestId}` },
+                { text: '❌ Deny', callback_data: `deny:${requestId}` },
+              ],
+            ] : [
               [
                 { text: '✅ Once', callback_data: `approve_once:${requestId}` },
                 { text: '✅ 15m', callback_data: `approve_15m:${requestId}` },
@@ -789,6 +817,7 @@ export class TelegramNotifier {
     agentIp: string,
     reason: string,
     meta?: RequestMeta,
+    approvalInfo?: RequestApprovalInfo,
   ): void {
     const chatIds = this.audit.getShowlogEnabledChatIds();
     if (chatIds.length === 0) return;
@@ -799,6 +828,7 @@ export class TelegramNotifier {
       `🔹 Service: *${service}*`,
       `🔹 Method: \`${method}\``,
       `🔹 Path: \`${path}\``,
+      ...approvalInfoLines(approvalInfo),
       ...metaLines(meta),
       `🔹 Agent IP: \`${agentIp}\``,
       `🔹 Time: ${new Date().toLocaleString('it-IT', { timeZone: 'Europe/Rome' })}`,

@@ -26,11 +26,11 @@ function fakeTelegram() {
   return {
     setNext(a) { nextApproval = a; },
     calls,
-    notifyAutoApproved(service, method, p, agentIp, reason) {
-      calls.notifyAutoApproved.push({ service, method, path: p, agentIp, reason });
+    notifyAutoApproved(service, method, p, agentIp, reason, meta, approvalInfo) {
+      calls.notifyAutoApproved.push({ service, method, path: p, agentIp, reason, meta, approvalInfo });
     },
-    async requestApproval(requestId, service, method, p, agentIp) {
-      calls.requestApproval.push({ requestId, service, method, path: p, agentIp });
+    async requestApproval(requestId, service, method, p, agentIp, meta, approvalInfo) {
+      calls.requestApproval.push({ requestId, service, method, path: p, agentIp, meta, approvalInfo });
       return nextApproval || { approved: false, ttlSeconds: 0, approvedBy: 'timeout', pathScoped: false };
     },
     clearPendingRequest(id) { calls.clearPendingRequest.push(id); },
@@ -142,6 +142,38 @@ test('telegram approve stores path-scoped when pathScoped=true', async () => {
   const ok3 = await mgr.checkApproval('svc', makeServiceConfig('require_approval'), 'GET', '/api/other', '1.2.3.4');
   assert.equal(ok3, false);
   assert.equal(tg.calls.requestApproval.length, 2);
+});
+
+test('plugin one-time request always prompts and is never cached or persisted', async () => {
+  const dbPath = tmpDb();
+  const audit = new AuditLogger(dbPath);
+  const tg = fakeTelegram();
+  tg.setNext({ approved: true, ttlSeconds: 1, approvedBy: 'fabio', pathScoped: false });
+  const mgr = new ApprovalManager(tg, audit, 1000);
+  const info = {
+    approvalPath: '/sdk/write/PowerOnVM_Task/VirtualMachine-vm-42',
+    action: 'Power on virtual machine',
+    risk: 'write',
+    target: 'VirtualMachine vm-42',
+    oneTime: true,
+  };
+
+  const svc = makeServiceConfig('auto_approve');
+  assert.equal(await mgr.checkApproval('vmware', svc, 'POST', '/sdk', '1.2.3.4', undefined, info), true);
+  assert.equal(await mgr.checkApproval('vmware', svc, 'POST', '/sdk', '1.2.3.4', undefined, info), true);
+  assert.equal(tg.calls.requestApproval.length, 2);
+  assert.equal(tg.calls.requestApproval[0].path, info.approvalPath);
+  assert.deepEqual(tg.calls.requestApproval[0].approvalInfo, info);
+  assert.equal(mgr.hasActiveApproval('vmware', 'POST'), false);
+});
+
+test('plugin one-time request fails closed without Telegram', async () => {
+  const mgr = new ApprovalManager(undefined, new AuditLogger(tmpDb()), 1000);
+  const ok = await mgr.checkApproval(
+    'vmware', makeServiceConfig('auto_approve'), 'POST', '/sdk', '1.2.3.4', undefined,
+    { approvalPath: '/sdk/write/ResetVM_Task/VirtualMachine-vm-42', oneTime: true }
+  );
+  assert.equal(ok, false);
 });
 
 test('revokeApproval targets exact path when given', async () => {
