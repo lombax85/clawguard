@@ -73,17 +73,20 @@ sshBroker:
   maxSessionSeconds: 3600
   sshAgentPath: /usr/bin/ssh-agent
   sshAddPath: /usr/bin/ssh-add
+  sshKeyscanPath: /usr/bin/ssh-keyscan
   maxConcurrentLeases: 10
 ```
 
 Add an SSH service in YAML (the strict-mode default). With
 `admin.strictMode: false`, the dashboard provides a dedicated SSH host wizard.
-It can validate a pasted unencrypted key, generate an Ed25519 key server-side,
-or reuse a key already attached to another SSH service. Only the public key and
-fingerprint are returned for installation on the target; private key material
-never returns to the browser. The complete JSON editor remains available for
-advanced changes. For YAML, resolve the key from a protected secret backend;
-this example uses the existing Vault reference syntax:
+ClawGuard can scan the validated target for its public host identity, display
+the SHA-256 fingerprint for confirmation, and persist the selected identity.
+Private keys already attached to SSH services appear as saved backend
+credentials, grouped when several services use the same key. Selecting one
+does not return private material to the browser. The wizard can also generate
+an Ed25519 key server-side; manual imports and the complete JSON editor remain
+available as advanced paths. For YAML, resolve the key from a protected secret
+backend; this example uses the existing Vault reference syntax:
 
 ```yaml
 services:

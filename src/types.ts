@@ -228,6 +228,7 @@ export interface SshBrokerConfig {
   maxSessionSeconds: number;
   sshAgentPath: string;
   sshAddPath: string;
+  sshKeyscanPath: string;
   maxConcurrentLeases: number;
 }
 

@@ -324,7 +324,7 @@
       </div>
       <div class="form-group">
         <label>SSH host or IP</label>
-        <input type="text" id="ssh-host" placeholder="e.g. server.example.com or 192.168.1.20">
+        <input type="text" id="ssh-host" placeholder="e.g. server.example.com or 192.168.1.20" oninput="onSshTargetChange()">
       </div>
     </div>
     <div class="form-row">
@@ -334,23 +334,45 @@
       </div>
       <div class="form-group">
         <label>Port</label>
-        <input type="number" id="ssh-port" min="1" max="65535" value="22">
+        <input type="number" id="ssh-port" min="1" max="65535" value="22" oninput="onSshTargetChange()">
       </div>
     </div>
     <div class="form-group">
-      <label>Server host public key</label>
-      <textarea id="ssh-known-host-key" class="compact-textarea" spellcheck="false" placeholder="ssh-ed25519 AAAA..."></textarea>
-      <p class="form-help">Paste one verified OpenSSH host key. A single <code>ssh-keyscan</code> or <code>known_hosts</code> line is also accepted; verify its fingerprint through a trusted channel.</p>
+      <label class="checkbox-row"><input type="checkbox" id="ssh-allow-private" onchange="onSshTargetChange()"> <span>This host is on a private or local network</span></label>
+      <p class="form-help">Enable this for LAN addresses such as <code>192.168.x.x</code>. ClawGuard still checks the target against the configured allowlist.</p>
     </div>
     <div class="form-group">
-      <label class="checkbox-row"><input type="checkbox" id="ssh-allow-private"> <span>Allow a private, loopback, or link-local target. Enable this only for a host you trust on your private network.</span></label>
+      <label>Server identity</label>
+      <select id="ssh-host-key-mode" onchange="onSshHostKeyModeChange()">
+        <option value="auto">Detect it automatically (recommended)</option>
+        <option value="saved" id="ssh-host-key-saved-option">Use the identity already saved for this host</option>
+        <option value="manual">Paste a host public key manually</option>
+      </select>
+      <p class="form-help">ClawGuard can contact the SSH server, read its public identity and remember it. No <code>ssh-keyscan</code> command or copy/paste is required.</p>
+    </div>
+    <div id="ssh-host-key-auto-group">
+      <button type="button" class="btn btn-sm" style="background:var(--bg3);color:var(--text);margin-bottom:10px" onclick="detectSshHostKey()">Detect server identity</button>
+      <div id="ssh-host-key-scan-status" class="notice" style="display:none;margin-bottom:12px;"></div>
+      <div class="form-group" id="ssh-host-key-choice-group" style="display:none;">
+        <label>Identity found</label>
+        <select id="ssh-host-key-choice" onchange="renderSshHostKeyChoice()"></select>
+        <p class="form-help">Confirm the SHA-256 fingerprint through a trusted channel when possible, then save to trust and remember it.</p>
+      </div>
+    </div>
+    <div class="form-group" id="ssh-host-key-saved-group" style="display:none;">
+      <div id="ssh-host-key-saved-status" class="notice success"></div>
+    </div>
+    <div class="form-group" id="ssh-host-key-manual-group" style="display:none;">
+      <label>Verified host public key</label>
+      <textarea id="ssh-known-host-key" class="compact-textarea" spellcheck="false" placeholder="ssh-ed25519 AAAA..."></textarea>
+      <p class="form-help">Advanced fallback: a key or one <code>known_hosts</code> line is accepted.</p>
     </div>
     <div class="form-group">
       <label>Private key source</label>
       <select id="ssh-key-mode" onchange="onSshKeyModeChange()">
-        <option value="paste">Paste an existing private key</option>
-        <option value="generate">Generate a new Ed25519 key</option>
-        <option value="reuse">Reuse a key already in ClawGuard</option>
+        <option value="reuse">Use a credential already saved in ClawGuard</option>
+        <option value="generate">Create a new Ed25519 credential</option>
+        <option value="paste">Import a private key</option>
         <option value="keep" id="ssh-key-keep-option">Keep the current key</option>
       </select>
     </div>
@@ -360,9 +382,9 @@
       <p class="form-help">The key is sent only to ClawGuard and is never returned by the admin API.</p>
     </div>
     <div class="form-group" id="ssh-key-reuse-group" style="display:none;">
-      <label>Existing SSH key</label>
+      <label>Saved SSH credential</label>
       <select id="ssh-key-source"></select>
-      <p class="form-help">ClawGuard copies the selected key server-side; the browser receives only its public key and fingerprint.</p>
+      <p class="form-help">The private key stays inside ClawGuard. Selecting it here only tells the backend which saved credential to use.</p>
     </div>
     <div id="ssh-wizard-error" style="background: rgba(255,107,107,0.1); border: 1px solid var(--red); border-radius: var(--radius); padding: 12px; margin-bottom: 16px; font-size: 13px; color: var(--red); display: none;"></div>
     <div id="ssh-key-result" class="key-result" style="display:none;">
@@ -389,6 +411,9 @@ let editingServiceName = null;
 let duplicatingServiceName = null;
 let sshWizardEditingName = null;
 let sshWizardCreated = false;
+let sshScannedHostKeys = [];
+let sshHostKeyScanSignature = '';
+let sshSavedHostKey = '';
 const collapsedGroups = { active: {}, history: {} };
 
 // ─── Auth ────────────────────────────────────────
@@ -597,11 +622,12 @@ async function populateSshKeySources(selectedService) {
   const select = document.getElementById('ssh-key-source');
   select.innerHTML = '';
   const sources = await api('GET', '/api/ssh-key-sources');
-  for (const source of sources) {
+  for (const [index, source] of sources.entries()) {
     const option = document.createElement('option');
     option.value = source.service;
-    option.textContent = `${source.service} — ${source.username}@${source.upstream}`;
-    if (source.service === selectedService) option.selected = true;
+    const usedBy = source.services?.length ? source.services.join(', ') : source.service;
+    option.textContent = `SSH credential ${index + 1} — used by ${usedBy}`;
+    if (source.services?.includes(selectedService) || source.service === selectedService) option.selected = true;
     select.appendChild(option);
   }
   const reuseOption = document.querySelector('#ssh-key-mode option[value="reuse"]');
@@ -611,8 +637,14 @@ async function populateSshKeySources(selectedService) {
 
 function resetSshWizardResult() {
   sshWizardCreated = false;
+  sshScannedHostKeys = [];
+  sshHostKeyScanSignature = '';
+  sshSavedHostKey = '';
   document.getElementById('ssh-key-result').style.display = 'none';
   document.getElementById('ssh-wizard-error').style.display = 'none';
+  document.getElementById('ssh-host-key-scan-status').style.display = 'none';
+  document.getElementById('ssh-host-key-choice-group').style.display = 'none';
+  document.getElementById('ssh-host-key-choice').innerHTML = '';
 }
 
 function fillSshConnectionFields(service) {
@@ -626,7 +658,12 @@ function fillSshConnectionFields(service) {
     document.getElementById('ssh-port').value = '22';
   }
   document.getElementById('ssh-username').value = service.sshWizard?.username || '';
-  document.getElementById('ssh-known-host-key').value = config.ssh?.knownHostKey || '';
+  sshSavedHostKey = config.ssh?.knownHostKey || '';
+  document.getElementById('ssh-known-host-key').value = sshSavedHostKey;
+  const savedIdentity = service.sshWizard?.hostKey;
+  document.getElementById('ssh-host-key-saved-status').textContent = savedIdentity
+    ? `Saved ${savedIdentity.algorithm} identity — ${savedIdentity.fingerprint}`
+    : 'The server identity already stored for this service will be used.';
   document.getElementById('ssh-allow-private').checked = config.ssh?.allowPrivateTarget === true;
 }
 
@@ -644,6 +681,9 @@ async function showAddSshHost() {
   document.getElementById('ssh-known-host-key').value = '';
   document.getElementById('ssh-allow-private').checked = false;
   document.getElementById('ssh-private-key').value = '';
+  document.getElementById('ssh-host-key-saved-option').hidden = true;
+  document.getElementById('ssh-host-key-mode').value = 'auto';
+  onSshHostKeyModeChange();
   document.getElementById('ssh-key-keep-option').hidden = true;
   document.getElementById('ssh-advanced-btn').style.display = 'none';
   const sources = await populateSshKeySources();
@@ -664,6 +704,9 @@ async function showEditSshHost(name) {
   document.getElementById('ssh-host-id').value = name;
   fillSshConnectionFields(service);
   document.getElementById('ssh-private-key').value = '';
+  document.getElementById('ssh-host-key-saved-option').hidden = false;
+  document.getElementById('ssh-host-key-mode').value = 'saved';
+  onSshHostKeyModeChange();
   document.getElementById('ssh-key-keep-option').hidden = false;
   document.getElementById('ssh-key-mode').value = 'keep';
   document.getElementById('ssh-advanced-btn').style.display = 'inline-block';
@@ -687,12 +730,104 @@ async function showDuplicateSshHost(name) {
   document.getElementById('ssh-host-id').value = candidate;
   fillSshConnectionFields(service);
   document.getElementById('ssh-private-key').value = '';
+  document.getElementById('ssh-host-key-saved-option').hidden = false;
+  document.getElementById('ssh-host-key-mode').value = 'saved';
+  onSshHostKeyModeChange();
   document.getElementById('ssh-key-keep-option').hidden = true;
   document.getElementById('ssh-advanced-btn').style.display = 'none';
   await populateSshKeySources(name);
   document.getElementById('ssh-key-mode').value = 'reuse';
   onSshKeyModeChange();
   document.getElementById('ssh-wizard-modal').classList.add('show');
+}
+
+function sshWizardDefaultSaveLabel() {
+  if (sshWizardEditingName) return 'Save SSH Host';
+  return document.getElementById('ssh-wizard-title').textContent.startsWith('Duplicate')
+    ? 'Create SSH Host'
+    : 'Add SSH Host';
+}
+
+function currentSshTargetSignature() {
+  return JSON.stringify([
+    document.getElementById('ssh-host').value.trim(),
+    Number(document.getElementById('ssh-port').value),
+    document.getElementById('ssh-allow-private').checked,
+  ]);
+}
+
+function clearDetectedSshHostKeys() {
+  sshScannedHostKeys = [];
+  sshHostKeyScanSignature = '';
+  document.getElementById('ssh-host-key-choice').innerHTML = '';
+  document.getElementById('ssh-host-key-choice-group').style.display = 'none';
+  document.getElementById('ssh-host-key-scan-status').style.display = 'none';
+  if (!sshWizardCreated) {
+    document.getElementById('ssh-wizard-save-btn').textContent = sshWizardDefaultSaveLabel();
+  }
+}
+
+function onSshTargetChange() {
+  clearDetectedSshHostKeys();
+  const mode = document.getElementById('ssh-host-key-mode');
+  if (mode.value === 'saved') {
+    mode.value = 'auto';
+    onSshHostKeyModeChange();
+  }
+}
+
+function renderSshHostKeyChoice() {
+  const index = Number(document.getElementById('ssh-host-key-choice').value);
+  const key = sshScannedHostKeys[index];
+  if (!key) return;
+  const status = document.getElementById('ssh-host-key-scan-status');
+  status.className = 'notice success';
+  status.textContent = `Server identity found: ${key.algorithm} — ${key.fingerprint}`;
+  status.style.display = 'block';
+}
+
+async function detectSshHostKey() {
+  const status = document.getElementById('ssh-host-key-scan-status');
+  status.className = 'notice';
+  status.textContent = 'Contacting the SSH server and reading its public identity…';
+  status.style.display = 'block';
+  document.getElementById('ssh-host-key-choice-group').style.display = 'none';
+  try {
+    const result = await api('POST', '/api/ssh-host-keys/scan', {
+      host: document.getElementById('ssh-host').value.trim(),
+      port: Number(document.getElementById('ssh-port').value),
+      allowPrivateTarget: document.getElementById('ssh-allow-private').checked,
+    });
+    sshScannedHostKeys = result.keys || [];
+    sshHostKeyScanSignature = currentSshTargetSignature();
+    const select = document.getElementById('ssh-host-key-choice');
+    select.innerHTML = '';
+    sshScannedHostKeys.forEach((key, index) => {
+      const option = document.createElement('option');
+      option.value = String(index);
+      option.textContent = `${key.algorithm} — ${key.fingerprint}${key.recommended ? ' (recommended)' : ''}`;
+      if (key.recommended) option.selected = true;
+      select.appendChild(option);
+    });
+    document.getElementById('ssh-host-key-choice-group').style.display = 'block';
+    document.getElementById('ssh-wizard-save-btn').textContent = `Trust identity & ${sshWizardDefaultSaveLabel()}`;
+    renderSshHostKeyChoice();
+    return true;
+  } catch (e) {
+    clearDetectedSshHostKeys();
+    status.className = 'notice warning';
+    status.textContent = e.message || 'Unable to detect the SSH server identity.';
+    status.style.display = 'block';
+    return false;
+  }
+}
+
+function onSshHostKeyModeChange() {
+  const mode = document.getElementById('ssh-host-key-mode').value;
+  if (mode !== 'auto' && sshScannedHostKeys.length > 0) clearDetectedSshHostKeys();
+  document.getElementById('ssh-host-key-auto-group').style.display = mode === 'auto' ? 'block' : 'none';
+  document.getElementById('ssh-host-key-saved-group').style.display = mode === 'saved' ? 'block' : 'none';
+  document.getElementById('ssh-host-key-manual-group').style.display = mode === 'manual' ? 'block' : 'none';
 }
 
 function onSshKeyModeChange() {
@@ -721,6 +856,26 @@ async function saveSshHost() {
   if (sshWizardCreated) { hideSshWizard(); return; }
   const errorDiv = document.getElementById('ssh-wizard-error');
   errorDiv.style.display = 'none';
+
+  const hostKeyMode = document.getElementById('ssh-host-key-mode').value;
+  let knownHostKey = '';
+  if (hostKeyMode === 'saved') {
+    knownHostKey = sshSavedHostKey;
+  } else if (hostKeyMode === 'manual') {
+    knownHostKey = document.getElementById('ssh-known-host-key').value.trim();
+  } else {
+    if (sshHostKeyScanSignature !== currentSshTargetSignature() || sshScannedHostKeys.length === 0) {
+      const detected = await detectSshHostKey();
+      if (detected) {
+        const status = document.getElementById('ssh-host-key-scan-status');
+        status.textContent += ' Review the fingerprint, then click the trust button to continue.';
+      }
+      return;
+    }
+    const selectedIndex = Number(document.getElementById('ssh-host-key-choice').value);
+    knownHostKey = sshScannedHostKeys[selectedIndex]?.publicKey || '';
+  }
+
   const mode = document.getElementById('ssh-key-mode').value;
   const key = { mode };
   if (mode === 'paste') key.privateKey = document.getElementById('ssh-private-key').value;
@@ -730,7 +885,7 @@ async function saveSshHost() {
     host: document.getElementById('ssh-host').value.trim(),
     port: Number(document.getElementById('ssh-port').value),
     username: document.getElementById('ssh-username').value.trim(),
-    knownHostKey: document.getElementById('ssh-known-host-key').value.trim(),
+    knownHostKey,
     allowPrivateTarget: document.getElementById('ssh-allow-private').checked,
     key
   };

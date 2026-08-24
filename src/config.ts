@@ -88,6 +88,7 @@ export const DEFAULT_SSH_BROKER: SshBrokerConfig = {
   maxSessionSeconds: 3600,
   sshAgentPath: '/usr/bin/ssh-agent',
   sshAddPath: '/usr/bin/ssh-add',
+  sshKeyscanPath: '/usr/bin/ssh-keyscan',
   maxConcurrentLeases: 10,
 };
 
@@ -342,6 +343,9 @@ export function validateSshConfiguration(config: Config): string[] {
     }
     if (!path.isAbsolute(broker.sshAddPath || '')) {
       errors.push('sshBroker.sshAddPath must be an absolute path');
+    }
+    if (!path.isAbsolute(broker.sshKeyscanPath || '')) {
+      errors.push('sshBroker.sshKeyscanPath must be an absolute path');
     }
     if (!Number.isInteger(broker.maxConcurrentLeases) || broker.maxConcurrentLeases <= 0) {
       errors.push('sshBroker.maxConcurrentLeases must be a positive integer');

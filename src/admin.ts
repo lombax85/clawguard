@@ -18,6 +18,7 @@ import {
   AdminSshKeyTools,
   buildAdminSshService,
   createAdminSshKeyTools,
+  discoverAdminSshHostKeys,
   getAdminSshWizardMetadata,
   listAdminSshKeySources,
 } from './admin-ssh';
@@ -74,7 +75,8 @@ export function createAdminRouter(
   serviceRuntime: AdminServiceRuntime = createAdminServiceRuntime(config),
   sshKeyTools: AdminSshKeyTools = createAdminSshKeyTools(
     config.sshBroker.sshAgentPath,
-    config.sshBroker.sshAddPath
+    config.sshBroker.sshAddPath,
+    config.sshBroker.sshKeyscanPath
   )
 ): Router {
   const router = Router();
@@ -195,6 +197,25 @@ export function createAdminRouter(
 
   router.get('/api/ssh-key-sources', pinAuth, (_req: Request, res: Response) => {
     res.json(listAdminSshKeySources(config));
+  });
+
+  router.post('/api/ssh-host-keys/scan', pinAuth, async (req: Request, res: Response) => {
+    if (rejectIfStrictMode(config, res)) return;
+
+    let body: unknown;
+    try {
+      body = JSON.parse(req.body?.toString() || '{}');
+    } catch {
+      res.status(400).json({ error: 'Invalid JSON body' });
+      return;
+    }
+
+    try {
+      const discovery = await discoverAdminSshHostKeys(body, config, sshKeyTools);
+      res.json(discovery);
+    } catch (err) {
+      res.status(400).json({ error: errorMessage(err) });
+    }
   });
 
   router.post('/api/ssh-services', pinAuth, async (req: Request, res: Response) => {

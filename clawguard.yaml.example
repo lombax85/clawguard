@@ -416,6 +416,7 @@ sshBroker:
   maxSessionSeconds: 3600       # absolute wrapper limit; 10..86400
   sshAgentPath: /usr/bin/ssh-agent
   sshAddPath: /usr/bin/ssh-add
+  sshKeyscanPath: /usr/bin/ssh-keyscan
   maxConcurrentLeases: 10       # pending approvals + live sessions
 
 # ─── Experimental FTP/FTPS lease gateway ────────────────────

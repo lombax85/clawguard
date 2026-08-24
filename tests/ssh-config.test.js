@@ -103,6 +103,7 @@ test('loadConfig normalizes SSH input and does not require an HTTP token field',
     assert.equal(loaded.sshBroker.socketPath, DEFAULT_SSH_BROKER.socketPath);
     assert.equal(loaded.sshBroker.credentialTimeoutMs, 30000);
     assert.equal(loaded.sshBroker.maxSessionSeconds, 3600);
+    assert.equal(loaded.sshBroker.sshKeyscanPath, DEFAULT_SSH_BROKER.sshKeyscanPath);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -134,6 +135,7 @@ test('enabled broker rejects unsafe paths, root identities and invalid limits', 
     maxSessionSeconds: 1,
     sshAgentPath: 'ssh-agent',
     sshAddPath: 'ssh-add',
+    sshKeyscanPath: 'ssh-keyscan',
     maxConcurrentLeases: 0,
   };
   const errors = validateSshConfiguration(configWith(sshService(), broker));
@@ -141,7 +143,7 @@ test('enabled broker rejects unsafe paths, root identities and invalid limits', 
   for (const expected of [
     /runtimeDir/, /socketPath/, /gatewayUid/, /gatewayGid/, /approvalTimeoutMs/,
     /credentialTimeoutMs/, /leaseTtlSeconds/, /maxSessionSeconds/,
-    /sshAgentPath/, /sshAddPath/, /maxConcurrentLeases/,
+    /sshAgentPath/, /sshAddPath/, /sshKeyscanPath/, /maxConcurrentLeases/,
   ]) {
     assert.ok(errors.some((error) => expected.test(error)), `missing error ${expected}`);
   }

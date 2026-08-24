@@ -130,7 +130,7 @@ async function withAdminServer(config, fn) {
     remove: (name) => runtime.calls.remove.push(name),
   };
   const sshKeyTools = {
-    calls: { generate: [], inspect: [] },
+    calls: { generate: [], inspect: [], scanHost: [] },
     generate: async (comment) => {
       sshKeyTools.calls.generate.push(comment);
       return {
@@ -145,6 +145,15 @@ async function withAdminServer(config, fn) {
         publicKey: 'ssh-ed25519 AAAAINSPECTED',
         fingerprint: 'SHA256:inspected-test-fingerprint',
       };
+    },
+    scanHost: async (addresses, port) => {
+      sshKeyTools.calls.scanHost.push({ addresses, port });
+      return [{
+        algorithm: 'ssh-ed25519',
+        publicKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC',
+        fingerprint: 'SHA256:host-test-fingerprint',
+        recommended: true,
+      }];
     },
   };
   app.use('/__admin', createAdminRouter(
@@ -425,9 +434,85 @@ test('SSH wizard lists reusable services without exposing their private keys', a
     assert.equal(raw.includes('PRIVATE_KEY_MUST_NEVER_LEAVE_ADMIN_API'), false);
     assert.deepEqual(JSON.parse(raw), [{
       service: 'production-ssh',
+      services: ['production-ssh'],
       upstream: 'ssh://ssh.example.com:22',
       username: 'deploy',
     }]);
+  });
+});
+
+test('SSH wizard groups one backend credential used by multiple services', async () => {
+  const config = makeConfig(false);
+  config.services['production-ssh'] = makeSshService({ includeToken: false });
+  config.services['staging-ssh'] = {
+    ...makeSshService({ includeToken: false }),
+    upstream: 'ssh://ssh2.example.com:22',
+  };
+  await withAdminServer(config, async (base) => {
+    const res = await fetch(`${base}/api/ssh-key-sources`, {
+      headers: { 'x-clawguard-pin': '1234' },
+    });
+    const sources = await res.json();
+    assert.equal(res.status, 200);
+    assert.equal(sources.length, 1);
+    assert.deepEqual(sources[0].services, ['production-ssh', 'staging-ssh']);
+    assert.equal(JSON.stringify(sources).includes('PRIVATE_KEY_MUST_NEVER_LEAVE_ADMIN_API'), false);
+  });
+});
+
+test('SSH wizard discovers host keys through the backend after target validation', async () => {
+  const config = makeConfig(false);
+  await withAdminServer(config, async (base, _audit, _runtime, keyTools) => {
+    const res = await fetch(`${base}/api/ssh-host-keys/scan`, {
+      method: 'POST',
+      headers: { 'x-clawguard-pin': '1234', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        host: '192.168.88.3',
+        port: 2222,
+        allowPrivateTarget: true,
+      }),
+    });
+    const result = await res.json();
+    assert.equal(res.status, 200);
+    assert.equal(result.keys[0].fingerprint, 'SHA256:host-test-fingerprint');
+    assert.deepEqual(keyTools.calls.scanHost, [{ addresses: ['192.168.88.3'], port: 2222 }]);
+  });
+});
+
+test('SSH host-key discovery cannot scan a private target without explicit opt-in', async () => {
+  const config = makeConfig(false);
+  await withAdminServer(config, async (base, _audit, _runtime, keyTools) => {
+    const res = await fetch(`${base}/api/ssh-host-keys/scan`, {
+      method: 'POST',
+      headers: { 'x-clawguard-pin': '1234', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        host: '192.168.88.3',
+        port: 22,
+        allowPrivateTarget: false,
+      }),
+    });
+    assert.equal(res.status, 400);
+    assert.match((await res.json()).error, /requires ssh\.allowPrivateTarget/i);
+    assert.equal(keyTools.calls.scanHost.length, 0);
+  });
+});
+
+test('SSH host-key discovery cannot become a scanner when the upstream allowlist is empty', async () => {
+  const config = makeConfig(false);
+  config.security.allowedUpstreams = [];
+  await withAdminServer(config, async (base, _audit, _runtime, keyTools) => {
+    const res = await fetch(`${base}/api/ssh-host-keys/scan`, {
+      method: 'POST',
+      headers: { 'x-clawguard-pin': '1234', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        host: '192.168.88.3',
+        port: 22,
+        allowPrivateTarget: true,
+      }),
+    });
+    assert.equal(res.status, 400);
+    assert.match((await res.json()).error, /security\.allowedUpstreams/i);
+    assert.equal(keyTools.calls.scanHost.length, 0);
   });
 });
 
