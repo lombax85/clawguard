@@ -129,12 +129,37 @@ async function withAdminServer(config, fn) {
     },
     remove: (name) => runtime.calls.remove.push(name),
   };
-  app.use('/__admin', createAdminRouter(config, fakeApprovalManager(), audit, undefined, runtime));
+  const sshKeyTools = {
+    calls: { generate: [], inspect: [] },
+    generate: async (comment) => {
+      sshKeyTools.calls.generate.push(comment);
+      return {
+        privateKey: 'GENERATED_PRIVATE_KEY_MUST_NEVER_LEAVE_ADMIN_API',
+        publicKey: 'ssh-ed25519 AAAAGENERATED clawguard-test',
+        fingerprint: 'SHA256:generated-test-fingerprint',
+      };
+    },
+    inspect: async (privateKey) => {
+      sshKeyTools.calls.inspect.push(privateKey);
+      return {
+        publicKey: 'ssh-ed25519 AAAAINSPECTED',
+        fingerprint: 'SHA256:inspected-test-fingerprint',
+      };
+    },
+  };
+  app.use('/__admin', createAdminRouter(
+    config,
+    fakeApprovalManager(),
+    audit,
+    undefined,
+    runtime,
+    sshKeyTools
+  ));
   const server = http.createServer(app);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address();
   try {
-    await fn(`http://127.0.0.1:${port}/__admin`, audit, runtime);
+    await fn(`http://127.0.0.1:${port}/__admin`, audit, runtime, sshKeyTools);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -307,8 +332,8 @@ test('admin GET exposes a complete redacted SSH document, never credential value
     assert.equal(service.editableConfig.ssh.knownHostKey, config.services['production-ssh'].ssh.knownHostKey);
     assert.deepEqual(service.editableConfig.auth.pluginConfig.username, { $clawguard: 'keep-secret' });
     assert.deepEqual(service.editableConfig.auth.pluginConfig.privateKey, { $clawguard: 'keep-secret' });
+    assert.equal(service.sshWizard.username, 'deploy');
     assert.equal(raw.includes('PRIVATE_KEY_MUST_NEVER_LEAVE_ADMIN_API'), false);
-    assert.equal(raw.includes('deploy'), false);
   });
 });
 
@@ -382,6 +407,151 @@ test('admin strict mode also blocks the duplicate endpoint', async () => {
       method: 'POST',
       headers: { 'x-clawguard-pin': '1234', 'content-type': 'application/json' },
       body: JSON.stringify({ name: 'copy', config: makeSshService() }),
+    });
+    assert.equal(res.status, 403);
+    assert.equal(audit.calls.saveServiceOverride.length, 0);
+  });
+});
+
+test('SSH wizard lists reusable services without exposing their private keys', async () => {
+  const config = makeConfig(false);
+  config.services['production-ssh'] = makeSshService({ includeToken: false });
+  await withAdminServer(config, async (base) => {
+    const res = await fetch(`${base}/api/ssh-key-sources`, {
+      headers: { 'x-clawguard-pin': '1234' },
+    });
+    const raw = await res.text();
+    assert.equal(res.status, 200);
+    assert.equal(raw.includes('PRIVATE_KEY_MUST_NEVER_LEAVE_ADMIN_API'), false);
+    assert.deepEqual(JSON.parse(raw), [{
+      service: 'production-ssh',
+      upstream: 'ssh://ssh.example.com:22',
+      username: 'deploy',
+    }]);
+  });
+});
+
+test('SSH wizard creates a host from a pasted key and returns only its public identity', async () => {
+  const config = makeConfig(false);
+  await withAdminServer(config, async (base, audit, runtime, keyTools) => {
+    const res = await fetch(`${base}/api/ssh-services`, {
+      method: 'POST',
+      headers: { 'x-clawguard-pin': '1234', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: 'wizard-ssh',
+        host: 'ssh.example.com',
+        port: 22,
+        username: 'deploy',
+        knownHostKey: 'ssh.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC',
+        allowPrivateTarget: false,
+        key: { mode: 'paste', privateKey: 'PASTED_PRIVATE_KEY' },
+      }),
+    });
+
+    const raw = await res.text();
+    assert.equal(res.status, 200, raw);
+    assert.equal(raw.includes('PASTED_PRIVATE_KEY'), false);
+    assert.equal(JSON.parse(raw).key.fingerprint, 'SHA256:inspected-test-fingerprint');
+    assert.equal(config.services['wizard-ssh'].auth.pluginConfig.privateKey, 'PASTED_PRIVATE_KEY');
+    assert.equal(config.services['wizard-ssh'].ssh.knownHostKey.startsWith('ssh-ed25519 '), true);
+    assert.deepEqual(keyTools.calls.inspect, ['PASTED_PRIVATE_KEY']);
+    assert.equal(audit.calls.saveServiceOverride.length, 1);
+    assert.equal(runtime.calls.apply.length, 1);
+  });
+});
+
+test('SSH wizard generates a new key server-side and never returns its private half', async () => {
+  const config = makeConfig(false);
+  await withAdminServer(config, async (base, _audit, _runtime, keyTools) => {
+    const res = await fetch(`${base}/api/ssh-services`, {
+      method: 'POST',
+      headers: { 'x-clawguard-pin': '1234', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: 'generated-ssh',
+        host: 'ssh.example.com',
+        username: 'deploy',
+        knownHostKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC host-comment',
+        allowPrivateTarget: false,
+        key: { mode: 'generate' },
+      }),
+    });
+
+    const raw = await res.text();
+    assert.equal(res.status, 200, raw);
+    assert.equal(raw.includes('GENERATED_PRIVATE_KEY_MUST_NEVER_LEAVE_ADMIN_API'), false);
+    assert.equal(JSON.parse(raw).key.publicKey, 'ssh-ed25519 AAAAGENERATED clawguard-test');
+    assert.equal(
+      config.services['generated-ssh'].auth.pluginConfig.privateKey,
+      'GENERATED_PRIVATE_KEY_MUST_NEVER_LEAVE_ADMIN_API'
+    );
+    assert.deepEqual(keyTools.calls.generate, ['clawguard-generated-ssh']);
+  });
+});
+
+test('SSH wizard reuses an existing key entirely server-side', async () => {
+  const config = makeConfig(false);
+  config.services['production-ssh'] = makeSshService({ includeToken: false });
+  await withAdminServer(config, async (base, _audit, _runtime, keyTools) => {
+    const res = await fetch(`${base}/api/ssh-services`, {
+      method: 'POST',
+      headers: { 'x-clawguard-pin': '1234', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: 'reused-ssh',
+        host: 'ssh2.example.com',
+        username: 'deploy',
+        knownHostKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC',
+        allowPrivateTarget: false,
+        key: { mode: 'reuse', sourceService: 'production-ssh' },
+      }),
+    });
+
+    const raw = await res.text();
+    assert.equal(res.status, 200, raw);
+    assert.equal(raw.includes('PRIVATE_KEY_MUST_NEVER_LEAVE_ADMIN_API'), false);
+    assert.equal(
+      config.services['reused-ssh'].auth.pluginConfig.privateKey,
+      'PRIVATE_KEY_MUST_NEVER_LEAVE_ADMIN_API'
+    );
+    assert.deepEqual(keyTools.calls.inspect, ['PRIVATE_KEY_MUST_NEVER_LEAVE_ADMIN_API']);
+  });
+});
+
+test('SSH wizard edit can keep the current key while changing connection fields', async () => {
+  const config = makeConfig(false);
+  config.services['production-ssh'] = makeSshService({ includeToken: false });
+  await withAdminServer(config, async (base, audit, _runtime, keyTools) => {
+    const res = await fetch(`${base}/api/ssh-services/production-ssh`, {
+      method: 'PUT',
+      headers: { 'x-clawguard-pin': '1234', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        host: 'ssh2.example.com',
+        port: 2222,
+        username: 'release',
+        knownHostKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC',
+        allowPrivateTarget: false,
+        key: { mode: 'keep' },
+      }),
+    });
+
+    assert.equal(res.status, 200, await res.text());
+    assert.equal(config.services['production-ssh'].upstream, 'ssh://ssh2.example.com:2222');
+    assert.equal(config.services['production-ssh'].auth.pluginConfig.username, 'release');
+    assert.equal(
+      config.services['production-ssh'].auth.pluginConfig.privateKey,
+      'PRIVATE_KEY_MUST_NEVER_LEAVE_ADMIN_API'
+    );
+    assert.equal(keyTools.calls.inspect.length, 0);
+    assert.equal(audit.calls.saveServiceOverride.length, 1);
+  });
+});
+
+test('SSH wizard mutations remain disabled in strict mode', async () => {
+  const config = makeConfig(true);
+  await withAdminServer(config, async (base, audit) => {
+    const res = await fetch(`${base}/api/ssh-services`, {
+      method: 'POST',
+      headers: { 'x-clawguard-pin': '1234', 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'blocked' }),
     });
     assert.equal(res.status, 403);
     assert.equal(audit.calls.saveServiceOverride.length, 0);

@@ -865,7 +865,7 @@ ClawGuard includes a built-in dashboard at `http://clawguard-host:9090/__admin`,
   <img src="docs/screenshots/dashboard.png" alt="ClawGuard dashboard with analytics charts" width="700">
 </p>
 
-**Service management** — add, edit, duplicate, and remove HTTP, SSH, FTP, and FTPS services when `admin.strictMode: false`. The editor includes the complete service JSON (protocol fields, auth, hostnames, policy rules, and HTTP/SSH/FTP options). Credentials are represented by `{"$clawguard":"keep-secret"}` and are resolved or copied only on the server; their values never return to the browser. In strict mode, YAML remains the only source of truth and the dashboard is read-only:
+**Service management** — add, edit, duplicate, and remove HTTP, SSH, FTP, and FTPS services when `admin.strictMode: false`. SSH has a dedicated host wizard: enter the host ID, target, username and verified host key, then paste an unencrypted private key, generate a new Ed25519 key inside ClawGuard, or reuse one from an existing SSH service. Generated/private keys remain server-side; the browser receives only the public key and SHA-256 fingerprint. The complete JSON editor remains available for advanced changes. Credentials in that editor are represented by `{"$clawguard":"keep-secret"}` and are resolved or copied only on the server. In strict mode, YAML remains the only source of truth and the dashboard is read-only:
 
 <p align="center">
   <img src="docs/screenshots/services.png" alt="Configured services with masked tokens" width="700">

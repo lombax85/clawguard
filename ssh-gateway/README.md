@@ -77,10 +77,13 @@ sshBroker:
 ```
 
 Add an SSH service in YAML (the strict-mode default). With
-`admin.strictMode: false`, the complete service can also be edited or
-duplicated from the dashboard; `privateKey` is copied server-side and is never
-returned to the browser. Resolve it from a protected secret backend; this
-example uses the existing Vault reference syntax:
+`admin.strictMode: false`, the dashboard provides a dedicated SSH host wizard.
+It can validate a pasted unencrypted key, generate an Ed25519 key server-side,
+or reuse a key already attached to another SSH service. Only the public key and
+fingerprint are returned for installation on the target; private key material
+never returns to the browser. The complete JSON editor remains available for
+advanced changes. For YAML, resolve the key from a protected secret backend;
+this example uses the existing Vault reference syntax:
 
 ```yaml
 services:

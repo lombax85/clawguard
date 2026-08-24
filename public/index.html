@@ -94,6 +94,12 @@
   .form-group input, .form-group select, .form-group textarea { width: 100%; padding: 10px; background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-size: 14px; outline: none; }
   .form-group input:focus, .form-group select:focus, .form-group textarea:focus { border-color: var(--accent); }
   .form-group textarea { min-height: 360px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.45; }
+  .form-group textarea.compact-textarea { min-height: 92px; }
+  .form-help { color: var(--text2); font-size: 11px; margin-top: 6px; line-height: 1.4; }
+  .checkbox-row { display: flex; gap: 8px; align-items: flex-start; color: var(--text2); font-size: 13px; }
+  .checkbox-row input { width: auto; margin-top: 2px; }
+  .key-result { background: rgba(78,205,196,0.08); border: 1px solid var(--green); border-radius: var(--radius); padding: 14px; margin-top: 16px; }
+  .key-result pre { background: var(--bg); padding: 10px; border-radius: var(--radius); white-space: pre-wrap; word-break: break-all; margin: 8px 0; }
   .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   .btn { padding: 8px 16px; border: none; border-radius: var(--radius); cursor: pointer; font-size: 13px; font-weight: 600; }
   .btn-primary { background: var(--accent); color: white; }
@@ -187,7 +193,7 @@
     <div class="section" id="sec-services">
       <h2 class="page-title">Services</h2>
       <div class="panel">
-        <h3>Configured services <button class="btn btn-primary btn-sm" id="add-service-btn" onclick="showAddService()">+ Add Service</button></h3>
+        <h3>Configured services <button class="btn btn-primary btn-sm" id="add-service-btn" onclick="showAddService()">+ Add Service</button> <button class="btn btn-sm" id="add-ssh-host-btn" onclick="showAddSshHost()" style="background:var(--bg3);color:var(--text)">+ Add SSH Host</button></h3>
         <div id="service-mode-notice" class="notice"></div>
         <table>
           <thead><tr><th>Name</th><th>Upstream</th><th>Auth type</th><th>Token</th><th>Policy</th><th>Actions</th></tr></thead>
@@ -306,6 +312,73 @@
   </div>
 </div>
 
+<!-- ─── SSH Host Wizard Modal ───────────────────── -->
+<div class="modal-overlay" id="ssh-wizard-modal">
+  <div class="modal">
+    <h3 id="ssh-wizard-title">Add SSH Host</h3>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Host ID</label>
+        <input type="text" id="ssh-host-id" placeholder="e.g. production-server">
+        <p class="form-help">The short service name used by ClawGuard clients.</p>
+      </div>
+      <div class="form-group">
+        <label>SSH host or IP</label>
+        <input type="text" id="ssh-host" placeholder="e.g. server.example.com or 192.168.1.20">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>SSH username</label>
+        <input type="text" id="ssh-username" placeholder="e.g. deploy">
+      </div>
+      <div class="form-group">
+        <label>Port</label>
+        <input type="number" id="ssh-port" min="1" max="65535" value="22">
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Server host public key</label>
+      <textarea id="ssh-known-host-key" class="compact-textarea" spellcheck="false" placeholder="ssh-ed25519 AAAA..."></textarea>
+      <p class="form-help">Paste one verified OpenSSH host key. A single <code>ssh-keyscan</code> or <code>known_hosts</code> line is also accepted; verify its fingerprint through a trusted channel.</p>
+    </div>
+    <div class="form-group">
+      <label class="checkbox-row"><input type="checkbox" id="ssh-allow-private"> <span>Allow a private, loopback, or link-local target. Enable this only for a host you trust on your private network.</span></label>
+    </div>
+    <div class="form-group">
+      <label>Private key source</label>
+      <select id="ssh-key-mode" onchange="onSshKeyModeChange()">
+        <option value="paste">Paste an existing private key</option>
+        <option value="generate">Generate a new Ed25519 key</option>
+        <option value="reuse">Reuse a key already in ClawGuard</option>
+        <option value="keep" id="ssh-key-keep-option">Keep the current key</option>
+      </select>
+    </div>
+    <div class="form-group" id="ssh-key-paste-group">
+      <label>Unencrypted private key</label>
+      <textarea id="ssh-private-key" class="compact-textarea" spellcheck="false" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
+      <p class="form-help">The key is sent only to ClawGuard and is never returned by the admin API.</p>
+    </div>
+    <div class="form-group" id="ssh-key-reuse-group" style="display:none;">
+      <label>Existing SSH key</label>
+      <select id="ssh-key-source"></select>
+      <p class="form-help">ClawGuard copies the selected key server-side; the browser receives only its public key and fingerprint.</p>
+    </div>
+    <div id="ssh-wizard-error" style="background: rgba(255,107,107,0.1); border: 1px solid var(--red); border-radius: var(--radius); padding: 12px; margin-bottom: 16px; font-size: 13px; color: var(--red); display: none;"></div>
+    <div id="ssh-key-result" class="key-result" style="display:none;">
+      <strong>Install this public key on the SSH host</strong>
+      <pre id="ssh-generated-public-key"></pre>
+      <div>Fingerprint: <code id="ssh-generated-fingerprint"></code></div>
+      <button class="btn btn-sm" style="margin-top:10px;background:var(--bg3);color:var(--text)" onclick="copyGeneratedPublicKey()">Copy public key</button>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" id="ssh-advanced-btn" onclick="openAdvancedSshEditor()" style="background: var(--bg3); display:none;">Advanced JSON</button>
+      <button class="btn" onclick="hideSshWizard()" style="background: var(--bg3);">Cancel</button>
+      <button class="btn btn-primary" id="ssh-wizard-save-btn" onclick="saveSshHost()">Add SSH Host</button>
+    </div>
+  </div>
+</div>
+
 <script>
 let PIN = '';
 const BASE = '/__admin';
@@ -314,6 +387,8 @@ let serviceEditingEnabled = false;
 let servicesCache = {};
 let editingServiceName = null;
 let duplicatingServiceName = null;
+let sshWizardEditingName = null;
+let sshWizardCreated = false;
 const collapsedGroups = { active: {}, history: {} };
 
 // ─── Auth ────────────────────────────────────────
@@ -467,8 +542,14 @@ async function loadServices() {
       tokenDisplay = `<span style="font-size:11px;color:var(--text2)">User:</span> <code>${esc(svc.auth.username || '-')}</code><br>` +
         `<span style="font-size:11px;color:var(--text2)">Password:</span> <code>${esc(svc.auth.password || '-')}</code>`;
     }
+    const friendlySsh = svc.protocol === 'ssh' && svc.sshWizard?.available;
+    const editAction = friendlySsh ? 'showEditSshHost' : 'showEditService';
+    const duplicateAction = friendlySsh ? 'showDuplicateSshHost' : 'showDuplicateService';
+    const advancedAction = friendlySsh
+      ? `<button class="btn btn-sm" style="background:var(--bg3);color:var(--text)" data-service="${esc(name)}" onclick="showEditService(this.dataset.service)">JSON</button>`
+      : '';
     const actions = serviceEditingEnabled
-      ? `<div class="inline-actions"><button class="btn btn-primary btn-sm" data-service="${esc(name)}" onclick="showEditService(this.dataset.service)">Edit</button><button class="btn btn-sm" style="background:var(--bg3);color:var(--text)" data-service="${esc(name)}" onclick="showDuplicateService(this.dataset.service)">Duplicate</button><button class="btn btn-danger btn-sm" data-service="${esc(name)}" onclick="deleteService(this.dataset.service)">Delete</button></div>`
+      ? `<div class="inline-actions"><button class="btn btn-primary btn-sm" data-service="${esc(name)}" onclick="${editAction}(this.dataset.service)">Edit</button>${advancedAction}<button class="btn btn-sm" style="background:var(--bg3);color:var(--text)" data-service="${esc(name)}" onclick="${duplicateAction}(this.dataset.service)">Duplicate</button><button class="btn btn-danger btn-sm" data-service="${esc(name)}" onclick="deleteService(this.dataset.service)">Delete</button></div>`
       : '<span style="color:var(--text2);font-size:12px;">YAML only</span>';
     tr.innerHTML = `
       <td><strong>${esc(name)}</strong></td>
@@ -488,14 +569,17 @@ async function loadServices() {
 function renderServiceModeNotice(adminConfig) {
   const notice = document.getElementById('service-mode-notice');
   const addBtn = document.getElementById('add-service-btn');
+  const addSshBtn = document.getElementById('add-ssh-host-btn');
   if (adminConfig.strictMode) {
     notice.className = 'notice warning';
     notice.innerHTML = 'Strict mode is enabled. Service and token edits are read-only here; edit <code>clawguard.yaml</code> and restart ClawGuard. Set <code>admin.strictMode: false</code> to allow dashboard-backed service overrides.';
     addBtn.disabled = true;
+    addSshBtn.disabled = true;
   } else {
     notice.className = 'notice success';
     notice.innerHTML = 'Dashboard service editing is enabled. Changes are saved as SQLite service overrides and can shadow <code>clawguard.yaml</code>.';
     addBtn.disabled = false;
+    addSshBtn.disabled = false;
   }
 }
 
@@ -507,6 +591,169 @@ function tokenSummary(auth) {
     return `<span style="font-size:11px;color:var(--text2)">${esc(auth.paramName || 'Param')}:</span> <code>${esc(auth.token || '-')}</code>`;
   }
   return `<code>${esc(auth.token || '-')}</code>`;
+}
+
+async function populateSshKeySources(selectedService) {
+  const select = document.getElementById('ssh-key-source');
+  select.innerHTML = '';
+  const sources = await api('GET', '/api/ssh-key-sources');
+  for (const source of sources) {
+    const option = document.createElement('option');
+    option.value = source.service;
+    option.textContent = `${source.service} — ${source.username}@${source.upstream}`;
+    if (source.service === selectedService) option.selected = true;
+    select.appendChild(option);
+  }
+  const reuseOption = document.querySelector('#ssh-key-mode option[value="reuse"]');
+  reuseOption.disabled = sources.length === 0;
+  return sources;
+}
+
+function resetSshWizardResult() {
+  sshWizardCreated = false;
+  document.getElementById('ssh-key-result').style.display = 'none';
+  document.getElementById('ssh-wizard-error').style.display = 'none';
+}
+
+function fillSshConnectionFields(service) {
+  const config = service.editableConfig;
+  try {
+    const upstream = new URL(service.upstream);
+    document.getElementById('ssh-host').value = upstream.hostname.replace(/^\[|\]$/g, '');
+    document.getElementById('ssh-port').value = upstream.port || '22';
+  } catch {
+    document.getElementById('ssh-host').value = '';
+    document.getElementById('ssh-port').value = '22';
+  }
+  document.getElementById('ssh-username').value = service.sshWizard?.username || '';
+  document.getElementById('ssh-known-host-key').value = config.ssh?.knownHostKey || '';
+  document.getElementById('ssh-allow-private').checked = config.ssh?.allowPrivateTarget === true;
+}
+
+async function showAddSshHost() {
+  if (!serviceEditingEnabled) return;
+  sshWizardEditingName = null;
+  resetSshWizardResult();
+  document.getElementById('ssh-wizard-title').textContent = 'Add SSH Host';
+  document.getElementById('ssh-wizard-save-btn').textContent = 'Add SSH Host';
+  document.getElementById('ssh-host-id').disabled = false;
+  document.getElementById('ssh-host-id').value = '';
+  document.getElementById('ssh-host').value = '';
+  document.getElementById('ssh-username').value = '';
+  document.getElementById('ssh-port').value = '22';
+  document.getElementById('ssh-known-host-key').value = '';
+  document.getElementById('ssh-allow-private').checked = false;
+  document.getElementById('ssh-private-key').value = '';
+  document.getElementById('ssh-key-keep-option').hidden = true;
+  document.getElementById('ssh-advanced-btn').style.display = 'none';
+  const sources = await populateSshKeySources();
+  document.getElementById('ssh-key-mode').value = sources.length > 0 ? 'reuse' : 'generate';
+  onSshKeyModeChange();
+  document.getElementById('ssh-wizard-modal').classList.add('show');
+}
+
+async function showEditSshHost(name) {
+  if (!serviceEditingEnabled) return;
+  const service = servicesCache[name];
+  if (!service?.sshWizard?.available) { showEditService(name); return; }
+  sshWizardEditingName = name;
+  resetSshWizardResult();
+  document.getElementById('ssh-wizard-title').textContent = `Edit SSH Host ${name}`;
+  document.getElementById('ssh-wizard-save-btn').textContent = 'Save SSH Host';
+  document.getElementById('ssh-host-id').disabled = true;
+  document.getElementById('ssh-host-id').value = name;
+  fillSshConnectionFields(service);
+  document.getElementById('ssh-private-key').value = '';
+  document.getElementById('ssh-key-keep-option').hidden = false;
+  document.getElementById('ssh-key-mode').value = 'keep';
+  document.getElementById('ssh-advanced-btn').style.display = 'inline-block';
+  await populateSshKeySources(name);
+  onSshKeyModeChange();
+  document.getElementById('ssh-wizard-modal').classList.add('show');
+}
+
+async function showDuplicateSshHost(name) {
+  if (!serviceEditingEnabled) return;
+  const service = servicesCache[name];
+  if (!service?.sshWizard?.available) { showDuplicateService(name); return; }
+  sshWizardEditingName = null;
+  resetSshWizardResult();
+  let candidate = `${name}-copy`;
+  let suffix = 2;
+  while (servicesCache[candidate]) candidate = `${name}-copy-${suffix++}`;
+  document.getElementById('ssh-wizard-title').textContent = `Duplicate SSH Host ${name}`;
+  document.getElementById('ssh-wizard-save-btn').textContent = 'Create SSH Host';
+  document.getElementById('ssh-host-id').disabled = false;
+  document.getElementById('ssh-host-id').value = candidate;
+  fillSshConnectionFields(service);
+  document.getElementById('ssh-private-key').value = '';
+  document.getElementById('ssh-key-keep-option').hidden = true;
+  document.getElementById('ssh-advanced-btn').style.display = 'none';
+  await populateSshKeySources(name);
+  document.getElementById('ssh-key-mode').value = 'reuse';
+  onSshKeyModeChange();
+  document.getElementById('ssh-wizard-modal').classList.add('show');
+}
+
+function onSshKeyModeChange() {
+  const mode = document.getElementById('ssh-key-mode').value;
+  document.getElementById('ssh-key-paste-group').style.display = mode === 'paste' ? 'block' : 'none';
+  document.getElementById('ssh-key-reuse-group').style.display = mode === 'reuse' ? 'block' : 'none';
+}
+
+function hideSshWizard() {
+  document.getElementById('ssh-private-key').value = '';
+  document.getElementById('ssh-wizard-modal').classList.remove('show');
+}
+
+function openAdvancedSshEditor() {
+  const name = sshWizardEditingName;
+  hideSshWizard();
+  if (name) showEditService(name);
+}
+
+async function copyGeneratedPublicKey() {
+  const key = document.getElementById('ssh-generated-public-key').textContent;
+  try { await navigator.clipboard.writeText(key); } catch { /* browser may deny clipboard */ }
+}
+
+async function saveSshHost() {
+  if (sshWizardCreated) { hideSshWizard(); return; }
+  const errorDiv = document.getElementById('ssh-wizard-error');
+  errorDiv.style.display = 'none';
+  const mode = document.getElementById('ssh-key-mode').value;
+  const key = { mode };
+  if (mode === 'paste') key.privateKey = document.getElementById('ssh-private-key').value;
+  if (mode === 'reuse') key.sourceService = document.getElementById('ssh-key-source').value;
+  const payload = {
+    name: document.getElementById('ssh-host-id').value.trim(),
+    host: document.getElementById('ssh-host').value.trim(),
+    port: Number(document.getElementById('ssh-port').value),
+    username: document.getElementById('ssh-username').value.trim(),
+    knownHostKey: document.getElementById('ssh-known-host-key').value.trim(),
+    allowPrivateTarget: document.getElementById('ssh-allow-private').checked,
+    key
+  };
+
+  try {
+    const result = sshWizardEditingName
+      ? await api('PUT', '/api/ssh-services/' + encodeURIComponent(sshWizardEditingName), payload)
+      : await api('POST', '/api/ssh-services', payload);
+    document.getElementById('ssh-private-key').value = '';
+    await loadServices();
+    if (result.key?.publicKey) {
+      document.getElementById('ssh-generated-public-key').textContent = result.key.publicKey;
+      document.getElementById('ssh-generated-fingerprint').textContent = result.key.fingerprint || '-';
+      document.getElementById('ssh-key-result').style.display = 'block';
+      document.getElementById('ssh-wizard-save-btn').textContent = 'Done';
+      sshWizardCreated = true;
+    } else {
+      hideSshWizard();
+    }
+  } catch (e) {
+    errorDiv.textContent = 'Error: ' + (e.message || 'Unable to save SSH host');
+    errorDiv.style.display = 'block';
+  }
 }
 
 async function showAddService() {

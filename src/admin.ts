@@ -14,6 +14,13 @@ import {
   redactServiceForAdmin,
   validateAdminService,
 } from './admin-service';
+import {
+  AdminSshKeyTools,
+  buildAdminSshService,
+  createAdminSshKeyTools,
+  getAdminSshWizardMetadata,
+  listAdminSshKeySources,
+} from './admin-ssh';
 
 /**
  * Check if an IP matches an allowed entry.
@@ -64,7 +71,11 @@ export function createAdminRouter(
   approvalManager: ApprovalManager,
   audit: AuditLogger,
   telegram?: TelegramNotifier,
-  serviceRuntime: AdminServiceRuntime = createAdminServiceRuntime(config)
+  serviceRuntime: AdminServiceRuntime = createAdminServiceRuntime(config),
+  sshKeyTools: AdminSshKeyTools = createAdminSshKeyTools(
+    config.sshBroker.sshAgentPath,
+    config.sshBroker.sshAddPath
+  )
 ): Router {
   const router = Router();
 
@@ -175,10 +186,90 @@ export function createAdminRouter(
         hostnames: svc.hostnames,
         ssh: svc.ssh,
         ftp: svc.ftp,
+        sshWizard: getAdminSshWizardMetadata(svc),
         editableConfig: redactServiceForAdmin(svc),
       };
     }
     res.json(services);
+  });
+
+  router.get('/api/ssh-key-sources', pinAuth, (_req: Request, res: Response) => {
+    res.json(listAdminSshKeySources(config));
+  });
+
+  router.post('/api/ssh-services', pinAuth, async (req: Request, res: Response) => {
+    if (rejectIfStrictMode(config, res)) return;
+
+    let body: unknown;
+    try {
+      body = JSON.parse(req.body?.toString() || '{}');
+    } catch {
+      res.status(400).json({ error: 'Invalid JSON body' });
+      return;
+    }
+
+    const requestedName = body !== null && typeof body === 'object' && !Array.isArray(body)
+      ? (body as Record<string, unknown>)['name']
+      : undefined;
+    if (typeof requestedName === 'string' && config.services[requestedName]) {
+      res.status(409).json({ error: `Service "${requestedName}" already exists` });
+      return;
+    }
+
+    try {
+      const wizard = await buildAdminSshService(body, config, sshKeyTools);
+      const name = requestedName as string;
+      const errors = validateAdminService(name, wizard.service, config);
+      if (errors.length > 0) {
+        res.status(400).json({ error: errors.join('; ') });
+        return;
+      }
+
+      const activeService = await serviceRuntime.apply(name, wizard.service);
+      audit.saveServiceOverride(name, wizard.service);
+      config.services[name] = activeService;
+      console.log(`🔐 SSH host added via admin wizard: ${name} → ${wizard.service.upstream}`);
+      res.json({ ok: true, service: name, key: wizard.keyInfo });
+    } catch (err) {
+      res.status(400).json({ error: errorMessage(err) });
+    }
+  });
+
+  router.put('/api/ssh-services/:name', pinAuth, async (req: Request, res: Response) => {
+    if (rejectIfStrictMode(config, res)) return;
+
+    const name = req.params['name'] as string;
+    const existing = config.services[name];
+    if (!existing || existing.protocol !== 'ssh') {
+      res.status(404).json({ error: `SSH service "${name}" not found` });
+      return;
+    }
+
+    let body: unknown;
+    try {
+      const parsed = JSON.parse(req.body?.toString() || '{}');
+      body = { ...parsed, name };
+    } catch {
+      res.status(400).json({ error: 'Invalid JSON body' });
+      return;
+    }
+
+    try {
+      const wizard = await buildAdminSshService(body, config, sshKeyTools, existing);
+      const errors = validateAdminService(name, wizard.service, config);
+      if (errors.length > 0) {
+        res.status(400).json({ error: errors.join('; ') });
+        return;
+      }
+
+      const activeService = await serviceRuntime.apply(name, wizard.service);
+      audit.saveServiceOverride(name, wizard.service);
+      config.services[name] = activeService;
+      console.log(`✏️  SSH host updated via admin wizard: ${name}`);
+      res.json({ ok: true, service: name, key: wizard.keyInfo });
+    } catch (err) {
+      res.status(400).json({ error: errorMessage(err) });
+    }
   });
 
   router.post('/api/services', pinAuth, async (req: Request, res: Response) => {
