@@ -91,8 +91,9 @@
   /* ─── Forms ────────────────────────────────── */
   .form-group { margin-bottom: 16px; }
   .form-group label { display: block; color: var(--text2); font-size: 13px; margin-bottom: 4px; }
-  .form-group input, .form-group select { width: 100%; padding: 10px; background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-size: 14px; outline: none; }
-  .form-group input:focus, .form-group select:focus { border-color: var(--accent); }
+  .form-group input, .form-group select, .form-group textarea { width: 100%; padding: 10px; background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-size: 14px; outline: none; }
+  .form-group input:focus, .form-group select:focus, .form-group textarea:focus { border-color: var(--accent); }
+  .form-group textarea { min-height: 360px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.45; }
   .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   .btn { padding: 8px 16px; border: none; border-radius: var(--radius); cursor: pointer; font-size: 13px; font-weight: 600; }
   .btn-primary { background: var(--accent); color: white; }
@@ -108,7 +109,7 @@
   /* ─── Modal ────────────────────────────────── */
   .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100; align-items: center; justify-content: center; }
   .modal-overlay.show { display: flex; }
-  .modal { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 24px; width: 480px; max-height: 80vh; overflow-y: auto; }
+  .modal { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 24px; width: 760px; max-width: calc(100vw - 32px); max-height: 88vh; overflow-y: auto; }
   .modal h3 { margin-bottom: 16px; }
   .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; }
 
@@ -284,55 +285,13 @@
       <input type="text" id="svc-name" placeholder="e.g. openai">
     </div>
     <div class="form-group">
-      <label>Upstream URL</label>
-      <input type="text" id="svc-upstream" placeholder="e.g. https://api.openai.com">
-    </div>
-    <div class="form-row">
-      <div class="form-group">
-        <label>Auth type</label>
-        <select id="svc-auth-type" onchange="onAuthTypeChange()"><option value="bearer">Bearer token</option><option value="header">Custom header</option><option value="query">Query parameter</option><option value="basic">Basic auth</option><option value="url">URL credentials</option><option value="oauth2_client_credentials">OAuth2 Client Credentials</option></select>
-      </div>
-      <div class="form-group" id="svc-token-group">
-        <label>Token</label>
-        <input type="password" id="svc-token" placeholder="API key or token">
-      </div>
-    </div>
-    <div class="form-group" id="svc-header-name-group">
-      <label>Header name (for custom header) / Parameter name (for query)</label>
-      <input type="text" id="svc-header-name" placeholder="e.g. X-API-Key or appid">
-    </div>
-    <div id="svc-basic-fields" style="display:none;">
-      <div class="form-row">
-        <div class="form-group">
-          <label>Username</label>
-          <input type="text" id="svc-username" placeholder="Real username">
-        </div>
-        <div class="form-group">
-          <label>Password</label>
-          <input type="password" id="svc-password" placeholder="Real password">
-        </div>
-      </div>
-    </div>
-    <div id="svc-oauth2-fields" style="display:none;">
-      <div class="form-group">
-        <label>Token endpoint path</label>
-        <input type="text" id="svc-token-path" placeholder="/token" value="/token">
-      </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label>Client ID (real)</label>
-          <input type="text" id="svc-client-id" placeholder="Real client_id">
-        </div>
-        <div class="form-group">
-          <label>Client Secret (real)</label>
-          <input type="password" id="svc-client-secret" placeholder="Real client_secret">
-        </div>
-      </div>
-      <p style="color: var(--text2); font-size: 11px; margin-bottom: 16px;">The agent script sends dummy credentials. ClawGuard replaces them with these real values before forwarding to the token endpoint.</p>
-    </div>
-    <div class="form-group">
-      <label>Default policy</label>
-      <select id="svc-policy"><option value="require_approval">Require approval</option><option value="auto_approve">Auto approve</option></select>
+      <label>Complete service configuration (JSON)</label>
+      <textarea id="svc-config-json" spellcheck="false"></textarea>
+      <p style="color: var(--text2); font-size: 11px; margin-top: 6px;">
+        All protocol, auth, policy, hostname, HTTP, SSH and FTP fields are editable here.
+        <code>{"$clawguard":"keep-secret"}</code> keeps the current secret when editing,
+        or copies it server-side when duplicating. Secret values are never returned to the browser.
+      </p>
     </div>
     <div id="allowed-upstreams-hint" style="background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; margin-bottom: 16px; font-size: 12px; color: var(--text2); display: none;">
       <strong style="color: var(--orange);">⚠️ Allowed upstream domains:</strong>
@@ -354,6 +313,7 @@ let charts = {};
 let serviceEditingEnabled = false;
 let servicesCache = {};
 let editingServiceName = null;
+let duplicatingServiceName = null;
 const collapsedGroups = { active: {}, history: {} };
 
 // ─── Auth ────────────────────────────────────────
@@ -508,7 +468,7 @@ async function loadServices() {
         `<span style="font-size:11px;color:var(--text2)">Password:</span> <code>${esc(svc.auth.password || '-')}</code>`;
     }
     const actions = serviceEditingEnabled
-      ? `<div class="inline-actions"><button class="btn btn-primary btn-sm" onclick="showEditService('${esc(name)}')">Edit</button><button class="btn btn-danger btn-sm" onclick="deleteService('${esc(name)}')">Delete</button></div>`
+      ? `<div class="inline-actions"><button class="btn btn-primary btn-sm" data-service="${esc(name)}" onclick="showEditService(this.dataset.service)">Edit</button><button class="btn btn-sm" style="background:var(--bg3);color:var(--text)" data-service="${esc(name)}" onclick="showDuplicateService(this.dataset.service)">Duplicate</button><button class="btn btn-danger btn-sm" data-service="${esc(name)}" onclick="deleteService(this.dataset.service)">Delete</button></div>`
       : '<span style="color:var(--text2);font-size:12px;">YAML only</span>';
     tr.innerHTML = `
       <td><strong>${esc(name)}</strong></td>
@@ -552,27 +512,23 @@ function tokenSummary(auth) {
 async function showAddService() {
   if (!serviceEditingEnabled) return;
   editingServiceName = null;
+  duplicatingServiceName = null;
   document.getElementById('svc-modal-title').textContent = 'Add Service';
   document.getElementById('svc-save-btn').textContent = 'Add Service';
   document.getElementById('svc-name').disabled = false;
   document.getElementById('svc-name').value = '';
-  document.getElementById('svc-upstream').value = '';
-  document.getElementById('svc-token').value = '';
-  document.getElementById('svc-token').placeholder = 'API key or token';
-  document.getElementById('svc-header-name').value = '';
-  document.getElementById('svc-username').value = '';
-  document.getElementById('svc-password').value = '';
-  document.getElementById('svc-password').placeholder = 'Real password';
-  document.getElementById('svc-client-id').value = '';
-  document.getElementById('svc-client-id').placeholder = 'Real client_id';
-  document.getElementById('svc-client-secret').value = '';
-  document.getElementById('svc-client-secret').placeholder = 'Real client_secret';
-  document.getElementById('svc-token-path').value = '/token';
-  document.getElementById('svc-policy').value = 'require_approval';
+  document.getElementById('svc-config-json').value = JSON.stringify({
+    protocol: 'http',
+    upstream: 'https://api.example.com',
+    auth: { type: 'bearer', token: '' },
+    policy: { default: 'require_approval' }
+  }, null, 2);
   document.getElementById('add-service-modal').classList.add('show');
   document.getElementById('add-service-error').style.display = 'none';
-  document.getElementById('svc-auth-type').value = 'bearer';
-  onAuthTypeChange();
+  await loadAllowedUpstreamsHint();
+}
+
+async function loadAllowedUpstreamsHint() {
   try {
     const data = await api('GET', '/api/allowed-upstreams');
     const hint = document.getElementById('allowed-upstreams-hint');
@@ -591,98 +547,65 @@ async function showEditService(name) {
   const svc = servicesCache[name];
   if (!svc) return;
   editingServiceName = name;
+  duplicatingServiceName = null;
   document.getElementById('svc-modal-title').textContent = `Edit ${name}`;
   document.getElementById('svc-save-btn').textContent = 'Save Changes';
   document.getElementById('svc-name').disabled = true;
   document.getElementById('svc-name').value = name;
-  document.getElementById('svc-upstream').value = svc.upstream || '';
-  document.getElementById('svc-auth-type').value = svc.auth.type || 'bearer';
-  document.getElementById('svc-token').value = '';
-  document.getElementById('svc-token').placeholder = 'Leave blank to keep current token';
-  document.getElementById('svc-header-name').value = svc.auth.headerName || svc.auth.paramName || '';
-  document.getElementById('svc-username').value = svc.auth.username || '';
-  document.getElementById('svc-password').value = '';
-  document.getElementById('svc-password').placeholder = 'Leave blank to keep current password';
-  document.getElementById('svc-client-id').value = '';
-  document.getElementById('svc-client-id').placeholder = 'Leave blank to keep current client_id';
-  document.getElementById('svc-client-secret').value = '';
-  document.getElementById('svc-client-secret').placeholder = 'Leave blank to keep current client_secret';
-  document.getElementById('svc-token-path').value = svc.auth.tokenPath || '/token';
-  document.getElementById('svc-policy').value = svc.policy?.default || 'require_approval';
+  document.getElementById('svc-config-json').value = JSON.stringify(svc.editableConfig, null, 2);
   document.getElementById('add-service-error').style.display = 'none';
   document.getElementById('add-service-modal').classList.add('show');
-  onAuthTypeChange();
+  await loadAllowedUpstreamsHint();
+}
+
+async function showDuplicateService(name) {
+  if (!serviceEditingEnabled) return;
+  const svc = servicesCache[name];
+  if (!svc) return;
+  editingServiceName = null;
+  duplicatingServiceName = name;
+  let candidate = `${name}-copy`;
+  let suffix = 2;
+  while (servicesCache[candidate]) {
+    candidate = `${name}-copy-${suffix++}`;
+  }
+  document.getElementById('svc-modal-title').textContent = `Duplicate ${name}`;
+  document.getElementById('svc-save-btn').textContent = 'Create Duplicate';
+  document.getElementById('svc-name').disabled = false;
+  document.getElementById('svc-name').value = candidate;
+  document.getElementById('svc-config-json').value = JSON.stringify(svc.editableConfig, null, 2);
+  document.getElementById('add-service-error').style.display = 'none';
+  document.getElementById('add-service-modal').classList.add('show');
+  await loadAllowedUpstreamsHint();
 }
 
 function hideAddService() { document.getElementById('add-service-modal').classList.remove('show'); }
 
-function onAuthTypeChange() {
-  const authType = document.getElementById('svc-auth-type').value;
-  const oauth2Fields = document.getElementById('svc-oauth2-fields');
-  const basicFields = document.getElementById('svc-basic-fields');
-  const tokenGroup = document.getElementById('svc-token-group');
-  const headerGroup = document.getElementById('svc-header-name-group');
-  if (authType === 'oauth2_client_credentials') {
-    oauth2Fields.style.display = 'block';
-    basicFields.style.display = 'none';
-    tokenGroup.style.display = 'none';
-    headerGroup.style.display = 'none';
-  } else if (authType === 'basic' || authType === 'url') {
-    oauth2Fields.style.display = 'none';
-    basicFields.style.display = 'block';
-    tokenGroup.style.display = 'none';
-    headerGroup.style.display = 'none';
-  } else {
-    oauth2Fields.style.display = 'none';
-    basicFields.style.display = 'none';
-    tokenGroup.style.display = 'block';
-    headerGroup.style.display = (authType === 'header' || authType === 'query') ? 'block' : 'none';
-  }
-}
-
 async function saveService() {
   if (!serviceEditingEnabled) return;
   const name = document.getElementById('svc-name').value.trim();
-  const upstream = document.getElementById('svc-upstream').value.trim();
-  const authType = document.getElementById('svc-auth-type').value;
-  const token = document.getElementById('svc-token').value;
-  const headerName = document.getElementById('svc-header-name').value.trim();
-  const username = document.getElementById('svc-username').value.trim();
-  const password = document.getElementById('svc-password').value;
-  const policy = document.getElementById('svc-policy').value;
   const isEdit = !!editingServiceName;
-  const existingAuthType = isEdit ? servicesCache[editingServiceName]?.auth?.type : null;
-  const authTypeChanged = isEdit && existingAuthType !== authType;
-  let auth;
-
-  if (authType === 'oauth2_client_credentials') {
-    const clientId = document.getElementById('svc-client-id').value.trim();
-    const clientSecret = document.getElementById('svc-client-secret').value.trim();
-    const tokenPath = document.getElementById('svc-token-path').value.trim() || '/token';
-    if (!name || !upstream || ((!isEdit || authTypeChanged) && (!clientId || !clientSecret))) { alert('Fill all required fields'); return; }
-    auth = { type: authType, token: 'unused', tokenPath };
-    if (clientId) auth.clientId = clientId;
-    if (clientSecret) auth.clientSecret = clientSecret;
-  } else if (authType === 'basic' || authType === 'url') {
-    if (!name || !upstream || ((!isEdit || authTypeChanged) && (!username || !password))) { alert('Fill all required fields'); return; }
-    auth = { type: authType, token: 'unused' };
-    if (username) auth.username = username;
-    if (password) auth.password = password;
-  } else {
-    if (!name || !upstream || ((!isEdit || authTypeChanged) && !token)) { alert('Fill all required fields'); return; }
-    auth = { type: authType };
-    if (token) auth.token = token;
-    if (authType === 'header' && headerName) auth.headerName = headerName;
-    if (authType === 'query' && headerName) auth.paramName = headerName;
-  }
-
   const errorDiv = document.getElementById('add-service-error');
   errorDiv.style.display = 'none';
+  if (!name) { alert('Service name is required'); return; }
+
+  let config;
+  try {
+    config = JSON.parse(document.getElementById('svc-config-json').value);
+    if (!config || typeof config !== 'object' || Array.isArray(config)) {
+      throw new Error('configuration must be a JSON object');
+    }
+  } catch (e) {
+    errorDiv.textContent = 'Invalid JSON: ' + e.message;
+    errorDiv.style.display = 'block';
+    return;
+  }
 
   try {
-    const config = { upstream, auth, policy: { default: policy } };
     if (isEdit) {
-      await api('PUT', '/api/services/' + encodeURIComponent(editingServiceName), { config });
+      await api('PUT', '/api/services/' + encodeURIComponent(editingServiceName), { config, replace: true });
+    } else if (duplicatingServiceName) {
+      await api('POST', '/api/services/' + encodeURIComponent(duplicatingServiceName) + '/duplicate', { name, config });
     } else {
       await api('POST', '/api/services', { name, config });
     }
@@ -690,8 +613,9 @@ async function saveService() {
     loadServices();
   } catch (e) {
     const msg = e.message || '';
-    if (msg.includes('not in the allowed upstreams')) {
-      const domain = upstream.replace(/^https?:\/\//, '').split('/')[0];
+    if (msg.includes('not in the allowed upstreams') || msg.includes('not in security.allowedUpstreams')) {
+      let domain = config.upstream || 'unknown';
+      try { domain = new URL(config.upstream).hostname; } catch { /* keep raw value */ }
       errorDiv.innerHTML = `<strong>❌ Domain not allowed:</strong> <code>${esc(domain)}</code> is not in <code>security.allowedUpstreams</code>.<br><br>` +
         `To fix this, add <code>${esc(domain)}</code> to the <code>security.allowedUpstreams</code> list in <code>clawguard.yaml</code> and restart ClawGuard.`;
     } else {
@@ -704,7 +628,7 @@ async function saveService() {
 async function deleteService(name) {
   if (!confirm(`Delete service "${name}"?`)) return;
   try {
-    await api('DELETE', '/api/services/' + name);
+    await api('DELETE', '/api/services/' + encodeURIComponent(name));
     loadServices();
   } catch (e) {
     alert('Error: ' + e.message);

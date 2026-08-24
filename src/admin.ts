@@ -5,8 +5,15 @@ import { Config, ServiceConfig } from './types';
 import { ApprovalManager } from './approval';
 import { AuditLogger } from './audit';
 import { TelegramNotifier } from './telegram';
-import { validateUpstreamUrl } from './security';
 import { getPassthroughHosts } from './mitm-proxy';
+import {
+  AdminServiceRuntime,
+  createAdminServiceRuntime,
+  hydrateAdminService,
+  hydrateAdminServicePatch,
+  redactServiceForAdmin,
+  validateAdminService,
+} from './admin-service';
 
 /**
  * Check if an IP matches an allowed entry.
@@ -52,48 +59,12 @@ function rejectIfStrictMode(config: Config, res: Response): boolean {
   return true;
 }
 
-function rejectNonHttpServiceMutation(service: Partial<ServiceConfig> | undefined, res: Response): boolean {
-  if (service?.protocol !== undefined && service.protocol !== 'http') {
-    const error = service.protocol === 'ssh'
-      ? 'SSH services are YAML-only in the experimental gateway and cannot be changed through the admin API.'
-      : service.protocol === 'ftp' || service.protocol === 'ftps'
-        ? 'FTP/FTPS services are YAML-only in the experimental gateway and cannot be changed through the admin API.'
-        : 'Only HTTP service overrides are supported through the admin API.';
-    res.status(403).json({
-      error,
-    });
-    return true;
-  }
-  if (service?.ssh === undefined && service?.ftp === undefined) return false;
-  res.status(403).json({
-    error: service.ssh !== undefined
-      ? 'SSH services are YAML-only in the experimental gateway and cannot be changed through the admin API.'
-      : 'FTP/FTPS services are YAML-only in the experimental gateway and cannot be changed through the admin API.',
-  });
-  return true;
-}
-
-function hasSensitiveHttpTargetException(service: Partial<ServiceConfig> | undefined): boolean {
-  return service?.http?.allowPrivateTarget === true
-    || service?.http?.noCheckCertificate === true;
-}
-
-function rejectSensitiveHttpTargetMutation(
-  service: Partial<ServiceConfig> | undefined,
-  res: Response
-): boolean {
-  if (!hasSensitiveHttpTargetException(service)) return false;
-  res.status(403).json({
-    error: 'HTTP private-target and TLS verification exceptions are YAML-only',
-  });
-  return true;
-}
-
 export function createAdminRouter(
   config: Config,
   approvalManager: ApprovalManager,
   audit: AuditLogger,
-  telegram?: TelegramNotifier
+  telegram?: TelegramNotifier,
+  serviceRuntime: AdminServiceRuntime = createAdminServiceRuntime(config)
 ): Router {
   const router = Router();
 
@@ -181,6 +152,8 @@ export function createAdminRouter(
         paramName: svc.auth.paramName,
         username: svc.auth.username,
         password: svc.auth.password ? maskToken(svc.auth.password) : undefined,
+        pluginPath: svc.auth.pluginPath,
+        pluginConfigPresent: svc.auth.pluginConfig !== undefined,
       };
       if (svc.auth.type === 'oauth2_client_credentials') {
         authInfo.tokenPath = svc.auth.tokenPath;
@@ -202,16 +175,16 @@ export function createAdminRouter(
         hostnames: svc.hostnames,
         ssh: svc.ssh,
         ftp: svc.ftp,
-        yamlOnly: (svc.protocol ?? 'http') !== 'http' || hasSensitiveHttpTargetException(svc),
+        editableConfig: redactServiceForAdmin(svc),
       };
     }
     res.json(services);
   });
 
-  router.post('/api/services', pinAuth, (req: Request, res: Response) => {
+  router.post('/api/services', pinAuth, async (req: Request, res: Response) => {
     if (rejectIfStrictMode(config, res)) return;
 
-    let body: { name?: string; config?: ServiceConfig };
+    let body: { name?: string; config?: unknown };
     try {
       body = JSON.parse(req.body?.toString() || '{}');
     } catch {
@@ -224,37 +197,89 @@ export function createAdminRouter(
       return;
     }
 
-    if (rejectNonHttpServiceMutation(body.config, res)
-      || rejectSensitiveHttpTargetMutation(body.config, res)) return;
-
     if (config.services[body.name]) {
       res.status(409).json({ error: `Service "${body.name}" already exists` });
       return;
     }
 
-    // Validate upstream
-    const validation = validateUpstreamUrl(
-      body.config.upstream,
-      config.security,
-      body.config.http?.allowPrivateTarget === true
-    );
-    if (!validation.valid) {
-      res.status(400).json({ error: validation.reason });
+    let service: ServiceConfig;
+    try {
+      service = hydrateAdminService(body.config);
+    } catch (err) {
+      res.status(400).json({ error: errorMessage(err) });
+      return;
+    }
+    const errors = validateAdminService(body.name, service, config);
+    if (errors.length > 0) {
+      res.status(400).json({ error: errors.join('; ') });
       return;
     }
 
-    // Save to SQLite and update runtime config
-    audit.saveServiceOverride(body.name, body.config);
-    config.services[body.name] = body.config;
-    console.log(`➕ Service added via admin: ${body.name} → ${body.config.upstream}`);
-    res.json({ ok: true, service: body.name });
+    try {
+      const activeService = await serviceRuntime.apply(body.name, service);
+      audit.saveServiceOverride(body.name, service);
+      config.services[body.name] = activeService;
+      console.log(`➕ Service added via admin: ${body.name} → ${service.upstream}`);
+      res.json({ ok: true, service: body.name });
+    } catch (err) {
+      res.status(400).json({ error: errorMessage(err) });
+    }
   });
 
-  router.put('/api/services/:name', pinAuth, (req: Request, res: Response) => {
+  router.post('/api/services/:source/duplicate', pinAuth, async (req: Request, res: Response) => {
+    if (rejectIfStrictMode(config, res)) return;
+
+    const sourceName = req.params['source'] as string;
+    const source = config.services[sourceName];
+    if (!source) {
+      res.status(404).json({ error: `Service "${sourceName}" not found` });
+      return;
+    }
+    let body: { name?: string; config?: unknown };
+    try {
+      body = JSON.parse(req.body?.toString() || '{}');
+    } catch {
+      res.status(400).json({ error: 'Invalid JSON body' });
+      return;
+    }
+    if (!body.name || !body.config) {
+      res.status(400).json({ error: 'Missing name or config' });
+      return;
+    }
+    if (config.services[body.name]) {
+      res.status(409).json({ error: `Service "${body.name}" already exists` });
+      return;
+    }
+
+    let duplicate: ServiceConfig;
+    try {
+      duplicate = hydrateAdminService(body.config, source);
+    } catch (err) {
+      res.status(400).json({ error: errorMessage(err) });
+      return;
+    }
+    const errors = validateAdminService(body.name, duplicate, config);
+    if (errors.length > 0) {
+      res.status(400).json({ error: errors.join('; ') });
+      return;
+    }
+
+    try {
+      const activeService = await serviceRuntime.apply(body.name, duplicate);
+      audit.saveServiceOverride(body.name, duplicate);
+      config.services[body.name] = activeService;
+      console.log(`📋 Service duplicated via admin: ${sourceName} → ${body.name}`);
+      res.json({ ok: true, service: body.name, source: sourceName });
+    } catch (err) {
+      res.status(400).json({ error: errorMessage(err) });
+    }
+  });
+
+  router.put('/api/services/:name', pinAuth, async (req: Request, res: Response) => {
     if (rejectIfStrictMode(config, res)) return;
 
     const name = req.params['name'] as string;
-    let body: { config?: Partial<ServiceConfig> };
+    let body: { config?: unknown; replace?: boolean };
     try {
       body = JSON.parse(req.body?.toString() || '{}');
     } catch {
@@ -267,36 +292,35 @@ export function createAdminRouter(
       return;
     }
 
-    if (rejectNonHttpServiceMutation(config.services[name], res)
-      || rejectNonHttpServiceMutation(body.config, res)
-      || rejectSensitiveHttpTargetMutation(config.services[name], res)
-      || rejectSensitiveHttpTargetMutation(body.config, res)) return;
-
-    // Merge with existing
-    const updated: ServiceConfig = {
-      ...config.services[name],
-      ...body.config,
-      auth: { ...config.services[name].auth, ...body.config?.auth },
-      policy: { ...config.services[name].policy, ...body.config?.policy },
-    };
-
-    // Validate upstream if changed
-    if (body.config?.upstream) {
-      const validation = validateUpstreamUrl(
-        body.config.upstream,
-        config.security,
-        body.config.http?.allowPrivateTarget === true
-      );
-      if (!validation.valid) {
-        res.status(400).json({ error: validation.reason });
-        return;
-      }
+    if (!body.config) {
+      res.status(400).json({ error: 'Missing config' });
+      return;
     }
 
-    audit.saveServiceOverride(name, updated);
-    config.services[name] = updated;
-    console.log(`✏️  Service updated via admin: ${name}`);
-    res.json({ ok: true, service: name });
+    let updated: ServiceConfig;
+    try {
+      updated = body.replace
+        ? hydrateAdminService(body.config, config.services[name])
+        : hydrateAdminServicePatch(body.config, config.services[name]);
+    } catch (err) {
+      res.status(400).json({ error: errorMessage(err) });
+      return;
+    }
+    const errors = validateAdminService(name, updated, config);
+    if (errors.length > 0) {
+      res.status(400).json({ error: errors.join('; ') });
+      return;
+    }
+
+    try {
+      const activeService = await serviceRuntime.apply(name, updated);
+      audit.saveServiceOverride(name, updated);
+      config.services[name] = activeService;
+      console.log(`✏️  Service updated via admin: ${name}`);
+      res.json({ ok: true, service: name });
+    } catch (err) {
+      res.status(400).json({ error: errorMessage(err) });
+    }
   });
 
   router.delete('/api/services/:name', pinAuth, (req: Request, res: Response) => {
@@ -308,11 +332,9 @@ export function createAdminRouter(
       return;
     }
 
-    if (rejectNonHttpServiceMutation(config.services[name], res)
-      || rejectSensitiveHttpTargetMutation(config.services[name], res)) return;
-
     audit.deleteServiceOverride(name);
     delete config.services[name];
+    serviceRuntime.remove(name);
     approvalManager.revokeApproval(name);
     console.log(`🗑️  Service deleted via admin: ${name}`);
     res.json({ ok: true });
@@ -403,4 +425,8 @@ function maskToken(token: string | undefined): string | undefined {
   if (token === undefined) return undefined;
   if (token.length <= 8) return '****';
   return token.substring(0, 4) + '****' + token.substring(token.length - 4);
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }

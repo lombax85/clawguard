@@ -525,7 +525,9 @@ FTP client -> per-lease rclone server -> pinned relay -> upstream FTP server
               ClawGuard approval + credentials
 ```
 
-Configure a YAML-only service and the disabled-by-default gateway:
+Configure the service in YAML (the strict-mode default) and enable the
+disabled-by-default gateway. When `admin.strictMode: false`, the same complete
+service document can also be edited or duplicated from the dashboard:
 
 ```yaml
 services:
@@ -644,9 +646,10 @@ and the decision is not persisted. Ticket/session-export methods such as
 `AcquireCloneTicket`, `AcquireGenericServiceTicket`, `CloneSession`, and
 impersonation/token login are blocked.
 
-Configure the service only in `clawguard.yaml`; private-target and TLS
-verification exceptions are intentionally YAML-only and cannot be added,
-changed, or deleted through admin service overrides:
+Private-target and TLS verification exceptions are explicit per-service
+security opt-ins. Keep `admin.strictMode: true` when they must remain
+YAML-controlled; editable mode can change them and therefore requires a
+strong admin PIN, TLS, and a narrow `admin.allowedIPs` allowlist:
 
 ```yaml
 services:
@@ -862,7 +865,7 @@ ClawGuard includes a built-in dashboard at `http://clawguard-host:9090/__admin`,
   <img src="docs/screenshots/dashboard.png" alt="ClawGuard dashboard with analytics charts" width="700">
 </p>
 
-**Service management** — add, edit, rotate, and remove services and tokens from the browser when `admin.strictMode: false` (tokens are masked). In strict mode, YAML remains the only source of truth and the dashboard is read-only for service credentials:
+**Service management** — add, edit, duplicate, and remove HTTP, SSH, FTP, and FTPS services when `admin.strictMode: false`. The editor includes the complete service JSON (protocol fields, auth, hostnames, policy rules, and HTTP/SSH/FTP options). Credentials are represented by `{"$clawguard":"keep-secret"}` and are resolved or copied only on the server; their values never return to the browser. In strict mode, YAML remains the only source of truth and the dashboard is read-only:
 
 <p align="center">
   <img src="docs/screenshots/services.png" alt="Configured services with masked tokens" width="700">
@@ -1007,7 +1010,7 @@ security:
 admin:
   enabled: true
   pin: "your-admin-pin"
-  strictMode: true                         # true = YAML-only service/token config; false = dashboard SQLite overrides
+  strictMode: true                         # true = YAML-only services; false = complete dashboard SQLite overrides
   allowedIPs: ["127.0.0.1", "::1"]      # dashboard only from localhost
 
 audit:

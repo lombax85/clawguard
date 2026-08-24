@@ -136,6 +136,15 @@ export class AuditLogger {
         response_body TEXT
       );
 
+      -- Dashboard queries are synchronous (better-sqlite3). Keep their week
+      -- and service scans inside covering indexes so they cannot monopolize
+      -- the Node event loop and delay unrelated admin/Telegram work.
+      CREATE INDEX IF NOT EXISTS idx_requests_timestamp_service_method_approved
+      ON requests(timestamp, service, method, approved);
+
+      CREATE INDEX IF NOT EXISTS idx_requests_service_timestamp_method_approved
+      ON requests(service, timestamp, method, approved);
+
       CREATE TABLE IF NOT EXISTS approvals (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp TEXT NOT NULL,

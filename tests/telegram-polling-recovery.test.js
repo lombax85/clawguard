@@ -269,14 +269,16 @@ test('TelegramNotifier wires 409 errors into the guard without raw getUpdates ca
   const originalLog = console.log;
   const originalWarn = console.warn;
   const originalError = console.error;
+  const warnings = [];
+  const errors = [];
   let fetchCalls = 0;
   global.fetch = async () => {
     fetchCalls += 1;
     throw new Error('raw fetch must not be used');
   };
   console.log = () => {};
-  console.warn = () => {};
-  console.error = () => {};
+  console.warn = (...args) => warnings.push(args.join(' '));
+  console.error = (...args) => errors.push(args.join(' '));
 
   const notifier = new TelegramNotifier(
     {
@@ -296,6 +298,18 @@ test('TelegramNotifier wires 409 errors into the guard without raw getUpdates ca
   );
 
   try {
+    bot.emit('polling_error', new Error('HTTP timeout'));
+    assert.equal(notifier.getHealth().consecutivePollingErrors, 1);
+    assert.equal(notifier.getHealth().lastPollingError, 'HTTP timeout');
+    assert.equal(warnings.some((line) => /retry automatically/.test(line)), true);
+    assert.equal(errors.some((line) => /HTTP timeout/.test(line)), false);
+    bot.emit('polling_error', new Error('HTTP timeout'));
+    bot.emit('polling_error', new Error('HTTP timeout'));
+    assert.equal(notifier.getHealth().consecutivePollingErrors, 3);
+    assert.equal(errors.some((line) => /3 consecutive/.test(line)), true);
+    bot.emit('message', { chat: { id: 123 } });
+    assert.equal(notifier.getHealth().consecutivePollingErrors, 0);
+
     let releaseCallbackAck;
     bot.callbackAck = new Promise((resolve) => { releaseCallbackAck = resolve; });
     const claimedApproval = notifier.requestApproval(

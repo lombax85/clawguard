@@ -130,7 +130,7 @@ services:
   #   hostnames:
   #     - esxi.clawguard.local                   # optional forwarder alias
   #   http:
-  #     allowPrivateTarget: true                 # YAML-only explicit LAN opt-in
+  #     allowPrivateTarget: true                 # explicit LAN opt-in (YAML-only when strictMode is true)
   #     # Verify and record the ESXi certificate SHA-256 fingerprint through a
   #     # trusted channel before enabling this for a self-signed certificate.
   #     noCheckCertificate: true
@@ -153,9 +153,10 @@ services:
   #         action: auto_approve
 
   # ─── Experimental SSH access gateway ────────────────────
-  # SSH services are YAML-only and always require one explicit Telegram
-  # approval per session. The key is resolved inside ClawGuard and is never
-  # returned to the inbound SSH client or written to a private-key file.
+  # SSH services always require one explicit Telegram approval per session.
+  # strictMode keeps them YAML-only by default; editable admin mode can clone
+  # the complete service while keeping the private key inside ClawGuard. The
+  # key is never returned to the browser/client or written to a private-key file.
   #
   # production-ssh:
   #   protocol: ssh

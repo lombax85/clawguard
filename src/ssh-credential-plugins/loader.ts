@@ -203,3 +203,7 @@ export function getSshCredentialPlugin(
 ): ISshCredentialPlugin | undefined {
   return sshCredentialPluginRegistry.get(serviceName);
 }
+
+export function unloadSshCredentialPlugin(serviceName: string): void {
+  sshCredentialPluginRegistry.delete(serviceName);
+}

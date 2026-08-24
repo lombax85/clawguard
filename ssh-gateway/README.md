@@ -76,8 +76,11 @@ sshBroker:
   maxConcurrentLeases: 10
 ```
 
-Add a YAML-only SSH service. Resolve `privateKey` from a protected secret
-backend; this example uses the existing Vault reference syntax:
+Add an SSH service in YAML (the strict-mode default). With
+`admin.strictMode: false`, the complete service can also be edited or
+duplicated from the dashboard; `privateKey` is copied server-side and is never
+returned to the browser. Resolve it from a protected secret backend; this
+example uses the existing Vault reference syntax:
 
 ```yaml
 services:

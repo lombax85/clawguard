@@ -140,3 +140,7 @@ export async function loadFtpCredentialPlugin(
 export function getFtpCredentialPlugin(serviceName: string): IFtpCredentialPlugin | undefined {
   return registry.get(serviceName);
 }
+
+export function unloadFtpCredentialPlugin(serviceName: string): void {
+  registry.delete(serviceName);
+}

@@ -208,9 +208,10 @@ export class TelegramNotifier {
       this.pollingRecovery.noteHealthy();
     });
     this.bot.on('polling_error', (err) => {
-      const message = err instanceof Error ? err.stack || err.message : String(err);
+      const summary = err instanceof Error ? err.message : String(err);
+      const detail = err instanceof Error ? err.stack || err.message : String(err);
       this.lastPollingErrorAt = Date.now();
-      this.lastPollingError = message;
+      this.lastPollingError = summary;
       this.consecutivePollingErrors++;
       if (this.isPollingConflict(err)) {
         if (this.pollingRecovery.handleConflict()) {
@@ -218,7 +219,13 @@ export class TelegramNotifier {
         }
       } else {
         this.pollingRecovery.notePollingError();
-        console.error('❌ Telegram polling_error:', message);
+        if (this.isPollingTimeout(err)) {
+          const message = `Telegram long-poll timed out (${this.consecutivePollingErrors} consecutive); the client will retry automatically`;
+          if (this.consecutivePollingErrors >= 3) console.error(`❌ ${message}`);
+          else console.warn(`⚠️ ${message}`);
+        } else {
+          console.error('❌ Telegram polling_error:', detail);
+        }
       }
     });
     this.bot.on('error', (err) => {
@@ -241,6 +248,19 @@ export class TelegramNotifier {
     return response?.status === 409
       || response?.statusCode === 409
       || message.includes('409 Conflict');
+  }
+
+  private isPollingTimeout(err: unknown): boolean {
+    const error = err as {
+      message?: string;
+      code?: string;
+      cause?: { code?: string; message?: string };
+    } | null;
+    const message = `${error?.message || ''} ${error?.cause?.message || ''}`;
+    const code = error?.code || error?.cause?.code || '';
+    return /\bHTTP timeout\b/i.test(message)
+      || /^UND_ERR_.*TIMEOUT$/.test(code)
+      || code === 'ETIMEDOUT';
   }
 
   clearPendingRequest(requestId: string): void {

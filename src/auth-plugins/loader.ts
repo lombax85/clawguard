@@ -92,6 +92,11 @@ export function getPlugin(serviceName: string): IAuthPlugin | undefined {
   return pluginRegistry.get(serviceName);
 }
 
+/** Remove a dynamically deleted or protocol-switched service. */
+export function unloadPlugin(serviceName: string): void {
+  pluginRegistry.delete(serviceName);
+}
+
 /** Returns the data directory path for a plugin */
 export function getPluginDataDir(pluginName: string, dataBaseDir: string): string {
   return path.join(dataBaseDir, pluginName);

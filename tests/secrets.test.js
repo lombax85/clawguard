@@ -5,6 +5,7 @@ const http = require('node:http');
 const { parseSecretRef, resolveSecretValue, createSecretProviders } = require('../dist/secrets/provider');
 const { StaticSecretProvider } = require('../dist/secrets/static');
 const { VaultSecretProvider } = require('../dist/secrets/vault');
+const { resolveServiceConfigSecrets } = require('../dist/config');
 
 // ─── parseSecretRef ─────────────────────────────────────────
 
@@ -352,6 +353,51 @@ test('resolveSecretValue resolves vault: prefixed token via mock', async () => {
 
     const result = await resolveSecretValue('vault:secret/data/myapp#token', providers);
     assert.equal(result, 'resolved-secret');
+  } finally {
+    server.close();
+  }
+});
+
+test('resolveServiceConfigSecrets resolves an admin override without mutating its persisted references', async () => {
+  const mockData = {
+    data: {
+      data: {
+        token: 'resolved-token',
+        password: 'resolved-password',
+      },
+    },
+  };
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(mockData));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  const service = {
+    upstream: 'https://api.example.com',
+    auth: {
+      type: 'plugin',
+      token: 'vault:secret/data/admin#token',
+      pluginPath: 'example',
+      pluginConfig: {
+        password: 'vault:secret/data/admin#password',
+      },
+    },
+    policy: { default: 'require_approval' },
+  };
+
+  try {
+    const resolved = await resolveServiceConfigSecrets(service, {
+      vault: {
+        address: `http://127.0.0.1:${port}`,
+        auth: { method: 'token', token: 'test-token' },
+      },
+    });
+
+    assert.equal(resolved.auth.token, 'resolved-token');
+    assert.equal(resolved.auth.pluginConfig.password, 'resolved-password');
+    assert.equal(service.auth.token, 'vault:secret/data/admin#token');
+    assert.equal(service.auth.pluginConfig.password, 'vault:secret/data/admin#password');
   } finally {
     server.close();
   }

@@ -4,6 +4,7 @@ const http = require('node:http');
 const express = require('express');
 
 const { createAdminRouter } = require('../dist/admin');
+const { DEFAULT_FTP_GATEWAY, DEFAULT_SSH_BROKER } = require('../dist/config');
 
 function makeConfig(strictMode) {
   return {
@@ -21,11 +22,16 @@ function makeConfig(strictMode) {
       },
     },
     security: {
-      allowedUpstreams: ['api.example.com'],
+      allowedUpstreams: [
+        'api.example.com', 'ssh.example.com', 'ssh2.example.com',
+        'files.example.com', '192.168.88.3',
+      ],
       blockPrivateIPs: true,
       followRedirects: false,
       maxPayloadLogSize: 10240,
     },
+    sshBroker: { ...DEFAULT_SSH_BROKER, enabled: true },
+    ftpGateway: { ...DEFAULT_FTP_GATEWAY, enabled: true, allowInsecureHttpApi: true },
   };
 }
 
@@ -46,7 +52,7 @@ function makeSshService({ includeToken = true } = {}) {
     auth,
     policy: { default: 'require_approval' },
     ssh: {
-      knownHostKey: 'ssh-ed25519 AAAATESTPUBLICHOSTKEY',
+      knownHostKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC',
       allowPrivateTarget: false,
     },
   };
@@ -115,12 +121,20 @@ async function withAdminServer(config, fn) {
   const app = express();
   app.use(express.raw({ type: '*/*', limit: '1mb' }));
   const audit = fakeAudit();
-  app.use('/__admin', createAdminRouter(config, fakeApprovalManager(), audit));
+  const runtime = {
+    calls: { apply: [], remove: [] },
+    apply: async (name, service) => {
+      runtime.calls.apply.push({ name, service });
+      return structuredClone(service);
+    },
+    remove: (name) => runtime.calls.remove.push(name),
+  };
+  app.use('/__admin', createAdminRouter(config, fakeApprovalManager(), audit, undefined, runtime));
   const server = http.createServer(app);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address();
   try {
-    await fn(`http://127.0.0.1:${port}/__admin`, audit);
+    await fn(`http://127.0.0.1:${port}/__admin`, audit, runtime);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -169,82 +183,117 @@ test('admin editable mode persists service overrides and updates runtime config'
   });
 });
 
-test('admin editable mode rejects creating SSH services', async () => {
+test('admin duplicates an SSH service server-side without exposing its private key', async () => {
   const config = makeConfig(false);
-  await withAdminServer(config, async (base, audit) => {
-    const res = await fetch(`${base}/api/services`, {
+  config.services['production-ssh'] = makeSshService({ includeToken: false });
+  await withAdminServer(config, async (base, audit, runtime) => {
+    const list = await fetch(`${base}/api/services`, {
+      headers: { 'x-clawguard-pin': '1234' },
+    });
+    const raw = await list.text();
+    const editable = JSON.parse(raw)['production-ssh'].editableConfig;
+    assert.equal(raw.includes('PRIVATE_KEY_MUST_NEVER_LEAVE_ADMIN_API'), false);
+    assert.deepEqual(editable.auth.pluginConfig.privateKey, { $clawguard: 'keep-secret' });
+    editable.upstream = 'ssh://ssh2.example.com:22';
+
+    const duplicate = await fetch(`${base}/api/services/production-ssh/duplicate`, {
       method: 'POST',
       headers: { 'x-clawguard-pin': '1234', 'content-type': 'application/json' },
-      body: JSON.stringify({ name: 'production-ssh', config: makeSshService() }),
+      body: JSON.stringify({ name: 'production-ssh-copy', config: editable }),
     });
 
-    assert.equal(res.status, 403);
-    assert.match((await res.json()).error, /SSH services are YAML-only/i);
-    assert.equal(audit.calls.saveServiceOverride.length, 0);
-    assert.equal(config.services['production-ssh'], undefined);
+    assert.equal(duplicate.status, 200, await duplicate.text());
+    assert.equal(config.services['production-ssh-copy'].upstream, 'ssh://ssh2.example.com:22');
+    assert.equal(
+      config.services['production-ssh-copy'].auth.pluginConfig.privateKey,
+      'PRIVATE_KEY_MUST_NEVER_LEAVE_ADMIN_API'
+    );
+    assert.equal(audit.calls.saveServiceOverride.length, 1);
+    assert.equal(runtime.calls.apply.length, 1);
   });
 });
 
-test('admin editable mode rejects creating FTP/FTPS services', async () => {
+test('admin full-document edit supports SSH fields and preserves marked secrets', async () => {
   const config = makeConfig(false);
+  config.services['production-ssh'] = makeSshService({ includeToken: false });
   await withAdminServer(config, async (base, audit) => {
-    const res = await fetch(`${base}/api/services`, {
-      method: 'POST',
+    const list = await fetch(`${base}/api/services`, {
+      headers: { 'x-clawguard-pin': '1234' },
+    });
+    const editable = (await list.json())['production-ssh'].editableConfig;
+    editable.upstream = 'ssh://ssh2.example.com:22';
+    editable.ssh.allowPrivateTarget = true;
+    editable.policy.default = 'auto_approve';
+
+    const res = await fetch(`${base}/api/services/production-ssh`, {
+      method: 'PUT',
       headers: { 'x-clawguard-pin': '1234', 'content-type': 'application/json' },
-      body: JSON.stringify({ name: 'files', config: makeFtpService() }),
+      body: JSON.stringify({ config: editable, replace: true }),
     });
 
-    assert.equal(res.status, 403);
-    assert.match((await res.json()).error, /FTP\/FTPS services are YAML-only/i);
-    assert.equal(audit.calls.saveServiceOverride.length, 0);
-    assert.equal(config.services.files, undefined);
+    assert.equal(res.status, 200, await res.text());
+    assert.equal(config.services['production-ssh'].upstream, 'ssh://ssh2.example.com:22');
+    assert.equal(config.services['production-ssh'].ssh.allowPrivateTarget, true);
+    assert.equal(config.services['production-ssh'].policy.default, 'auto_approve');
+    assert.equal(
+      config.services['production-ssh'].auth.pluginConfig.privateKey,
+      'PRIVATE_KEY_MUST_NEVER_LEAVE_ADMIN_API'
+    );
+    assert.equal(audit.calls.saveServiceOverride.length, 1);
   });
 });
 
-test('admin editable mode rejects private-target and TLS exceptions', async () => {
+test('admin duplicates FTP/FTPS services with every protocol field', async () => {
   const config = makeConfig(false);
+  config.services.files = makeFtpService();
   await withAdminServer(config, async (base, audit) => {
-    const res = await fetch(`${base}/api/services`, {
+    const list = await fetch(`${base}/api/services`, {
+      headers: { 'x-clawguard-pin': '1234' },
+    });
+    const editable = (await list.json()).files.editableConfig;
+    editable.ftp.root = 'archive';
+    const res = await fetch(`${base}/api/services/files/duplicate`, {
       method: 'POST',
       headers: { 'x-clawguard-pin': '1234', 'content-type': 'application/json' },
-      body: JSON.stringify({ name: 'vmware-esxi', config: makePrivateHttpService() }),
+      body: JSON.stringify({ name: 'files-copy', config: editable }),
     });
 
-    assert.equal(res.status, 403);
-    assert.match((await res.json()).error, /YAML-only/i);
-    assert.equal(audit.calls.saveServiceOverride.length, 0);
-    assert.equal(config.services['vmware-esxi'], undefined);
+    assert.equal(res.status, 200, await res.text());
+    assert.equal(config.services['files-copy'].ftp.tlsMode, 'implicit');
+    assert.equal(config.services['files-copy'].ftp.root, 'archive');
+    assert.equal(config.services['files-copy'].auth.pluginConfig.password, 'MUST_NOT_LEAVE_ADMIN_API');
+    assert.equal(audit.calls.saveServiceOverride.length, 1);
   });
 });
 
-test('admin cannot modify or delete a YAML private-target HTTP service', async () => {
+test('admin can edit private-target HTTP services while redacting plugin config values', async () => {
   const config = makeConfig(false);
   config.services['vmware-esxi'] = makePrivateHttpService();
 
   await withAdminServer(config, async (base, audit) => {
+    const list = await fetch(`${base}/api/services`, {
+      headers: { 'x-clawguard-pin': '1234' },
+    });
+    const raw = await list.text();
+    const editable = JSON.parse(raw)['vmware-esxi'].editableConfig;
+    assert.equal(raw.includes('MUST_NOT_LEAVE_ADMIN_API'), false);
+    editable.policy.default = 'auto_approve';
+
     const update = await fetch(`${base}/api/services/vmware-esxi`, {
       method: 'PUT',
       headers: { 'x-clawguard-pin': '1234', 'content-type': 'application/json' },
-      body: JSON.stringify({ config: { policy: { default: 'auto_approve' } } }),
+      body: JSON.stringify({ config: editable, replace: true }),
     });
-    assert.equal(update.status, 403);
-    assert.match((await update.json()).error, /YAML-only/i);
-
-    const remove = await fetch(`${base}/api/services/vmware-esxi`, {
-      method: 'DELETE',
-      headers: { 'x-clawguard-pin': '1234' },
-    });
-    assert.equal(remove.status, 403);
-    assert.match((await remove.json()).error, /YAML-only/i);
-    assert.equal(audit.calls.saveServiceOverride.length, 0);
-    assert.equal(audit.calls.deleteServiceOverride.length, 0);
-    assert.ok(config.services['vmware-esxi']);
+    assert.equal(update.status, 200, await update.text());
+    assert.equal(config.services['vmware-esxi'].policy.default, 'auto_approve');
+    assert.equal(config.services['vmware-esxi'].auth.pluginConfig.password, 'MUST_NOT_LEAVE_ADMIN_API');
+    assert.equal(audit.calls.saveServiceOverride.length, 1);
   });
 });
 
-test('admin GET marks private-target HTTP services YAML-only without plugin secrets', async () => {
+test('admin GET exposes a complete redacted SSH document, never credential values', async () => {
   const config = makeConfig(false);
-  config.services['vmware-esxi'] = makePrivateHttpService();
+  config.services['production-ssh'] = makeSshService({ includeToken: false });
 
   await withAdminServer(config, async (base) => {
     const res = await fetch(`${base}/api/services`, {
@@ -253,9 +302,13 @@ test('admin GET marks private-target HTTP services YAML-only without plugin secr
 
     const raw = await res.text();
     const services = JSON.parse(raw);
-    assert.equal(services['vmware-esxi'].yamlOnly, true);
-    assert.equal(services['vmware-esxi'].auth.pluginConfig, undefined);
-    assert.equal(raw.includes('MUST_NOT_LEAVE_ADMIN_API'), false);
+    const service = services['production-ssh'];
+    assert.equal(service.protocol, 'ssh');
+    assert.equal(service.editableConfig.ssh.knownHostKey, config.services['production-ssh'].ssh.knownHostKey);
+    assert.deepEqual(service.editableConfig.auth.pluginConfig.username, { $clawguard: 'keep-secret' });
+    assert.deepEqual(service.editableConfig.auth.pluginConfig.privateKey, { $clawguard: 'keep-secret' });
+    assert.equal(raw.includes('PRIVATE_KEY_MUST_NEVER_LEAVE_ADMIN_API'), false);
+    assert.equal(raw.includes('deploy'), false);
   });
 });
 
@@ -276,76 +329,61 @@ test('admin editable mode rejects unsupported service protocols', async () => {
       }),
     });
 
-    assert.equal(res.status, 403);
-    assert.match((await res.json()).error, /only HTTP service overrides/i);
+    assert.equal(res.status, 400);
+    assert.match((await res.json()).error, /Unsupported service protocol/i);
     assert.equal(audit.calls.saveServiceOverride.length, 0);
     assert.equal(config.services['invalid-protocol'], undefined);
   });
 });
 
-test('admin editable mode rejects modifying SSH services or converting HTTP services to SSH', async () => {
+test('admin malformed service documents return validation errors instead of crashing the route', async () => {
   const config = makeConfig(false);
-  config.services['production-ssh'] = makeSshService();
-  const originalSsh = JSON.parse(JSON.stringify(config.services['production-ssh']));
-
   await withAdminServer(config, async (base, audit) => {
-    const updateSsh = await fetch(`${base}/api/services/production-ssh`, {
-      method: 'PUT',
+    const res = await fetch(`${base}/api/services`, {
+      method: 'POST',
       headers: { 'x-clawguard-pin': '1234', 'content-type': 'application/json' },
-      body: JSON.stringify({ config: { policy: { default: 'auto_approve' } } }),
+      body: JSON.stringify({
+        name: 'malformed',
+        config: {
+          upstream: null,
+          http: { noCheckCertificate: true },
+        },
+      }),
     });
-    assert.equal(updateSsh.status, 403);
-    assert.match((await updateSsh.json()).error, /SSH services are YAML-only/i);
 
-    const convertHttp = await fetch(`${base}/api/services/existing`, {
-      method: 'PUT',
-      headers: { 'x-clawguard-pin': '1234', 'content-type': 'application/json' },
-      body: JSON.stringify({ config: makeSshService() }),
-    });
-    assert.equal(convertHttp.status, 403);
-    assert.match((await convertHttp.json()).error, /SSH services are YAML-only/i);
-
+    assert.equal(res.status, 400);
+    assert.match((await res.json()).error, /service\.upstream|service\.auth|service\.policy/i);
     assert.equal(audit.calls.saveServiceOverride.length, 0);
-    assert.deepEqual(config.services['production-ssh'], originalSsh);
-    assert.equal(config.services.existing.protocol, undefined);
   });
 });
 
-test('admin editable mode rejects deleting SSH services', async () => {
+test('admin editable mode deletes SSH services and unloads their runtime plugin', async () => {
   const config = makeConfig(false);
   config.services['production-ssh'] = makeSshService();
 
-  await withAdminServer(config, async (base, audit) => {
+  await withAdminServer(config, async (base, audit, runtime) => {
     const res = await fetch(`${base}/api/services/production-ssh`, {
       method: 'DELETE',
       headers: { 'x-clawguard-pin': '1234' },
     });
 
-    assert.equal(res.status, 403);
-    assert.match((await res.json()).error, /SSH services are YAML-only/i);
-    assert.equal(audit.calls.deleteServiceOverride.length, 0);
-    assert.ok(config.services['production-ssh']);
+    assert.equal(res.status, 200);
+    assert.equal(audit.calls.deleteServiceOverride.length, 1);
+    assert.equal(config.services['production-ssh'], undefined);
+    assert.deepEqual(runtime.calls.remove, ['production-ssh']);
   });
 });
 
-test('admin GET marks SSH services YAML-only without exposing credential plugin config', async () => {
-  const config = makeConfig(false);
-  // SSH auth.token is intentionally omitted: loadConfig supports this form.
-  config.services['production-ssh'] = makeSshService({ includeToken: false });
-
-  await withAdminServer(config, async (base) => {
-    const res = await fetch(`${base}/api/services`, {
-      headers: { 'x-clawguard-pin': '1234' },
+test('admin strict mode also blocks the duplicate endpoint', async () => {
+  const config = makeConfig(true);
+  config.services['production-ssh'] = makeSshService();
+  await withAdminServer(config, async (base, audit) => {
+    const res = await fetch(`${base}/api/services/production-ssh/duplicate`, {
+      method: 'POST',
+      headers: { 'x-clawguard-pin': '1234', 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'copy', config: makeSshService() }),
     });
-
-    assert.equal(res.status, 200);
-    const raw = await res.text();
-    const services = JSON.parse(raw);
-    assert.equal(services['production-ssh'].protocol, 'ssh');
-    assert.equal(services['production-ssh'].yamlOnly, true);
-    assert.equal(services['production-ssh'].auth.type, 'plugin');
-    assert.equal(services['production-ssh'].auth.pluginConfig, undefined);
-    assert.equal(raw.includes('PRIVATE_KEY_MUST_NEVER_LEAVE_ADMIN_API'), false);
-    assert.equal(raw.includes('privateKey'), false);
+    assert.equal(res.status, 403);
+    assert.equal(audit.calls.saveServiceOverride.length, 0);
   });
 });

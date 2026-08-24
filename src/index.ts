@@ -1,7 +1,7 @@
 import path from 'path';
 import https from 'https';
 import express from 'express';
-import { loadConfig } from './config';
+import { loadConfig, resolveServiceConfigSecrets } from './config';
 import { AuditLogger } from './audit';
 import { TelegramNotifier } from './telegram';
 import { WebhookNotifier } from './webhook';
@@ -18,6 +18,7 @@ import { attachMitmProxy } from './mitm-proxy';
 import { startTransparentProxy } from './transparent-proxy';
 import { loadPlugin } from './auth-plugins/loader';
 import { createAdminRouter } from './admin';
+import { validateAdminService } from './admin-service';
 import { loadSshCredentialPlugin } from './ssh-credential-plugins/loader';
 import { SshAgentLeaseManager } from './ssh-agent-lease';
 import { SshBroker } from './ssh-broker';
@@ -55,37 +56,19 @@ async function main() {
   } else {
     const overrides = audit.getServiceOverrides();
     for (const [name, svcConfig] of Object.entries(overrides)) {
-      // Protocol gateways are always sourced from YAML. A stale HTTP override
-      // may neither shadow nor dynamically introduce one.
-      if ((config.services[name]?.protocol ?? 'http') !== 'http'
-        || (svcConfig.protocol ?? 'http') !== 'http'
-        || svcConfig.ssh !== undefined
-        || svcConfig.ftp !== undefined
-        || config.services[name]?.http?.allowPrivateTarget === true
-        || config.services[name]?.http?.noCheckCertificate === true
-        || svcConfig.http?.allowPrivateTarget === true
-        || svcConfig.http?.noCheckCertificate === true) {
-        console.warn(`   ⚠️  Service override ignored: ${name} (protocol gateways are YAML-only)`);
-        continue;
+      try {
+        svcConfig.protocol = svcConfig.protocol ?? 'http';
+        const errors = validateAdminService(name, svcConfig, config);
+        if (errors.length > 0) {
+          console.warn(`   ⚠️  Service override skipped: ${name} — ${errors.join('; ')}`);
+          continue;
+        }
+        config.services[name] = await resolveServiceConfigSecrets(svcConfig, config.secrets);
+        console.log(`   ↻ Service override loaded: ${name}`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn(`   ⚠️  Service override skipped: ${name} — secret resolution failed: ${message}`);
       }
-      if (svcConfig.protocol !== undefined && svcConfig.protocol !== 'http') {
-        console.warn(`   ⚠️  Service override skipped: ${name} — unsupported protocol`);
-        continue;
-      }
-      // Validate override against current allowlist
-      const validation = validateUpstreamUrl(
-        svcConfig.upstream,
-        config.security,
-        false
-      );
-      if (!validation.valid) {
-        console.warn(`   ⚠️  Service override skipped: ${name} — ${validation.reason}`);
-        console.warn(`      Add "${new URL(svcConfig.upstream).hostname}" to security.allowedUpstreams in clawguard.yaml to enable it`);
-        continue;
-      }
-      svcConfig.protocol = 'http';
-      config.services[name] = svcConfig;
-      console.log(`   ↻ Service override loaded: ${name}`);
     }
   }
 

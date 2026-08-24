@@ -515,27 +515,46 @@ async function resolveServiceSecrets(config: Config): Promise<void> {
 
   for (const [name, svc] of Object.entries(config.services)) {
     try {
-      if (typeof svc.auth.token === 'string') {
-        svc.auth.token = await resolveSecretValue(svc.auth.token, providers);
-      }
-      if (svc.auth.clientId) {
-        svc.auth.clientId = await resolveSecretValue(svc.auth.clientId, providers);
-      }
-      if (svc.auth.clientSecret) {
-        svc.auth.clientSecret = await resolveSecretValue(svc.auth.clientSecret, providers);
-      }
-      if (svc.auth.password) {
-        svc.auth.password = await resolveSecretValue(svc.auth.password, providers);
-      }
-      if (svc.auth.pluginConfig) {
-        svc.auth.pluginConfig = await resolvePluginConfigSecrets(svc.auth.pluginConfig, providers);
-      }
+      await resolveOneServiceSecrets(svc, providers);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`❌ Failed to resolve secrets for service "${name}": ${message}`);
       process.exit(1);
     }
   }
+}
+
+async function resolveOneServiceSecrets(
+  service: ServiceConfig,
+  providers: Map<string, SecretProvider>
+): Promise<void> {
+  if (typeof service.auth.token === 'string') {
+    service.auth.token = await resolveSecretValue(service.auth.token, providers);
+  }
+  if (service.auth.clientId) {
+    service.auth.clientId = await resolveSecretValue(service.auth.clientId, providers);
+  }
+  if (service.auth.clientSecret) {
+    service.auth.clientSecret = await resolveSecretValue(service.auth.clientSecret, providers);
+  }
+  if (service.auth.password) {
+    service.auth.password = await resolveSecretValue(service.auth.password, providers);
+  }
+  if (service.auth.pluginConfig) {
+    service.auth.pluginConfig = await resolvePluginConfigSecrets(service.auth.pluginConfig, providers);
+  }
+}
+
+/** Resolve one admin/SQLite service without mutating the persisted document. */
+export async function resolveServiceConfigSecrets(
+  service: ServiceConfig,
+  secrets: Config['secrets']
+): Promise<ServiceConfig> {
+  const resolved = structuredClone(service);
+  if (!hasSecretRef(resolved)) return resolved;
+  const providers = await createSecretProviders(secrets);
+  await resolveOneServiceSecrets(resolved, providers);
+  return resolved;
 }
 
 async function resolvePluginConfigSecrets(
