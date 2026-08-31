@@ -458,21 +458,26 @@ short-lived agent sockets.
 ### Connect
 
 Use the configured service alias as the first forced-command argument. An
-interactive session needs a TTY:
+interactive session needs a TTY. Add `--reason` before the human-readable
+purpose that will be shown in the Telegram approval:
 
 ```bash
-ssh -t gateway@CLAWGUARD_HOST -p 2222 -- production-ssh
+ssh -t gateway@CLAWGUARD_HOST -p 2222 -- \
+  production-ssh --reason "Investigate deployment failure"
 ```
 
-Execute one remote command by separating it from the service with a second
-`--`:
+Execute one remote command by separating the reason from the upstream command
+with a second `--`:
 
 ```bash
-ssh gateway@CLAWGUARD_HOST -p 2222 -- production-ssh -- uname -a
+ssh gateway@CLAWGUARD_HOST -p 2222 -- \
+  production-ssh --reason "Check the remote kernel version" -- uname -a
 ```
 
 Each attempt produces a new Telegram request. SSH approval is deliberately
 one-time: it does not use HTTP policy auto-approval or cached approval windows.
+The approval includes the supplied reason. Legacy clients that omit
+`--reason` remain compatible and receive an action-specific fallback reason.
 No configured/paired Telegram approver, denial, bot failure, or timeout all
 deny the session without creating a credential lease.
 

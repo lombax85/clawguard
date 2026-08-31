@@ -275,7 +275,8 @@ SSH_COMMON=(
 
 log 'executing a harmless command through both stock OpenSSH legs'
 SUCCESS_OUTPUT=$(ssh "${SSH_COMMON[@]}" gateway@127.0.0.1 -- \
-  production -- printf clawguard-e2e-ok 2>"$TEMP_ROOT/success.stderr") \
+  production --reason 'Run SSH gateway E2E smoke test' -- \
+  printf clawguard-e2e-ok 2>"$TEMP_ROOT/success.stderr") \
   || {
     docker logs "$BROKER_CONTAINER" >&2 2>&1 || true
     docker logs "$GATEWAY_CONTAINER" >&2 2>&1 || true
@@ -342,7 +343,8 @@ ssh "${SSH_COMMON[@]}" gateway@127.0.0.1 -- \
 UNSUPPORTED_STATUS=$?
 set -e
 [ "$UNSUPPORTED_STATUS" -ne 0 ] || fail 'unsupported wrapper syntax unexpectedly succeeded'
-grep -Fq 'expected -- before the remote command' "$TEMP_ROOT/unsupported.stderr" \
+grep -Fq 'expected --reason REASON or -- before the remote command' \
+  "$TEMP_ROOT/unsupported.stderr" \
   || fail 'unsupported wrapper syntax did not fail at the expected parser guard'
 sleep 1
 EVENTS_AFTER_UNSUPPORTED=$(wc -l <"$TEMP_ROOT/results/events.ndjson" | tr -d ' ')

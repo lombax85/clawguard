@@ -168,26 +168,31 @@ alias.
 Interactive shell (TTY required):
 
 ```bash
-ssh -t gateway@CLAWGUARD_HOST -p 2222 -- production-ssh
+ssh -t gateway@CLAWGUARD_HOST -p 2222 -- \
+  production-ssh --reason "Investigate deployment failure"
 ```
 
-Single command (the second `--` separates the service from the upstream
-command):
+Single command (the second `--` separates the human-readable approval reason
+from the upstream command):
 
 ```bash
-ssh gateway@CLAWGUARD_HOST -p 2222 -- production-ssh -- uname -a
+ssh gateway@CLAWGUARD_HOST -p 2222 -- \
+  production-ssh --reason "Check the remote kernel version" -- uname -a
 ```
 
 After inbound public-key authentication, the wrapper submits only the service
-alias, inbound client IP and action type (`shell` or `exec`) to the broker. The
-client cannot choose an upstream host, port, username, known-hosts line or agent
-socket. On approval, the broker returns the fixed target metadata and one
-ephemeral agent-socket path. After validating that response and the socket, the
-wrapper acknowledges activation before starting stock `ssh`. An unacknowledged
-handoff expires promptly and releases both the agent and its capacity slot, so
-a lost wrapper response cannot strand a session until its maximum duration.
-Wrapper exit reports only the exit status and requests lease cleanup; the TTL
-and ClawGuard shutdown cleanup are additional backstops.
+alias, inbound client IP, action type (`shell` or `exec`) and approval reason to
+the broker. The reason is bounded to 500 printable characters and appears in
+Telegram; it is never forwarded to the upstream SSH server. Legacy invocations
+without `--reason` receive a generic action-specific reason. The client cannot
+choose an upstream host, port, username, known-hosts line or agent socket. On
+approval, the broker returns the fixed target metadata and one ephemeral
+agent-socket path. After validating that response and the socket, the wrapper
+acknowledges activation before starting stock `ssh`. An unacknowledged handoff
+expires promptly and releases both the agent and its capacity slot, so a lost
+wrapper response cannot strand a session until its maximum duration. Wrapper
+exit reports only the exit status and requests lease cleanup; the TTL and
+ClawGuard shutdown cleanup are additional backstops.
 
 `leaseTtlSeconds` limits how long the private key can sign authentication
 requests; expiring it does not terminate a connection that OpenSSH has already

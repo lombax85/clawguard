@@ -5,7 +5,7 @@ import path from 'path';
 import { randomBytes } from 'crypto';
 import { ApprovalManager } from './approval';
 import { AuditLogger, SshSessionAction } from './audit';
-import { Config, ServiceConfig } from './types';
+import { Config, RequestMeta, ServiceConfig } from './types';
 import { validateSshTargetRuntime } from './security';
 import {
   ISshCredentialPlugin,
@@ -25,6 +25,7 @@ interface BrokerSessionRequest {
   service: string;
   clientIp: string;
   action: SshSessionAction;
+  reason?: string;
 }
 
 interface BrokerCompletionRequest {
@@ -50,7 +51,7 @@ interface ApprovalManagerContract {
     serviceConfig: ServiceConfig,
     path: string,
     agentIp: string,
-    meta: undefined,
+    meta: RequestMeta | undefined,
     timeoutMs: number,
     signal?: AbortSignal
   ): Promise<boolean>;
@@ -101,7 +102,12 @@ function hasExactlyKeys(value: Record<string, unknown>, expected: string[]): boo
 }
 
 function parseSessionRequest(value: unknown): BrokerSessionRequest {
-  if (!isPlainObject(value) || !hasExactlyKeys(value, ['service', 'clientIp', 'action'])) {
+  if (!isPlainObject(value)) {
+    throw new BrokerHttpError(400, 'invalid session request');
+  }
+  const allowedKeys = new Set(['service', 'clientIp', 'action', 'reason']);
+  if (!hasExactlyKeys(value, ['service', 'clientIp', 'action'])
+    && (Object.keys(value).length !== 4 || Object.keys(value).some((key) => !allowedKeys.has(key)))) {
     throw new BrokerHttpError(400, 'invalid session request');
   }
   if (typeof value.service !== 'string'
@@ -115,10 +121,18 @@ function parseSessionRequest(value: unknown): BrokerSessionRequest {
   if (value.action !== 'shell' && value.action !== 'exec') {
     throw new BrokerHttpError(400, 'invalid SSH action');
   }
+  if (value.reason !== undefined
+    && (typeof value.reason !== 'string'
+      || value.reason.trim().length === 0
+      || value.reason.length > 500
+      || /[\u0000-\u001f\u007f]/.test(value.reason))) {
+    throw new BrokerHttpError(400, 'invalid SSH reason');
+  }
   return {
     service: value.service,
     clientIp: value.clientIp,
     action: value.action,
+    reason: typeof value.reason === 'string' ? value.reason.trim() : undefined,
   };
 }
 
@@ -507,7 +521,7 @@ export class SshBroker {
             service,
             `${input.action} ${target.host}:${target.port}`,
             input.clientIp,
-            undefined,
+            input.reason ? { reason: input.reason } : undefined,
             this.config.sshBroker.approvalTimeoutMs,
             this.shutdownController.signal
           )

@@ -18,6 +18,14 @@ function generateRequestId(): string {
   return `req_${Date.now()}_${++requestCounter}`;
 }
 
+function withFallbackReason(meta: RequestMeta | undefined, fallback: string): RequestMeta {
+  const suppliedReason = meta?.reason?.trim();
+  return {
+    ...meta,
+    reason: suppliedReason || fallback,
+  };
+}
+
 export class ApprovalManager {
   // Keyed by `${service}::${METHOD}::${path|*}` — `*` means method-wide
   private activeApprovals: Map<string, Approval> = new Map();
@@ -268,6 +276,10 @@ export class ApprovalManager {
     void serviceConfig;
 
     const requestId = generateRequestId();
+    const approvalMeta = withFallbackReason(
+      meta,
+      `Open one-time SSH session (${path})`
+    );
     console.log(`🔔 Requesting one-time SSH session approval: ${service}${path}`);
 
     this.webhook?.notifyApprovalRequired(
@@ -276,7 +288,7 @@ export class ApprovalManager {
       SSH_SESSION_METHOD,
       path,
       agentIp,
-      meta
+      approvalMeta
     );
 
     // SSH never inherits the HTTP development-mode fail-open behavior.
@@ -317,7 +329,7 @@ export class ApprovalManager {
     let result: { approved: boolean; approvedBy: string };
     try {
       result = await Promise.race([
-        this.telegram.requestSshSessionApproval(requestId, service, path, agentIp, meta),
+        this.telegram.requestSshSessionApproval(requestId, service, path, agentIp, approvalMeta),
         timeoutPromise,
         abortPromise,
       ]);
@@ -357,8 +369,14 @@ export class ApprovalManager {
   ): Promise<FtpAccessMode | false> {
     void serviceConfig;
     const requestId = generateRequestId();
+    const approvalMeta = withFallbackReason(
+      meta,
+      `Open one-time FTP/FTPS lease (${path})`
+    );
     console.log(`🔔 Requesting FTP/FTPS lease approval: ${service}${path}`);
-    this.webhook?.notifyApprovalRequired(requestId, service, FTP_SESSION_METHOD, path, agentIp, meta);
+    this.webhook?.notifyApprovalRequired(
+      requestId, service, FTP_SESSION_METHOD, path, agentIp, approvalMeta
+    );
 
     if (!this.telegram) {
       console.log(`❌ FTP lease denied for ${service}: Telegram is not configured`);
@@ -394,7 +412,7 @@ export class ApprovalManager {
     let result: { approved: boolean; approvedBy: string; accessMode?: FtpAccessMode };
     try {
       result = await Promise.race([
-        this.telegram.requestFtpSessionApproval(requestId, service, path, agentIp, meta),
+        this.telegram.requestFtpSessionApproval(requestId, service, path, agentIp, approvalMeta),
         timeoutPromise,
         abortPromise,
       ]);

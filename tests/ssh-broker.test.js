@@ -245,7 +245,10 @@ test('approved session returns only the fixed resolved target and completion rel
   });
   try {
     await harness.broker.start();
-    const opened = await openSession(harness.config.sshBroker.socketPath, { action: 'exec' });
+    const opened = await openSession(harness.config.sshBroker.socketPath, {
+      action: 'exec',
+      reason: 'Check the remote kernel version',
+    });
 
     assert.equal(opened.status, 201);
     assert.equal(opened.headers['cache-control'], 'no-store');
@@ -267,6 +270,9 @@ test('approved session returns only the fixed resolved target and completion rel
     assert.equal(harness.approvalCalls[0][0], 'production');
     assert.equal(harness.approvalCalls[0][2], 'exec configured.internal:2222');
     assert.equal(harness.approvalCalls[0][3], '192.0.2.10');
+    assert.deepEqual(harness.approvalCalls[0][4], {
+      reason: 'Check the remote kernel version',
+    });
 
     const completed = await request(
       harness.config.sshBroker.socketPath,
@@ -324,11 +330,16 @@ test('unknown, non-SSH, and extra request fields fail closed before credentials'
       host: 'attacker.example',
       port: 22,
     });
+    const invalidReason = await openSession(harness.config.sshBroker.socketPath, {
+      reason: 'bad\nreason',
+    });
 
     assert.equal(unknown.status, 404);
     assert.equal(nonSsh.status, 404);
     assert.equal(injectedTarget.status, 400);
     assert.deepEqual(injectedTarget.body, { error: 'invalid session request' });
+    assert.equal(invalidReason.status, 400);
+    assert.deepEqual(invalidReason.body, { error: 'invalid SSH reason' });
     assert.equal(harness.approvalCalls.length, 0);
     assert.equal(harness.pluginCalls.length, 0);
     assert.equal(harness.createCalls.length, 0);

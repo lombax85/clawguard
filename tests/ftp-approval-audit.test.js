@@ -36,9 +36,16 @@ test('FTP Telegram keyboard exposes one-lease read-only/read-write decisions and
 
 test('FTP Telegram callback returns the access mode selected by the approver', async () => {
   class FakeTelegramBot extends EventEmitter {
+    constructor() {
+      super();
+      this.sent = [];
+    }
     onText() {}
     isPolling() { return true; }
-    async sendMessage() { return { message_id: 1 }; }
+    async sendMessage(_chatId, text) {
+      this.sent.push(text);
+      return { message_id: 1 };
+    }
     async answerCallbackQuery() {}
     async editMessageText() {}
     async stopPolling() {}
@@ -58,9 +65,11 @@ test('FTP Telegram callback returns the access mode selected by the approver', a
 
   try {
     const pending = notifier.requestFtpSessionApproval(
-      'ftp-mode-callback', 'files', '/lease/callback', '192.0.2.10'
+      'ftp-mode-callback', 'files', '/lease/callback', '192.0.2.10',
+      { reason: 'Upload release package' }
     );
     await new Promise((resolve) => setImmediate(resolve));
+    assert.match(bot.sent[0], /📝 Reason: _Upload release package_/);
     bot.emit('callback_query', {
       id: 'callback-1',
       data: 'approve_ftp_read_only:ftp-mode-callback',
@@ -107,6 +116,11 @@ test('FTP approval is fail-closed, one-shot, and never restores or persists reus
       'files', service(), '/lease/missing-mode', '192.0.2.10'
     ), false, 'an approval without an explicit FTP access mode must fail closed');
     assert.equal(calls.length, 3);
+    assert.equal(calls[0][4].reason, 'upload');
+    assert.equal(
+      calls[1][4].reason,
+      'Open one-time FTP/FTPS lease (/lease/three)'
+    );
     assert.equal(manager.getActiveCount(), 0);
     assert.equal(f.audit.getRecentApprovals(10).length, 1, 'only the seeded legacy row should exist');
   } finally {

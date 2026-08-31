@@ -36,15 +36,42 @@ REMAINDER=${REMAINDER# }
 
 ACTION=shell
 REMOTE_COMMAND=
+REASON=
 if [ -n "$REMAINDER" ]; then
   case "$REMAINDER" in
+    --reason\ *)
+      REASON_AND_COMMAND=${REMAINDER#--reason }
+      [ -n "$REASON_AND_COMMAND" ] || fail 'empty SSH reason'
+      case "$REASON_AND_COMMAND" in
+        *" -- "*)
+          REASON=${REASON_AND_COMMAND%% -- *}
+          ACTION=exec
+          REMOTE_COMMAND=${REASON_AND_COMMAND#* -- }
+          [ -n "$REMOTE_COMMAND" ] || fail 'empty remote command'
+          ;;
+        *) REASON=$REASON_AND_COMMAND ;;
+      esac
+      [ -n "$REASON" ] || fail 'empty SSH reason'
+      ;;
     --\ *)
       ACTION=exec
       REMOTE_COMMAND=${REMAINDER#-- }
       [ -n "$REMOTE_COMMAND" ] || fail 'empty remote command'
       ;;
-    *) fail 'expected -- before the remote command' ;;
+    *) fail 'expected --reason REASON or -- before the remote command' ;;
   esac
+fi
+
+if [ -z "$REASON" ]; then
+  if [ "$ACTION" = shell ]; then
+    REASON='Open interactive SSH session via gateway'
+  else
+    REASON='Run SSH command via gateway'
+  fi
+fi
+[ "${#REASON}" -le 500 ] || fail 'SSH reason must be at most 500 characters'
+if printf '%s' "$REASON" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+  fail 'SSH reason contains invalid control characters'
 fi
 
 CLIENT_IP=unknown
@@ -80,7 +107,8 @@ jq -cn \
   --arg service "$SERVICE" \
   --arg clientIp "$CLIENT_IP" \
   --arg action "$ACTION" \
-  '{service:$service,clientIp:$clientIp,action:$action}' >"$REQUEST_FILE"
+  --arg reason "$REASON" \
+  '{service:$service,clientIp:$clientIp,action:$action,reason:$reason}' >"$REQUEST_FILE"
 
 if [ ! -S "$BROKER_SOCKET" ]; then
   fail 'broker unavailable'

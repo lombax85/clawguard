@@ -3,10 +3,11 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { EventEmitter } = require('node:events');
 
 const { ApprovalManager } = require('../dist/approval');
 const { AuditLogger } = require('../dist/audit');
-const { buildSshSessionApprovalKeyboard } = require('../dist/telegram');
+const { buildSshSessionApprovalKeyboard, TelegramNotifier } = require('../dist/telegram');
 
 function createAudit() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-ssh-audit-'));
@@ -64,6 +65,57 @@ test('SSH Telegram keyboard exposes only one-session approval and deny', () => {
   assert.equal(buttons.some((button) => /15m|1h|24h|week|month|forever|path/i.test(button.text)), false);
 });
 
+test('SSH Telegram approval message includes the supplied reason', async () => {
+  class FakeTelegramBot extends EventEmitter {
+    constructor() {
+      super();
+      this.sent = [];
+    }
+    onText() {}
+    isPolling() { return true; }
+    async sendMessage(_chatId, text) {
+      this.sent.push(text);
+      return { message_id: 1 };
+    }
+    async answerCallbackQuery() {}
+    async editMessageText() {}
+    async stopPolling() {}
+    async startPolling() {}
+  }
+
+  const bot = new FakeTelegramBot();
+  const notifier = new TelegramNotifier(
+    {
+      botToken: 'clawguard-managed',
+      chatId: '123',
+      pairing: { enabled: false, secret: '' },
+    },
+    {},
+    { bot }
+  );
+
+  try {
+    const pending = notifier.requestSshSessionApproval(
+      'ssh-reason-message',
+      'production',
+      'shell configured.internal:22',
+      '192.0.2.10',
+      { reason: 'Investigate deployment failure' }
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.match(bot.sent[0], /📝 Reason: _Investigate deployment failure_/);
+    bot.emit('callback_query', {
+      id: 'callback-ssh-reason',
+      data: 'deny:ssh-reason-message',
+      message: { message_id: 1, chat: { id: 123 } },
+      from: { id: 456, first_name: 'Alice' },
+    });
+    assert.deepEqual(await pending, { approved: false, approvedBy: 'Alice' });
+  } finally {
+    await notifier.stop();
+  }
+});
+
 test('SSH approval fails closed without Telegram and emits webhook resolution', async () => {
   const fixture = createAudit();
   try {
@@ -116,6 +168,25 @@ test('SSH approval ignores auto_approve and is consumed once without caching', a
     assert.equal(fixture.audit.getRecentApprovals(10).length, 0);
     assert.equal(webhook.calls.required.length, 2);
     assert.equal(webhook.calls.resolved.length, 2);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('SSH approval supplies an action-specific fallback reason for legacy clients', async () => {
+  const fixture = createAudit();
+  try {
+    const telegram = fakeTelegram({ approved: false, approvedBy: 'alice' });
+    const manager = new ApprovalManager(telegram, fixture.audit, 50);
+
+    await manager.checkSshSessionApproval(
+      'prod', serviceConfig(), 'shell app.internal:22', '10.0.0.8'
+    );
+
+    assert.equal(
+      telegram.calls.ssh[0].meta.reason,
+      'Open one-time SSH session (shell app.internal:22)'
+    );
   } finally {
     fixture.cleanup();
   }
