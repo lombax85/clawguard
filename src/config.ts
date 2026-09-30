@@ -137,6 +137,12 @@ export function validateHttpConfiguration(config: Config): string[] {
       continue;
     }
     if (!service.http) continue;
+    if (service.http.allowedMethods !== undefined && (!Array.isArray(service.http.allowedMethods)
+      || service.http.allowedMethods.length === 0
+      || service.http.allowedMethods.some((method) => typeof method !== 'string'
+        || !['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'].includes(method)))) {
+      errors.push(`HTTP service "${name}" http.allowedMethods must be a non-empty list of supported uppercase HTTP methods`);
+    }
     if (service.http.allowPrivateTarget !== undefined
       && typeof service.http.allowPrivateTarget !== 'boolean') {
       errors.push(`HTTP service "${name}" http.allowPrivateTarget must be true or false`);

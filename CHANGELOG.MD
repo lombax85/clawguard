@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+### Added
+
+- **Agent service proposals**: agent-key-authenticated submission and status
+  endpoints for HTTP, SSH and FTP/FTPS configurations with explicit credential
+  placeholders. Proposals are validated and persisted without activating a
+  service, loading a plugin, resolving secrets or contacting an upstream.
+  The PIN/IP-protected dashboard provides review, rejection, credential entry
+  and server-side selection of existing managed credentials. New upstream
+  domains require explicit administrator consent and persist alongside the
+  approved service. Strict mode blocks activation. Plugin initialization or
+  persistence failures leave the proposal pending; repeated approvals cannot
+  activate it twice. Agent status and proposal history never contain supplied
+  credentials.
+- **HTTP method allowlists**: optional `http.allowedMethods` rejects unlisted
+  methods with HTTP 405 before approval and credential injection in direct,
+  host-based and HTTPS MITM proxy modes.
+
 ### Experimental SSH gateway loop
 
 - **2026-08-02 18:09 CEST — iteration 0 (`bcf5099`)**: created `experimental-ssh-gateway`, persisted the terminate-and-reoriginate SSH architecture, security boundaries, acceptance criteria and execution backlog in `LOOP_PLAN.md` / `LOOP_TODO.md`. Gate: `git diff --check`. Next: protocol-aware configuration and isolated SSH auth-plugin support.

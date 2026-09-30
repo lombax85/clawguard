@@ -371,6 +371,11 @@ function handleMitmRequest(
     const body = Buffer.concat(bodyChunks);
     const method = req.method || 'GET';
     const requestPath = req.url || '/';
+    if (serviceConfig.http?.allowedMethods && !serviceConfig.http.allowedMethods.includes(method)) {
+      res.writeHead(405, { 'Content-Type': 'application/json', 'Allow': serviceConfig.http.allowedMethods.join(', ') });
+      res.end(JSON.stringify({ error: 'HTTP method is not allowed for this service' }));
+      return;
+    }
     const meta = extractRequestMeta(req.headers as Record<string, string | string[] | undefined>);
 
     // Build upstream URL

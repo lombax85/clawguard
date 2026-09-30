@@ -18,6 +18,7 @@ import { extractRequestMeta } from './request-meta';
 import { preserveRawBody } from './raw-body';
 import { FtpBroker } from './ftp-broker';
 import { createFtpRouter } from './ftp-router';
+import { createServiceProposalRouter } from './service-proposals';
 
 /**
  * Validates that the client sent the correct dummy token.
@@ -72,6 +73,7 @@ export function createProxy(
 
   // Preserve the exact request bytes, including gzip/deflate payloads.
   app.use(preserveRawBody());
+  app.use('/__proposals', createServiceProposalRouter(config, audit));
 
   if (ftpBroker && config.ftpGateway.allowInsecureHttpApi) {
     app.use('/__ftp', createFtpRouter(config, ftpBroker));
@@ -251,6 +253,11 @@ export function handleHostProxy(
     }
 
     // ─── Validate dummy token ─────────────────────────────────
+    if (serviceConfig.http?.allowedMethods && !serviceConfig.http.allowedMethods.includes(req.method)) {
+      res.setHeader('Allow', serviceConfig.http.allowedMethods.join(', '));
+      res.status(405).json({ error: 'HTTP method is not allowed for this service' });
+      return;
+    }
     const dummyError = validateDummyToken(req, serviceConfig);
     if (dummyError) {
       console.error(`🚫 Dummy token validation failed for ${serviceName}: ${dummyError}`);
@@ -506,6 +513,11 @@ function handleProxy(
     }
 
     // ─── Validate dummy token ─────────────────────────────────
+    if (serviceConfig.http?.allowedMethods && !serviceConfig.http.allowedMethods.includes(req.method)) {
+      res.setHeader('Allow', serviceConfig.http.allowedMethods.join(', '));
+      res.status(405).json({ error: 'HTTP method is not allowed for this service' });
+      return;
+    }
     const dummyError = validateDummyToken(req, serviceConfig);
     if (dummyError) {
       console.error(`🚫 Dummy token validation failed for ${serviceName}: ${dummyError}`);

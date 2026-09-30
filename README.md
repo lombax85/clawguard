@@ -51,6 +51,11 @@ Agent Machine (untrusted)          Secure Machine (trusted)
 
 - **Zero-knowledge tokens** — Your agent runs with dummy credentials. Real API keys live only on ClawGuard's machine, in a YAML file the agent can't access. Even if the agent is fully compromised, your secrets are safe.
 
+- **Agent-proposed services** — Agents submit credential-free HTTP, SSH and
+  FTP/FTPS configurations for validation. Only the administrator can approve
+  them in the dashboard, supplying credentials or selecting existing managed
+  credentials on ClawGuard. See [agent service proposals](docs/agent-service-proposals.md).
+
 - **2FA approval via Telegram** — Sensitive API calls trigger a notification
   when required by policy, with service, method, path and provenance. Choose a
   bounded method/path scope, deny, or let it time out. Like 2FA for humans, but
@@ -863,6 +868,16 @@ Tap **[Deny]**. The repo is safe. That's ClawGuard in action.
 ## Web Dashboard
 
 ClawGuard includes a built-in dashboard at `http://clawguard-host:9090/__admin`, protected by PIN and localhost-only access (configurable via `admin.allowedIPs`).
+
+**Service proposals** — agents can POST a service configuration with credential
+placeholders to `/__proposals/services`. Valid configurations wait in the
+**Service proposals** screen without changing live services or allowlists.
+Review the target and policy, paste credentials or select managed credentials,
+explicitly allow any new upstream domains, then choose **Approve & add service**.
+The agent key cannot approve or access the credential picker. Approvals require
+`admin.strictMode: false`; strict mode still permits review and rejection.
+Proposals, decisions, services and approved domains persist in SQLite.
+See [the API and protocol examples](docs/agent-service-proposals.md).
 
 **Analytics** — requests per service, hourly heatmap, approve/deny ratio, HTTP method breakdown:
 

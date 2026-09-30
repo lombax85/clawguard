@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { AuditEntry, Approval, DashboardStats, FtpAccessMode, ServiceConfig } from './types';
+import { AuditEntry, Approval, DashboardStats, FtpAccessMode, ServiceConfig, ServiceProposal } from './types';
 
 export type SshSessionAction = 'shell' | 'exec';
 
@@ -167,6 +167,22 @@ export class AuditLogger {
         config_json TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS service_proposals (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        proposal_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'approving', 'approved', 'rejected')),
+        created_at TEXT NOT NULL,
+        decided_at TEXT
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_service_proposals_pending_name
+        ON service_proposals(name) WHERE status IN ('pending', 'approving');
+      CREATE TABLE IF NOT EXISTS admin_upstreams (
+        hostname TEXT PRIMARY KEY,
+        proposal_id TEXT NOT NULL,
+        approved_at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS ssh_sessions (
@@ -365,6 +381,68 @@ export class AuditLogger {
   }
 
   // ─── Service overrides (admin API) ────────────────────────
+
+  getServiceProposal(id: string): ServiceProposal | undefined {
+    const row = this.db.prepare('SELECT proposal_json, status, decided_at FROM service_proposals WHERE id = ?')
+      .get(id) as { proposal_json: string; status: ServiceProposal['status']; decided_at: string | null } | undefined;
+    return row ? { ...JSON.parse(row.proposal_json), status: row.status, decidedAt: row.decided_at } : undefined;
+  }
+
+  getServiceProposals(): ServiceProposal[] {
+    const rows = this.db.prepare(`SELECT id FROM service_proposals
+      ORDER BY CASE WHEN status IN ('pending', 'approving') THEN 0 ELSE 1 END, created_at DESC LIMIT 500`)
+      .all() as { id: string }[];
+    return rows.map((row) => this.getServiceProposal(row.id)!);
+  }
+
+  getPendingServiceProposal(name: string): ServiceProposal | undefined {
+    const row = this.db.prepare("SELECT id FROM service_proposals WHERE name = ? AND status IN ('pending', 'approving')")
+      .get(name) as { id: string } | undefined;
+    return row ? this.getServiceProposal(row.id) : undefined;
+  }
+
+  saveServiceProposal(proposal: ServiceProposal): void {
+    const count = this.db.prepare("SELECT COUNT(*) AS count FROM service_proposals WHERE status IN ('pending', 'approving')")
+      .get() as { count: number };
+    if (count.count >= 100) throw new Error('Pending proposal limit reached (100); review existing proposals first');
+    this.db.prepare(`INSERT INTO service_proposals (id, name, proposal_json, status, created_at)
+      VALUES (?, ?, ?, 'pending', ?)`)
+      .run(proposal.id, proposal.name, JSON.stringify(proposal), proposal.createdAt);
+  }
+
+  claimServiceProposal(id: string): boolean {
+    return this.db.prepare("UPDATE service_proposals SET status = 'approving' WHERE id = ? AND status = 'pending'")
+      .run(id).changes === 1;
+  }
+
+  releaseServiceProposal(id: string): void {
+    this.db.prepare("UPDATE service_proposals SET status = 'pending' WHERE id = ? AND status = 'approving'").run(id);
+  }
+
+  recoverServiceProposals(): void {
+    this.db.prepare("UPDATE service_proposals SET status = 'pending' WHERE status = 'approving'").run();
+  }
+
+  rejectServiceProposal(id: string): boolean {
+    return this.db.prepare("UPDATE service_proposals SET status = 'rejected', decided_at = ? WHERE id = ? AND status = 'pending'")
+      .run(new Date().toISOString(), id).changes === 1;
+  }
+
+  approveServiceProposal(id: string, name: string, service: ServiceConfig, upstreams: string[]): void {
+    this.db.transaction(() => {
+      const updated = this.db.prepare("UPDATE service_proposals SET status = 'approved', decided_at = ? WHERE id = ? AND status = 'approving'")
+        .run(new Date().toISOString(), id);
+      if (updated.changes !== 1) throw new Error('Proposal is no longer awaiting approval');
+      this.saveServiceOverride(name, service);
+      const insert = this.db.prepare('INSERT OR IGNORE INTO admin_upstreams VALUES (?, ?, ?)');
+      for (const hostname of upstreams) insert.run(hostname, id, new Date().toISOString());
+    })();
+  }
+
+  getAdminUpstreams(): string[] {
+    return (this.db.prepare('SELECT hostname FROM admin_upstreams ORDER BY hostname').all() as { hostname: string }[])
+      .map((row) => row.hostname);
+  }
 
   getServiceOverrides(): Record<string, ServiceConfig> {
     const rows = this.db.prepare('SELECT service_name, config_json FROM services_override').all() as { service_name: string; config_json: string }[];

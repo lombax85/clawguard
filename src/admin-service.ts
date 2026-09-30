@@ -33,7 +33,7 @@ const SECRET_MARKER_VALUE = 'keep-secret';
 type JsonObject = Record<string, unknown>;
 
 export interface AdminServiceRuntime {
-  apply(name: string, service: ServiceConfig): Promise<ServiceConfig>;
+  apply(name: string, service: ServiceConfig, validationConfig?: Config): Promise<ServiceConfig>;
   remove(name: string): void;
 }
 
@@ -205,6 +205,16 @@ function validatePolicy(service: ServiceConfig): string[] {
       if (!isPlainObject(rule) || !isPlainObject(rule['match'])
         || (rule['action'] !== 'auto_approve' && rule['action'] !== 'require_approval')) {
         errors.push(`policy.rules[${index}] is invalid`);
+      } else {
+        const match = rule['match'];
+        if (match['method'] !== undefined && (typeof match['method'] !== 'string'
+          || !/^(\*|[A-Z]+)$/.test(match['method']))) {
+          errors.push(`policy.rules[${index}].match.method must be an uppercase method or *`);
+        }
+        if (match['path'] !== undefined && (typeof match['path'] !== 'string'
+          || !match['path'].startsWith('/'))) {
+          errors.push(`policy.rules[${index}].match.path must start with /`);
+        }
       }
     }
   }
@@ -282,14 +292,14 @@ export function createAdminServiceRuntime(config: Config): AdminServiceRuntime {
   };
 
   return {
-    async apply(name: string, service: ServiceConfig): Promise<ServiceConfig> {
+    async apply(name: string, service: ServiceConfig, validationConfig: Config = config): Promise<ServiceConfig> {
       const activeService = await resolveServiceConfigSecrets(service, config.secrets);
 
       if (activeService.protocol === 'ssh') {
-        const validation = await validateSshTargetRuntime(activeService, config.security);
+        const validation = await validateSshTargetRuntime(activeService, validationConfig.security);
         if (!validation.valid) throw new Error(validation.reason || 'SSH target validation failed');
       } else if (activeService.protocol === 'ftp' || activeService.protocol === 'ftps') {
-        const validation = await validateFtpTargetRuntime(activeService, config.security);
+        const validation = await validateFtpTargetRuntime(activeService, validationConfig.security);
         if (!validation.valid) throw new Error(validation.reason || 'FTP target validation failed');
       }
 

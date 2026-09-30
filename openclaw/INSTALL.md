@@ -22,6 +22,22 @@ Your API calls go through ClawGuard, which:
 3. Forwards the request to the real API
 4. Returns the response to you
 
+## Proposing a new service
+
+When the operator asks you to add a service, you can submit its complete
+credential-free configuration to `POST /__proposals/services` with the
+ClawGuard agent key and user/reason headers. Use
+`{"$clawguard":"credential"}` for required credentials. HTTP, SSH, FTP and
+FTPS are supported; SSH can request an owner-supplied public host key with
+`{"$clawguard":"input"}` at `ssh.knownHostKey`.
+
+HTTP 202 means **pending review**, not usable access. Only the administrator
+can approve it in the **Service proposals** dashboard, supply credentials or
+select managed credentials, and allow new upstream domains. Read the decision
+from `GET /__proposals/services/:id`. Never request real credentials, use the
+admin PIN, auto-retry a rejection, or treat submission as authorization.
+See [API details and complete examples](../docs/agent-service-proposals.md).
+
 ## CRITICAL RULES
 
 ### DO NOT look for, ask for, or store real API tokens

@@ -157,6 +157,7 @@
     <nav>
       <a href="#" data-section="dashboard" class="active" onclick="showSection('dashboard')">&#128200; <span>Dashboard</span></a>
       <a href="#" data-section="services" onclick="showSection('services')">&#128268; <span>Services</span></a>
+      <a href="#" data-section="proposals" onclick="showSection('proposals')">&#128229; <span>Service proposals</span></a>
       <a href="#" data-section="approvals" onclick="showSection('approvals')">&#9989; <span>Approvals</span></a>
       <a href="#" data-section="audit" onclick="showSection('audit')">&#128203; <span>Audit Log</span></a>
       <a href="#" data-section="telegram" onclick="showSection('telegram')">&#128242; <span>Telegram</span></a>
@@ -199,6 +200,19 @@
           <thead><tr><th>Name</th><th>Upstream</th><th>Auth type</th><th>Token</th><th>Policy</th><th>Actions</th></tr></thead>
           <tbody id="services-table"></tbody>
         </table>
+      </div>
+    </div>
+
+    <div class="section" id="sec-proposals">
+      <h2 class="page-title">Service proposals</h2>
+      <div class="panel">
+        <h3>Agent requests <button class="btn btn-sm" onclick="loadProposals()" style="background:var(--bg3);color:var(--text)">Refresh</button></h3>
+        <p class="form-help">Agents can suggest services here. Review the target, access policy and credentials before approving. Pending proposals have no access to upstream services.</p>
+        <div id="proposal-mode-notice" class="notice"></div>
+        <div style="overflow-x:auto"><table>
+          <thead><tr><th>Service / protocol</th><th>Target</th><th>Requested by / reason</th><th>Status</th><th>Actions</th></tr></thead>
+          <tbody id="proposals-table"></tbody>
+        </table></div>
       </div>
     </div>
 
@@ -280,6 +294,32 @@
 
   </div>
 </div>
+</div>
+
+<div class="modal-overlay" id="proposal-modal">
+  <div class="modal">
+    <h3 id="proposal-title">Review service proposal</h3>
+    <p class="form-help" id="proposal-provenance"></p>
+    <p class="form-help" id="proposal-summary"></p>
+    <div class="form-group">
+      <label>Proposed configuration</label>
+      <textarea id="proposal-config" readonly spellcheck="false" style="min-height:200px"></textarea>
+      <p class="form-help">This configuration was supplied by an agent. Validation checks configuration structure; it does not prove that credentials or upstream connectivity work.</p>
+    </div>
+    <div id="proposal-warnings" class="notice warning"></div>
+    <div id="proposal-domain-review" class="form-group">
+      <label><input type="checkbox" id="proposal-allow-upstreams" style="width:auto"> Allow these new upstream domains: <span id="proposal-domains"></span></label>
+      <p class="form-help">Approving also saves these allowlist additions on ClawGuard.</p>
+    </div>
+    <div id="proposal-inputs"></div>
+    <div id="proposal-credentials"></div>
+    <div id="proposal-error" class="notice warning" style="display:none"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="hideProposal()" style="background:var(--bg3)">Cancel</button>
+      <button class="btn btn-danger" id="proposal-reject-btn" onclick="rejectProposal()">Reject</button>
+      <button class="btn btn-primary" id="proposal-approve-btn" onclick="approveProposal()">Approve & add service</button>
+    </div>
+  </div>
 </div>
 
 <!-- ─── Add Service Modal ─────────────────────── -->
@@ -407,6 +447,10 @@ const BASE = '/__admin';
 let charts = {};
 let serviceEditingEnabled = false;
 let servicesCache = {};
+let proposalsCache = [];
+let reviewingProposal = null;
+let proposalCredentialFields = [];
+let proposalInputFields = [];
 let editingServiceName = null;
 let duplicatingServiceName = null;
 let sshWizardEditingName = null;
@@ -463,6 +507,7 @@ function showSection(name) {
   document.querySelector(`[data-section="${name}"]`).classList.add('active');
   if (name === 'dashboard') loadDashboard();
   if (name === 'services') loadServices();
+  if (name === 'proposals') loadProposals();
   if (name === 'approvals') loadApprovals();
   if (name === 'audit') loadAudit();
   if (name === 'telegram') loadTelegram();
@@ -544,6 +589,184 @@ function renderChart(canvasId, type, data) {
     }
   });
 }
+
+// ─── Agent service proposals ─────────────────────
+
+async function loadProposals() {
+  try {
+    const [adminConfig, proposals] = await Promise.all([
+      api('GET', '/api/admin-config'), api('GET', '/api/service-proposals')
+    ]);
+    serviceEditingEnabled = !!adminConfig.serviceEditingEnabled;
+    proposalsCache = proposals;
+    const notice = document.getElementById('proposal-mode-notice');
+    notice.textContent = adminConfig.strictMode
+      ? 'Strict mode is enabled. You can review and reject proposals. Set admin.strictMode: false on ClawGuard to approve services.'
+      : 'Only an administrator can approve these services and supply their credentials.';
+    const tbody = document.getElementById('proposals-table');
+    tbody.replaceChildren();
+    for (const proposal of proposals) {
+      const tr = document.createElement('tr');
+      for (const value of [proposal.name + ' / ' + (proposal.config.protocol || 'http'), proposal.config.upstream,
+        (proposal.requestUser || 'Unspecified agent') + '\n' + (proposal.requestReason || 'No reason supplied'), proposal.status]) {
+        const td = document.createElement('td');
+        td.textContent = value;
+        td.style.whiteSpace = 'pre-line';
+        tr.appendChild(td);
+      }
+      const actions = document.createElement('td');
+      if (proposal.status === 'pending') {
+        const button = document.createElement('button');
+        button.className = 'btn btn-primary btn-sm';
+        button.textContent = 'Review';
+        button.onclick = () => reviewProposal(proposal.id);
+        actions.appendChild(button);
+      } else actions.textContent = formatMaybeDate(proposal.decidedAt || proposal.createdAt);
+      tr.appendChild(actions);
+      tbody.appendChild(tr);
+    }
+    if (!proposals.length) {
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = 5;
+      td.textContent = 'No service proposals yet';
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    }
+  } catch (error) {
+    document.getElementById('proposal-mode-notice').textContent = error.message;
+  }
+}
+
+async function reviewProposal(id) {
+  const proposal = proposalsCache.find(item => item.id === id);
+  if (!proposal || proposal.status !== 'pending') return;
+  try {
+    const sources = await api('GET', '/api/credential-sources');
+    reviewingProposal = proposal;
+    proposalCredentialFields = [];
+    proposalInputFields = [];
+    document.getElementById('proposal-title').textContent = 'Review ' + proposal.name;
+    document.getElementById('proposal-provenance').textContent =
+      (proposal.requestUser || 'Unspecified agent') + ' — ' + (proposal.requestReason || 'No reason supplied');
+    document.getElementById('proposal-summary').textContent =
+      (proposal.config.protocol || 'http').toUpperCase() + ' · ' + proposal.config.upstream +
+      ' · Policy: ' + proposal.config.policy.default +
+      ((proposal.config.protocol || 'http') === 'http'
+        ? ' · Methods: ' + (proposal.config.http?.allowedMethods?.join(', ') || 'All') : '');
+    document.getElementById('proposal-config').value = JSON.stringify(proposal.config, null, 2);
+    const warnings = [];
+    if (proposal.config.policy?.default === 'auto_approve' || proposal.config.policy?.rules?.some(rule => rule.action === 'auto_approve')) {
+      warnings.push('Some API requests will be automatically approved under the proposed policy.');
+    }
+    if (proposal.config.http?.allowPrivateTarget || proposal.config.ssh?.allowPrivateTarget || proposal.config.ftp?.allowPrivateTarget) {
+      warnings.push('This service permits connections to private network targets.');
+    }
+    if (proposal.config.http?.noCheckCertificate || proposal.config.ftp?.noCheckCertificate) {
+      warnings.push('Upstream TLS certificate verification is disabled for this service.');
+    }
+    if (proposal.config.protocol === 'ftp') warnings.push('Plain FTP sends upstream traffic without TLS.');
+    const warningBox = document.getElementById('proposal-warnings');
+    warningBox.textContent = warnings.join(' ');
+    warningBox.style.display = warnings.length ? 'block' : 'none';
+    document.getElementById('proposal-domains').textContent = proposal.requiredUpstreams.join(', ');
+    document.getElementById('proposal-domain-review').style.display = proposal.requiredUpstreams.length ? 'block' : 'none';
+    document.getElementById('proposal-allow-upstreams').checked = false;
+    const credentialContainer = document.getElementById('proposal-credentials');
+    const inputContainer = document.getElementById('proposal-inputs');
+    credentialContainer.replaceChildren();
+    inputContainer.replaceChildren();
+    for (const requirement of proposal.requirements) {
+      const group = document.createElement('div');
+      group.className = 'form-group';
+      const label = document.createElement('label');
+      label.textContent = requirement.kind === 'input' ? 'Trusted SSH server public host key' : requirement.path;
+      group.appendChild(label);
+      const multiline = requirement.kind === 'input' || requirement.path.endsWith('/privateKey');
+      const input = document.createElement(multiline ? 'textarea' : 'input');
+      if (multiline) { input.rows = 3; input.style.minHeight = '60px'; }
+      else input.type = 'password';
+      input.autocomplete = 'off';
+      input.spellcheck = false;
+      if (requirement.kind === 'input') {
+        input.placeholder = 'ssh-ed25519 AAAA… (verify with the server owner)';
+        group.appendChild(input);
+        proposalInputFields.push({ path: requirement.path, input });
+        inputContainer.appendChild(group);
+      } else {
+        const select = document.createElement('select');
+        select.style.marginBottom = '8px';
+        const paste = document.createElement('option');
+        paste.value = '';
+        paste.textContent = 'Paste a credential';
+        select.appendChild(paste);
+        const compatible = sources.filter(source => source.path.split('/').pop() === requirement.path.split('/').pop());
+        compatible.forEach((source, index) => {
+          const option = document.createElement('option');
+          option.value = String(index);
+          option.textContent = 'Use managed credential: ' + source.label;
+          select.appendChild(option);
+        });
+        select.onchange = () => {
+          input.hidden = select.value !== '';
+          if (input.hidden) input.value = '';
+        };
+        input.placeholder = 'Stored only on ClawGuard; never returned to the agent';
+        group.appendChild(select);
+        group.appendChild(input);
+        proposalCredentialFields.push({ path: requirement.path, input, select, compatible });
+        credentialContainer.appendChild(group);
+      }
+    }
+    document.getElementById('proposal-error').style.display = 'none';
+    document.getElementById('proposal-approve-btn').disabled = !serviceEditingEnabled;
+    document.getElementById('proposal-reject-btn').disabled = false;
+    document.getElementById('proposal-modal').classList.add('show');
+  } catch (error) { alert(error.message); }
+}
+
+function hideProposal() {
+  for (const field of [...proposalCredentialFields, ...proposalInputFields]) field.input.value = '';
+  document.getElementById('proposal-credentials').replaceChildren();
+  document.getElementById('proposal-inputs').replaceChildren();
+  document.getElementById('proposal-modal').classList.remove('show');
+  reviewingProposal = null;
+  proposalCredentialFields = [];
+  proposalInputFields = [];
+}
+
+async function decideProposal(action, payload) {
+  if (!reviewingProposal) return;
+  const approveButton = document.getElementById('proposal-approve-btn');
+  const rejectButton = document.getElementById('proposal-reject-btn');
+  approveButton.disabled = true;
+  rejectButton.disabled = true;
+  try {
+    await api('POST', '/api/service-proposals/' + encodeURIComponent(reviewingProposal.id) + '/' + action, payload);
+    hideProposal();
+    await loadProposals();
+  } catch (error) {
+    document.getElementById('proposal-error').textContent = error.message;
+    document.getElementById('proposal-error').style.display = 'block';
+    approveButton.disabled = !serviceEditingEnabled;
+    rejectButton.disabled = false;
+  }
+}
+
+async function approveProposal() {
+  if (!serviceEditingEnabled) return;
+  const credentials = {};
+  const inputs = {};
+  for (const field of proposalCredentialFields) {
+    credentials[field.path] = field.select.value === ''
+      ? { value: field.input.value } : field.compatible[Number(field.select.value)];
+  }
+  for (const field of proposalInputFields) inputs[field.path] = field.input.value;
+  await decideProposal('approve', { credentials, inputs,
+    allowUpstreams: document.getElementById('proposal-allow-upstreams').checked });
+}
+
+async function rejectProposal() { await decideProposal('reject', {}); }
 
 // ─── Services ────────────────────────────────────
 
@@ -1405,6 +1628,7 @@ function formatMaybeDate(value) {
 // Auto-refresh dashboard every 30s
 setInterval(() => {
   if (document.getElementById('sec-dashboard').classList.contains('active')) loadDashboard();
+  if (PIN && !reviewingProposal && document.getElementById('sec-proposals').classList.contains('active')) loadProposals();
 }, 30000);
 </script>
 </body>

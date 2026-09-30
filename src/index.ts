@@ -26,6 +26,7 @@ import { loadFtpCredentialPlugin } from './ftp-credential-plugins/loader';
 import { FtpGatewayClient } from './ftp-gateway-client';
 import { FtpBroker } from './ftp-broker';
 import { createFtpRouter } from './ftp-router';
+import { createServiceProposalRouter, restoreProposalUpstreams } from './service-proposals';
 
 const CONFIG_PATH = process.env['CLAWGUARD_CONFIG'] || process.env['AGENTGATE_CONFIG'] || path.join(process.cwd(), 'clawguard.yaml');
 
@@ -49,6 +50,7 @@ async function main() {
   const auditPath = path.resolve(config.audit.path);
   console.log(`📊 Audit log: ${auditPath}`);
   const audit = new AuditLogger(auditPath);
+  restoreProposalUpstreams(config, audit);
 
   // Apply service overrides from admin panel (SQLite)
   if (config.admin.strictMode) {
@@ -220,6 +222,7 @@ async function main() {
 
     const adminApp = express();
     adminApp.use(express.raw({ type: '*/*', limit: '10mb' }));
+    adminApp.use('/__proposals', createServiceProposalRouter(config, audit));
     // Lease responses contain an ephemeral gateway password. Expose the same
     // authenticated API on the optional TLS listener so remote agents need
     // not mint leases over the plaintext HTTP proxy port.
