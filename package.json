@@ -1,7 +1,7 @@
 {
   "name": "clawguard",
   "version": "0.2.0",
-  "description": "Security gateway for OpenClaw agents — CIBA-based auth with Telegram approval",
+  "description": "Security proxy for autonomous AI agents with managed API credentials and Telegram approval",
   "main": "dist/index.js",
   "bin": {
     "clawguard": "./dist/cli/index.js"
@@ -14,7 +14,10 @@
     "dev": "tsc && node dist/index.js"
   },
   "keywords": [
+    "autonomous-agents",
     "openclaw",
+    "codex",
+    "claude-code",
     "ai",
     "agent",
     "auth",
