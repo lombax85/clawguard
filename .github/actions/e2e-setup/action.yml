@@ -14,7 +14,7 @@ runs:
     - name: Start Minikube
       uses: medyagh/setup-minikube@e9e035a86bbc3caea26a450bd4dbf9d0c453682e
       with:
-        minikube-version: v1.38.1
+        minikube-version: 1.38.1
         driver: docker
         container-runtime: docker
 
