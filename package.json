@@ -8,8 +8,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "npm run build && node --test --test-concurrency=1 tests/**/*.test.js",
-    "test:ftp-e2e": "npm run build && CLAWGUARD_RUN_FTP_E2E=1 node --test tests/ftp-gateway-e2e.test.js",
+    "test": "npm run build && node --require ./tests/helpers/test-console.cjs --test --test-concurrency=1 tests/**/*.test.js",
+    "test:ftp-e2e": "npm run build && CLAWGUARD_RUN_FTP_E2E=1 node --require ./tests/helpers/test-console.cjs --test tests/ftp-gateway-e2e.test.js",
     "start": "node dist/index.js",
     "dev": "tsc && node dist/index.js"
   },
