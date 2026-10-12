@@ -25,4 +25,23 @@ jobs:
         run: npm ci
 
       - name: Build and test
-        run: npm test
+        run: |
+          log_file="$RUNNER_TEMP/clawguard-tests.log"
+          if npm test 2>&1 | tee "$log_file"; then
+            exit 0
+          fi
+
+          # Include failing TAP diagnostics in the Checks API for CI triage.
+          failure="$(awk '
+            /^[[:space:]]*not ok / { capture = 1 }
+            capture { print }
+            capture && /^[[:space:]]*\.\.\./ { capture = 0 }
+          ' "$log_file" | head -n 100)"
+          if [ -z "$failure" ]; then
+            failure="$(tail -n 30 "$log_file")"
+          fi
+          failure="${failure//%/%25}"
+          failure="${failure//$'\r'/%0D}"
+          failure="${failure//$'\n'/%0A}"
+          printf '::error title=Build or tests failed::%s\n' "$failure"
+          exit 1
