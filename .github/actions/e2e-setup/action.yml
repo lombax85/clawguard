@@ -12,19 +12,39 @@ runs:
   using: composite
   steps:
     - name: Start Minikube
-      uses: medyagh/setup-minikube@latest
+      uses: medyagh/setup-minikube@e9e035a86bbc3caea26a450bd4dbf9d0c453682e
+      with:
+        minikube-version: v1.38.1
+        driver: docker
+        container-runtime: docker
 
     - name: Install Skaffold
       shell: bash
       run: |
-        curl -Lo skaffold https://storage.googleapis.com/skaffold/releases/latest/skaffold-linux-amd64
-        sudo install skaffold /usr/local/bin/
+        curl --fail --location --silent --show-error \
+          --output "$RUNNER_TEMP/skaffold" \
+          https://storage.googleapis.com/skaffold/releases/v2.24.0/skaffold-linux-amd64
+        sudo install "$RUNNER_TEMP/skaffold" /usr/local/bin/skaffold
+        skaffold version
 
     - name: Build and Deploy with Skaffold
       shell: bash
       run: |
-        eval $(minikube docker-env)
-        skaffold run
+        docker_env="$(minikube docker-env --shell bash)"
+        eval "$docker_env"
+        log_file="$RUNNER_TEMP/clawguard-skaffold.log"
+        if skaffold run 2>&1 | tee "$log_file"; then
+          exit 0
+        fi
+
+        # Make the deployment error available through the Checks API as well
+        # as the downloadable job log. Escape GitHub workflow-command data.
+        failure="$(tail -n 30 "$log_file")"
+        failure="${failure//%/%25}"
+        failure="${failure//$'\r'/%0D}"
+        failure="${failure//$'\n'/%0A}"
+        printf '::error title=E2E build and deploy failed::%s\n' "$failure"
+        exit 1
 
     - name: Wait for Deployments
       shell: bash
