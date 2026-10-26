@@ -93,6 +93,7 @@ async function main() {
   // Init approval manager (restores active approvals from SQLite)
   console.log(`🔑 Restoring approvals:`);
   const approvalManager = new ApprovalManager(telegram, audit, undefined, webhookNotifier);
+  telegram?.configureServiceCommands(() => config.services, approvalManager);
 
   const port = config.server.port;
 

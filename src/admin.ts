@@ -207,7 +207,8 @@ export function createAdminRouter(
         hostnames: svc.hostnames,
         ssh: svc.ssh,
         ftp: svc.ftp,
-        sshWizard: getAdminSshWizardMetadata(svc),
+        sshWizard: getAdminSshWizardMetadata(svc, svc.ssh?.trustOnFirstUse
+          ? audit.getSshHostIdentity?.(name, svc.upstream)?.publicKey : undefined),
         editableConfig: redactServiceForAdmin(svc),
       };
     }

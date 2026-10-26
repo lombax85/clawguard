@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { AuditEntry, Approval, DashboardStats, FtpAccessMode, ServiceConfig, ServiceProposal } from './types';
+import { AuditEntry, Approval, DashboardStats, FtpAccessMode, ServiceConfig, ServiceProposal, TemporaryServiceApproval } from './types';
 
 export type SshSessionAction = 'shell' | 'exec';
 
@@ -184,6 +184,23 @@ export class AuditLogger {
         proposal_id TEXT NOT NULL,
         approved_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS ssh_host_identities (
+        service TEXT NOT NULL,
+        upstream TEXT NOT NULL,
+        public_key TEXT NOT NULL,
+        learned_at TEXT NOT NULL,
+        PRIMARY KEY (service, upstream)
+      );
+      CREATE TABLE IF NOT EXISTS temporary_service_approvals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        service TEXT NOT NULL,
+        approval_json TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        revoked INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_temporary_approvals_service_expiry
+        ON temporary_service_approvals(service, expires_at, revoked);
 
       CREATE TABLE IF NOT EXISTS ssh_sessions (
         id TEXT PRIMARY KEY,
@@ -381,6 +398,38 @@ export class AuditLogger {
   }
 
   // ─── Service overrides (admin API) ────────────────────────
+
+  getSshHostIdentity(service: string, upstream: string): { publicKey: string; learnedAt: string } | undefined {
+    return this.db.prepare('SELECT public_key AS publicKey, learned_at AS learnedAt FROM ssh_host_identities WHERE service = ? AND upstream = ?')
+      .get(service, upstream) as { publicKey: string; learnedAt: string } | undefined;
+  }
+
+  rememberSshHostIdentity(service: string, upstream: string, publicKey: string): string {
+    // First writer wins. A concurrent connection must use the stored key.
+    this.db.prepare('INSERT OR IGNORE INTO ssh_host_identities VALUES (?, ?, ?, ?)')
+      .run(service, upstream, publicKey, new Date().toISOString());
+    return this.getSshHostIdentity(service, upstream)!.publicKey;
+  }
+
+  saveTemporaryServiceApproval(approval: TemporaryServiceApproval): void {
+    this.db.transaction(() => {
+      this.revokeTemporaryServiceApprovals(approval.service);
+      this.db.prepare('INSERT INTO temporary_service_approvals(service, approval_json, expires_at) VALUES (?, ?, ?)')
+        .run(approval.service, JSON.stringify(approval), approval.expiresAt);
+      this.setShowlog(approval.chatId, true);
+    })();
+  }
+
+  getTemporaryServiceApprovals(): TemporaryServiceApproval[] {
+    return (this.db.prepare('SELECT approval_json FROM temporary_service_approvals WHERE revoked = 0 AND expires_at > ? ORDER BY id')
+      .all(Date.now()) as { approval_json: string }[]).map(row => JSON.parse(row.approval_json));
+  }
+
+  revokeTemporaryServiceApprovals(service?: string): number {
+    return service === undefined
+      ? this.db.prepare('UPDATE temporary_service_approvals SET revoked = 1 WHERE revoked = 0').run().changes
+      : this.db.prepare('UPDATE temporary_service_approvals SET revoked = 1 WHERE service = ? AND revoked = 0').run(service).changes;
+  }
 
   getServiceProposal(id: string): ServiceProposal | undefined {
     const row = this.db.prepare('SELECT proposal_json, status, decided_at FROM service_proposals WHERE id = ?')

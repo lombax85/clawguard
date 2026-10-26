@@ -11,10 +11,23 @@ export interface PolicyRule {
 export type ServiceProtocol = 'http' | 'ssh' | 'ftp' | 'ftps';
 
 export interface SshServiceConfig {
-  // Complete OpenSSH public host key (`keytype base64`), never a TOFU fingerprint.
-  knownHostKey: string;
+  // Complete OpenSSH public host key (`keytype base64`).
+  knownHostKey?: string;
+  // Owner opt-in: remember the key during the first approved connection.
+  trustOnFirstUse?: boolean;
   // Private/link-local/loopback literals and DNS answers require this explicit opt-in.
   allowPrivateTarget: boolean;
+}
+
+export interface TemporaryServiceApproval {
+  service: string;
+  configHash: string;
+  protocol: ServiceProtocol;
+  approvedAt: number;
+  expiresAt: number;
+  approvedBy: string;
+  chatId: string;
+  accessMode?: FtpAccessMode;
 }
 
 export type FtpTlsMode = 'explicit' | 'implicit';

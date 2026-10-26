@@ -6,6 +6,7 @@ const path = require('node:path');
 
 const { SshBroker } = require('/app/dist/ssh-broker');
 const { SshAgentLeaseManager } = require('/app/dist/ssh-agent-lease');
+const { AuditLogger } = require('/app/dist/audit');
 
 const resultsDir = '/e2e-results';
 const eventsPath = path.join(resultsDir, 'events.ndjson');
@@ -62,7 +63,9 @@ async function main() {
           pluginConfig: {},
         },
         policy: { default: 'require_approval' },
-        ssh: { knownHostKey, allowPrivateTarget: true },
+        ssh: process.env.E2E_TRUST_ON_FIRST_USE === '1'
+          ? { trustOnFirstUse: true, allowPrivateTarget: true }
+          : { knownHostKey, allowPrivateTarget: true },
       },
     },
     security: {
@@ -92,7 +95,10 @@ async function main() {
   };
 
   const leaseManager = new SshAgentLeaseManager(config.sshBroker);
+  const identityStore = new AuditLogger(path.join(resultsDir, 'identities.db'));
   const audit = {
+    getSshHostIdentity: (...args) => identityStore.getSshHostIdentity(...args),
+    rememberSshHostIdentity: (...args) => identityStore.rememberSshHostIdentity(...args),
     startSshSession(entry) {
       record('start', entry.id, entry);
     },
@@ -141,6 +147,7 @@ async function main() {
     try {
       await broker.close();
       await leaseManager.close();
+      identityStore.close();
       retainedPrivateKey.fill(0);
       process.exit(0);
     } catch (error) {

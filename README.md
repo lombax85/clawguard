@@ -479,8 +479,10 @@ ssh gateway@CLAWGUARD_HOST -p 2222 -- \
   production-ssh --reason "Check the remote kernel version" -- uname -a
 ```
 
-Each attempt produces a new Telegram request. SSH approval is deliberately
-one-time: it does not use HTTP policy auto-approval or cached approval windows.
+Each attempt normally produces a new Telegram request. SSH does not use HTTP
+policy auto-approval or cached HTTP approvals. An owner can explicitly allow
+new sessions for a limited time with `/allow <service> <duration>`, which
+enables silent showlog messages. See [Telegram commands](TELEGRAM_SETUP.md#telegram-bot-commands).
 The approval includes the supplied reason. Legacy clients that omit
 `--reason` remain compatible and receive an action-specific fallback reason.
 No configured/paired Telegram approver, denial, bot failure, or timeout all
@@ -499,9 +501,10 @@ session, and the broker has bounded cleanup for a missing completion callback.
 
 - Port forwarding, agent forwarding, Unix-socket forwarding, X11, extra
   channels, `ProxyJump`, SCP and SFTP are disabled or unsupported.
-- The upstream host key is pinned as the complete OpenSSH public key;
-  fingerprints alone and trust-on-first-use are rejected. Obtain and verify
-  the key independently before configuration.
+- The upstream host key is pinned as a complete OpenSSH public key. The owner
+  can supply a verified `ssh.knownHostKey`, or set `ssh.trustOnFirstUse: true`
+  to remember the first observed key. Later connections reject key changes.
+  First-use trust does not independently verify the initial server identity.
 - The upstream key never reaches the inbound SSH client. However, a compromised
   sidecar could use an approved session's agent socket for the lease lifetime
   against any reachable host that accepts that same key. Keep leases short and
@@ -651,8 +654,9 @@ can include:
 
 Read-only and session operations can be auto-approved by policy. Every write,
 destructive, oversized, empty, or unrecognized SOAP operation is forced to one
-fresh Telegram decision for that exact request: it cannot use a cached approval
-and the decision is not persisted. Ticket/session-export methods such as
+fresh Telegram decision for that exact request, except while an explicit
+`/allow` service grant is active. It cannot use a cached HTTP approval and a
+one-request decision is not persisted. Ticket/session-export methods such as
 `AcquireCloneTicket`, `AcquireGenericServiceTicket`, `CloneSession`, and
 impersonation/token login are blocked.
 

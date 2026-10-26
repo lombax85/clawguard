@@ -125,7 +125,7 @@ function normalizeProposal(name: unknown, input: unknown, config: Config): Obj {
   doc.protocol ??= 'http';
   for (const [section, allowed] of Object.entries({
     http: ['allowedMethods', 'allowPrivateTarget', 'noCheckCertificate'],
-    ssh: ['knownHostKey', 'allowPrivateTarget'],
+    ssh: ['knownHostKey', 'allowPrivateTarget', 'trustOnFirstUse'],
     ftp: ['allowPrivateTarget', 'tlsMode', 'root', 'noCheckCertificate'],
     policy: ['default', 'rules'],
   })) {
@@ -295,6 +295,18 @@ export function createAdminProposalRouter(config: Config, audit: AuditLogger, ru
       if (upstreams.length && body.allowUpstreams !== true) throw new Error('Explicit approval of the new upstream domains is required');
       const bindings = object(body.credentials) ? body.credentials : {};
       const inputs = object(body.inputs) ? body.inputs : {};
+      if (body.sshTrustOnFirstUse !== undefined && typeof body.sshTrustOnFirstUse !== 'boolean') {
+        throw new Error('sshTrustOnFirstUse must be true or false');
+      }
+      if (body.sshTrustOnFirstUse === true) {
+        if (doc.protocol !== 'ssh' || !object(doc.ssh)) throw new Error('First-use trust requires an SSH service');
+        delete doc.ssh.knownHostKey;
+        doc.ssh.trustOnFirstUse = true;
+      } else if (body.sshTrustOnFirstUse === false && doc.protocol === 'ssh' && object(doc.ssh)
+        && doc.ssh.trustOnFirstUse === true) {
+        delete doc.ssh.trustOnFirstUse;
+        doc.ssh.knownHostKey = { $clawguard: 'input' };
+      }
       const sources = listCredentialSources(config);
       for (const requirement of proposalRequirements(doc)) {
         let value: unknown;

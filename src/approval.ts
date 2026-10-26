@@ -5,7 +5,9 @@ import {
   RequestMeta,
   RequestApprovalInfo,
   FtpAccessMode,
+  TemporaryServiceApproval,
 } from './types';
+import { MAX_TEMPORARY_APPROVAL_SECONDS, serviceApprovalHash } from './temporary-approval';
 import { TelegramNotifier } from './telegram';
 import { WebhookNotifier } from './webhook';
 import { AuditLogger } from './audit';
@@ -38,6 +40,47 @@ export class ApprovalManager {
   private webhook: WebhookNotifier | undefined;
   private audit: AuditLogger;
   private approvalTimeout: number;
+
+  grantTemporaryServiceApproval(service: string, config: ServiceConfig, ttlSeconds: number,
+    approvedBy: string, chatId: string, accessMode?: FtpAccessMode): TemporaryServiceApproval {
+    if (!Number.isInteger(ttlSeconds) || ttlSeconds < 60 || ttlSeconds > MAX_TEMPORARY_APPROVAL_SECONDS) {
+      throw new Error('Temporary approval duration must be from 1 minute to 24 hours');
+    }
+    const protocol = config.protocol ?? 'http';
+    if ((protocol === 'ftp' || protocol === 'ftps')
+      && accessMode !== 'read_only' && accessMode !== 'read_write') {
+      throw new Error('FTP requires an explicit read_only or read_write access mode');
+    }
+    const approval: TemporaryServiceApproval = {
+      service, protocol, configHash: serviceApprovalHash(config), approvedAt: Date.now(),
+      expiresAt: Date.now() + ttlSeconds * 1000, approvedBy, chatId,
+      ...((protocol === 'ftp' || protocol === 'ftps') ? { accessMode } : {}),
+    };
+    this.audit.saveTemporaryServiceApproval(approval);
+    return approval;
+  }
+
+  getTemporaryServiceApprovals(): TemporaryServiceApproval[] {
+    return this.audit.getTemporaryServiceApprovals?.() ?? [];
+  }
+
+  private temporaryApproval(service: string, config: ServiceConfig): TemporaryServiceApproval | undefined {
+    const approval = this.getTemporaryServiceApprovals().find(item => item.service === service);
+    if (!approval || !this.telegram?.canUseTemporaryApproval?.(approval.chatId)) return undefined;
+    if (approval.configHash !== serviceApprovalHash(config)) {
+      this.audit.revokeTemporaryServiceApprovals(service);
+      return undefined;
+    }
+    return approval;
+  }
+
+  private notifyTemporary(approval: TemporaryServiceApproval, method: string, path: string,
+    agentIp: string, meta?: RequestMeta, info?: RequestApprovalInfo): void {
+    const mode = approval.accessMode ? `; ${approval.accessMode}` : '';
+    this.telegram?.notifyAutoApproved(approval.service, method, path, agentIp,
+      `temporary service approval until ${new Date(approval.expiresAt).toISOString()}${mode}`, meta, info,
+      { force: true, silent: true });
+  }
 
   constructor(
     telegram: TelegramNotifier | undefined,
@@ -152,6 +195,11 @@ export class ApprovalManager {
     approvalInfo?: RequestApprovalInfo
   ): Promise<boolean> {
     const approvalPath = approvalInfo?.approvalPath || path;
+    const temporary = this.temporaryApproval(service, serviceConfig);
+    if (temporary) {
+      this.notifyTemporary(temporary, method, approvalPath, agentIp, meta, approvalInfo);
+      return true;
+    }
     const oneTime = approvalInfo?.oneTime === true;
     const action = oneTime
       ? 'require_approval'
@@ -258,9 +306,10 @@ export class ApprovalManager {
    * Requests approval for exactly one SSH session.
    *
    * Unlike HTTP approvals, this path is always fail-closed and deliberately
-   * bypasses policy auto-approval, the active-approval cache, restored
+   * bypasses policy auto-approval, the HTTP approval cache, restored
    * approvals, and approval persistence. A successful decision authorizes
-   * only the caller currently awaiting this promise.
+   * only the caller currently awaiting this promise. An explicit temporary
+   * service grant is the only exception to the fresh-decision requirement.
    */
   async checkSshSessionApproval(
     service: string,
@@ -273,7 +322,12 @@ export class ApprovalManager {
   ): Promise<boolean> {
     // Keep the public signature aligned with checkApproval while making it
     // explicit that SSH policy rules are not consulted.
-    void serviceConfig;
+    const temporary = signal?.aborted ? undefined : this.temporaryApproval(service, serviceConfig);
+    if (temporary) {
+      this.notifyTemporary(temporary, SSH_SESSION_METHOD, path, agentIp,
+        withFallbackReason(meta, `Open SSH session (${path})`));
+      return true;
+    }
 
     const requestId = generateRequestId();
     const approvalMeta = withFallbackReason(
@@ -367,7 +421,12 @@ export class ApprovalManager {
     timeoutMs: number = this.approvalTimeout,
     signal?: AbortSignal
   ): Promise<FtpAccessMode | false> {
-    void serviceConfig;
+    const temporary = signal?.aborted ? undefined : this.temporaryApproval(service, serviceConfig);
+    if (temporary && temporary.accessMode) {
+      this.notifyTemporary(temporary, FTP_SESSION_METHOD, path, agentIp,
+        withFallbackReason(meta, `Open FTP/FTPS lease (${path})`));
+      return temporary.accessMode;
+    }
     const requestId = generateRequestId();
     const approvalMeta = withFallbackReason(
       meta,
@@ -445,6 +504,8 @@ export class ApprovalManager {
    * - method set, path=string: revoke only the exact path-scoped approval
    */
   revokeApproval(service: string, method?: string, path?: string | null): boolean {
+    const temporaryRevoked = (!method || method === '*')
+      ? (this.audit.revokeTemporaryServiceApprovals?.(service) ?? 0) > 0 : false;
     if (method && path !== undefined) {
       const key = this.approvalKey(service, method, path);
       if (this.activeApprovals.has(key)) {
@@ -454,13 +515,13 @@ export class ApprovalManager {
         console.log(`🔒 Approval revoked for ${service} ${method.toUpperCase()} (${scope})`);
         return true;
       }
-      return false;
+      return temporaryRevoked;
     }
 
     if (method) {
       const prefix = `${service}::${method.toUpperCase()}::`;
       const keysToDelete = [...this.activeApprovals.keys()].filter((k) => k.startsWith(prefix));
-      if (keysToDelete.length === 0) return false;
+      if (keysToDelete.length === 0) return temporaryRevoked;
       for (const key of keysToDelete) {
         this.activeApprovals.delete(key);
       }
@@ -471,7 +532,7 @@ export class ApprovalManager {
 
     // Revoke all methods for this service
     const keysToDelete = [...this.activeApprovals.keys()].filter((k) => k.startsWith(`${service}::`));
-    if (keysToDelete.length === 0) return false;
+    if (keysToDelete.length === 0) return temporaryRevoked;
 
     for (const key of keysToDelete) {
       this.activeApprovals.delete(key);
@@ -482,7 +543,8 @@ export class ApprovalManager {
   }
 
   revokeAll(): number {
-    const count = this.activeApprovals.size;
+    const count = this.activeApprovals.size + this.getTemporaryServiceApprovals().length;
+    this.audit.revokeTemporaryServiceApprovals?.();
     const keys = [...this.activeApprovals.keys()];
     this.activeApprovals.clear();
     for (const key of keys) {
@@ -501,11 +563,18 @@ export class ApprovalManager {
         this.activeApprovals.delete(key);
       }
     }
-    return this.activeApprovals.size;
+    return this.activeApprovals.size + this.getTemporaryServiceApprovals().length;
   }
 
   getStatus(): Record<string, { service: string; method: string; path: string | null; expiresAt: string; approvedBy: string; remainingMinutes: number }> {
     const status: Record<string, { service: string; method: string; path: string | null; expiresAt: string; approvedBy: string; remainingMinutes: number }> = {};
+    for (const approval of this.getTemporaryServiceApprovals()) {
+      status[`${approval.service}::*::*`] = {
+        service: approval.service, method: '*', path: null,
+        expiresAt: new Date(approval.expiresAt).toISOString(), approvedBy: approval.approvedBy,
+        remainingMinutes: Math.ceil((approval.expiresAt - Date.now()) / 60000),
+      };
+    }
     for (const [key, approval] of this.activeApprovals) {
       if (Date.now() < approval.expiresAt) {
         status[key] = {

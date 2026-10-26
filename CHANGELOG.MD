@@ -8,6 +8,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 
+- **SSH first-use server identity**: owner-selected `ssh.trustOnFirstUse`
+  records the first approved connection's host public key in SQLite. Later
+  sessions use that key with strict OpenSSH verification. Proposal review
+  supports existing pending host-key placeholders and the SSH wizard shows
+  learned fingerprints. Explicit verified keys remain supported.
+- **Telegram command help and temporary service approvals**: `/help` and the
+  bot command menu list supported commands. `/allow <service> <duration>`
+  permits a service for 1 minute to 24 hours, with mandatory silent showlog
+  messages. FTP/FTPS requires an explicit access mode. `/revoke <service>`
+  ends approvals early. Grants persist with their original expiry, respect
+  configured approvers and are invalidated by service configuration changes.
 - **Agent service proposals**: agent-key-authenticated submission and status
   endpoints for HTTP, SSH and FTP/FTPS configurations with explicit credential
   placeholders. Proposals are validated and persisted without activating a

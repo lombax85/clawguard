@@ -6,7 +6,8 @@ import { randomBytes } from 'crypto';
 import { ApprovalManager } from './approval';
 import { AuditLogger, SshSessionAction } from './audit';
 import { Config, RequestMeta, ServiceConfig } from './types';
-import { validateSshTargetRuntime } from './security';
+import { isValidKnownHostKey, validateSshTargetRuntime } from './security';
+import { createAdminSshKeyTools } from './admin-ssh';
 import {
   ISshCredentialPlugin,
   SshCredentials,
@@ -61,6 +62,8 @@ interface AuditContract {
   startSshSession: AuditLogger['startSshSession'];
   updateSshSession: AuditLogger['updateSshSession'];
   finalizeSshSession: AuditLogger['finalizeSshSession'];
+  getSshHostIdentity?: AuditLogger['getSshHostIdentity'];
+  rememberSshHostIdentity?: AuditLogger['rememberSshHostIdentity'];
 }
 
 export interface SshBrokerDependencies {
@@ -69,6 +72,7 @@ export interface SshBrokerDependencies {
   leaseManager: LeaseManagerContract | SshAgentLeaseManager;
   credentialPluginForService?: (serviceName: string) => ISshCredentialPlugin | undefined;
   validateTarget?: typeof validateSshTargetRuntime;
+  scanHostKeys?: (addresses: string[], port: number) => Promise<Array<{ publicKey: string }>>;
   /** Test-only override for the bounded completion grace. */
   sessionCompletionGraceMs?: number;
   /** Test-only override for the provisional wrapper acknowledgement. */
@@ -565,6 +569,29 @@ export class SshBroker {
       let lease: SshAgentLease | undefined;
       let activeRegistration: ActiveBrokerSession | undefined;
       try {
+        let knownHostKey = service.ssh.knownHostKey;
+        if (service.ssh.trustOnFirstUse === true) {
+          const audit = this.dependencies.audit;
+          if (!audit.getSshHostIdentity || !audit.rememberSshHostIdentity) {
+            throw new Error('Host identity storage is unavailable');
+          }
+          knownHostKey = audit.getSshHostIdentity(input.service, service.upstream)?.publicKey;
+          if (!knownHostKey) {
+            const scan = this.dependencies.scanHostKeys ?? createAdminSshKeyTools(
+              this.config.sshBroker.sshAgentPath, this.config.sshBroker.sshAddPath,
+              this.config.sshBroker.sshKeyscanPath
+            ).scanHost;
+            const keys = await this.waitUnlessShuttingDown(scan([connectHost], target.port));
+            if (disconnected || this.config.services[input.service] !== service) {
+              throw new Error('SSH request or service changed during identity detection');
+            }
+            const detected = keys[0]?.publicKey;
+            if (!isValidKnownHostKey(detected)) throw new Error('No valid SSH host identity received');
+            knownHostKey = audit.rememberSshHostIdentity(input.service, service.upstream, detected);
+            this.dependencies.audit.updateSshSession(sessionId, { outcome: 'host_identity_learned' });
+          }
+          if (!isValidKnownHostKey(knownHostKey)) throw new Error('Stored SSH host identity is invalid');
+        }
         const credentials = await this.getCredentialsBounded(plugin, input.service);
         validateUsername(credentials.username);
         this.dependencies.audit.updateSshSession(sessionId, { upstreamUser: credentials.username });
@@ -641,7 +668,7 @@ export class SshBroker {
             port: target.port,
             username: credentials.username,
             hostKeyAlias,
-            knownHostsLine: `${hostKeyAlias} ${service.ssh.knownHostKey}`,
+            knownHostsLine: `${hostKeyAlias} ${knownHostKey}`,
           },
         });
         if (!responseStarted) {

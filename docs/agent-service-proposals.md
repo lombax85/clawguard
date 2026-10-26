@@ -16,9 +16,10 @@ Open **Service proposals** in the dashboard:
 
 1. Select **Review** and inspect the target, protocol, methods and approval policy.
    The requester and reason are agent-supplied context, not proof of identity.
-2. Review private-target and TLS-verification exceptions, if present. SSH
-   requires a complete pinned public host key; verify it independently before
-   supplying it in the review form.
+2. Review private-target and TLS-verification exceptions, if present. For SSH,
+   choose **Remember the identity at the first approved connection** or supply
+   a verified host public key. The first-use choice also works on proposals
+   that previously required a host-key placeholder.
 3. Fill each credential slot by pasting a value or choosing a compatible
    credential already managed by ClawGuard. Only credential labels and source
    paths are sent to the browser; reused values are copied on the server.
@@ -54,6 +55,25 @@ document used in YAML or the admin JSON editor, with these placeholders:
   injected JSON field, SSH private key, or plugin credential.
 - `{"$clawguard":"input"}` at `ssh.knownHostKey` when the owner must supply a
   trusted public server identity. This is a public key, not a private key.
+
+For SSH, an agent can instead propose `ssh.trustOnFirstUse: true` and omit
+`ssh.knownHostKey`. The owner can change that choice during review. First-use
+trust records the server public key on the trusted machine during the first
+approved SSH connection. Later connections require that saved key. The saved
+identity survives restarts and is bound to the service alias and upstream URL.
+This trusts the first observed identity; it does not independently authenticate
+it. Select a verified public key when independent verification is required.
+The SSH wizard shows the learned fingerprint after the first connection.
+
+## Verification
+
+Run `npm test` for the local HTTP, Telegram transport and broker tests. To test
+proposal review and the SSH wizard in Chromium, install Playwright separately
+and run `node scripts/test-service-proposals-ui.cjs` after the build. Set
+`CLAWGUARD_PLAYWRIGHT_MODULE` to its module path if needed. The browser test uses
+an in-memory database and a generated test key. It does not contact an upstream
+SSH server. Run `bash scripts/test-ssh-gateway-e2e.sh` for the Docker/OpenSSH
+test of first-use trust, persistence and host-key rotation rejection.
 
 Do not send real credentials, secret-provider references, or the admin editor's
 `keep-secret` markers. Public metadata such as a username, region or header

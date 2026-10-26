@@ -311,6 +311,14 @@
       <label><input type="checkbox" id="proposal-allow-upstreams" style="width:auto"> Allow these new upstream domains: <span id="proposal-domains"></span></label>
       <p class="form-help">Approving also saves these allowlist additions on ClawGuard.</p>
     </div>
+    <div id="proposal-ssh-identity" class="form-group" style="display:none">
+      <label>SSH server identity</label>
+      <select id="proposal-ssh-trust" onchange="onProposalTrustChange()">
+        <option value="first-use">Remember the identity at the first approved connection</option>
+        <option value="pinned">Use a verified host public key</option>
+      </select>
+      <p class="form-help">First connection: trust and save the server identity. Later connections: reject a different identity. For independent verification, select a verified public key.</p>
+    </div>
     <div id="proposal-inputs"></div>
     <div id="proposal-credentials"></div>
     <div id="proposal-error" class="notice warning" style="display:none"></div>
@@ -384,11 +392,12 @@
     <div class="form-group">
       <label>Server identity</label>
       <select id="ssh-host-key-mode" onchange="onSshHostKeyModeChange()">
-        <option value="auto">Detect it automatically (recommended)</option>
+        <option value="first-use">Remember it at the first approved connection</option>
+        <option value="auto">Detect and review it now</option>
         <option value="saved" id="ssh-host-key-saved-option">Use the identity already saved for this host</option>
         <option value="manual">Paste a host public key manually</option>
       </select>
-      <p class="form-help">ClawGuard can contact the SSH server, read its public identity and remember it. No <code>ssh-keyscan</code> command or copy/paste is required.</p>
+      <p class="form-help">At the first approved connection, ClawGuard can trust and save the server identity. Later connections reject a different identity. To verify the fingerprint before connecting, detect it now or paste a verified public key.</p>
     </div>
     <div id="ssh-host-key-auto-group">
       <button type="button" class="btn btn-sm" style="background:var(--bg3);color:var(--text);margin-bottom:10px" onclick="detectSshHostKey()">Detect server identity</button>
@@ -672,11 +681,19 @@ async function reviewProposal(id) {
     document.getElementById('proposal-domains').textContent = proposal.requiredUpstreams.join(', ');
     document.getElementById('proposal-domain-review').style.display = proposal.requiredUpstreams.length ? 'block' : 'none';
     document.getElementById('proposal-allow-upstreams').checked = false;
+    const isSsh = proposal.config.protocol === 'ssh';
+    document.getElementById('proposal-ssh-identity').style.display = isSsh ? 'block' : 'none';
+    document.getElementById('proposal-ssh-trust').value =
+      typeof proposal.config.ssh?.knownHostKey === 'string' ? 'pinned' : 'first-use';
     const credentialContainer = document.getElementById('proposal-credentials');
     const inputContainer = document.getElementById('proposal-inputs');
     credentialContainer.replaceChildren();
     inputContainer.replaceChildren();
-    for (const requirement of proposal.requirements) {
+    const requirements = [...proposal.requirements];
+    if (isSsh && proposal.config.ssh?.trustOnFirstUse === true) {
+      requirements.push({ kind: 'input', path: '/ssh/knownHostKey' });
+    }
+    for (const requirement of requirements) {
       const group = document.createElement('div');
       group.className = 'form-group';
       const label = document.createElement('label');
@@ -718,11 +735,17 @@ async function reviewProposal(id) {
         credentialContainer.appendChild(group);
       }
     }
+    onProposalTrustChange();
     document.getElementById('proposal-error').style.display = 'none';
     document.getElementById('proposal-approve-btn').disabled = !serviceEditingEnabled;
     document.getElementById('proposal-reject-btn').disabled = false;
     document.getElementById('proposal-modal').classList.add('show');
   } catch (error) { alert(error.message); }
+}
+
+function onProposalTrustChange() {
+  const firstUse = document.getElementById('proposal-ssh-trust').value === 'first-use';
+  document.getElementById('proposal-inputs').hidden = firstUse;
 }
 
 function hideProposal() {
@@ -761,8 +784,13 @@ async function approveProposal() {
     credentials[field.path] = field.select.value === ''
       ? { value: field.input.value } : field.compatible[Number(field.select.value)];
   }
-  for (const field of proposalInputFields) inputs[field.path] = field.input.value;
+  const sshTrustOnFirstUse = reviewingProposal?.config.protocol === 'ssh'
+    && document.getElementById('proposal-ssh-trust').value === 'first-use';
+  for (const field of proposalInputFields) {
+    if (!sshTrustOnFirstUse) inputs[field.path] = field.input.value;
+  }
   await decideProposal('approve', { credentials, inputs,
+    sshTrustOnFirstUse,
     allowUpstreams: document.getElementById('proposal-allow-upstreams').checked });
 }
 
@@ -881,7 +909,7 @@ function fillSshConnectionFields(service) {
     document.getElementById('ssh-port').value = '22';
   }
   document.getElementById('ssh-username').value = service.sshWizard?.username || '';
-  sshSavedHostKey = config.ssh?.knownHostKey || '';
+  sshSavedHostKey = config.ssh?.knownHostKey || service.sshWizard?.hostKey?.publicKey || '';
   document.getElementById('ssh-known-host-key').value = sshSavedHostKey;
   const savedIdentity = service.sshWizard?.hostKey;
   document.getElementById('ssh-host-key-saved-status').textContent = savedIdentity
@@ -905,7 +933,7 @@ async function showAddSshHost() {
   document.getElementById('ssh-allow-private').checked = false;
   document.getElementById('ssh-private-key').value = '';
   document.getElementById('ssh-host-key-saved-option').hidden = true;
-  document.getElementById('ssh-host-key-mode').value = 'auto';
+  document.getElementById('ssh-host-key-mode').value = 'first-use';
   onSshHostKeyModeChange();
   document.getElementById('ssh-key-keep-option').hidden = true;
   document.getElementById('ssh-advanced-btn').style.display = 'none';
@@ -927,8 +955,8 @@ async function showEditSshHost(name) {
   document.getElementById('ssh-host-id').value = name;
   fillSshConnectionFields(service);
   document.getElementById('ssh-private-key').value = '';
-  document.getElementById('ssh-host-key-saved-option').hidden = false;
-  document.getElementById('ssh-host-key-mode').value = 'saved';
+  document.getElementById('ssh-host-key-saved-option').hidden = !sshSavedHostKey;
+  document.getElementById('ssh-host-key-mode').value = service.editableConfig.ssh?.trustOnFirstUse ? 'first-use' : 'saved';
   onSshHostKeyModeChange();
   document.getElementById('ssh-key-keep-option').hidden = false;
   document.getElementById('ssh-key-mode').value = 'keep';
@@ -953,8 +981,8 @@ async function showDuplicateSshHost(name) {
   document.getElementById('ssh-host-id').value = candidate;
   fillSshConnectionFields(service);
   document.getElementById('ssh-private-key').value = '';
-  document.getElementById('ssh-host-key-saved-option').hidden = false;
-  document.getElementById('ssh-host-key-mode').value = 'saved';
+  document.getElementById('ssh-host-key-saved-option').hidden = !sshSavedHostKey;
+  document.getElementById('ssh-host-key-mode').value = service.editableConfig.ssh?.trustOnFirstUse ? 'first-use' : 'saved';
   onSshHostKeyModeChange();
   document.getElementById('ssh-key-keep-option').hidden = true;
   document.getElementById('ssh-advanced-btn').style.display = 'none';
@@ -1049,7 +1077,8 @@ function onSshHostKeyModeChange() {
   const mode = document.getElementById('ssh-host-key-mode').value;
   if (mode !== 'auto' && sshScannedHostKeys.length > 0) clearDetectedSshHostKeys();
   document.getElementById('ssh-host-key-auto-group').style.display = mode === 'auto' ? 'block' : 'none';
-  document.getElementById('ssh-host-key-saved-group').style.display = mode === 'saved' ? 'block' : 'none';
+  document.getElementById('ssh-host-key-saved-group').style.display =
+    mode === 'saved' || (mode === 'first-use' && sshSavedHostKey) ? 'block' : 'none';
   document.getElementById('ssh-host-key-manual-group').style.display = mode === 'manual' ? 'block' : 'none';
 }
 
@@ -1082,7 +1111,9 @@ async function saveSshHost() {
 
   const hostKeyMode = document.getElementById('ssh-host-key-mode').value;
   let knownHostKey = '';
-  if (hostKeyMode === 'saved') {
+  if (hostKeyMode === 'first-use') {
+    knownHostKey = undefined;
+  } else if (hostKeyMode === 'saved') {
     knownHostKey = sshSavedHostKey;
   } else if (hostKeyMode === 'manual') {
     knownHostKey = document.getElementById('ssh-known-host-key').value.trim();
@@ -1109,6 +1140,7 @@ async function saveSshHost() {
     port: Number(document.getElementById('ssh-port').value),
     username: document.getElementById('ssh-username').value.trim(),
     knownHostKey,
+    trustOnFirstUse: hostKeyMode === 'first-use',
     allowPrivateTarget: document.getElementById('ssh-allow-private').checked,
     key
   };

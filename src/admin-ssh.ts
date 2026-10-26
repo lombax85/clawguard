@@ -58,6 +58,7 @@ export interface AdminSshWizardMetadata {
   hostKey?: {
     algorithm: string;
     fingerprint: string;
+    publicKey?: string;
   };
 }
 
@@ -397,15 +398,17 @@ export function listAdminSshKeySources(config: Config): AdminSshKeySource[] {
   return [...sourcesByPrivateKey.values()];
 }
 
-export function getAdminSshWizardMetadata(service: ServiceConfig): AdminSshWizardMetadata {
+export function getAdminSshWizardMetadata(service: ServiceConfig, learnedKey?: string): AdminSshWizardMetadata {
   const username = reusableUsername(service);
   if (!username || !reusablePrivateKey(service)) return { available: false };
   const metadata: AdminSshWizardMetadata = { available: true, username };
-  if (service.ssh?.knownHostKey && isValidKnownHostKey(service.ssh.knownHostKey)) {
-    const identity = publicKeyInfo(service.ssh.knownHostKey);
+  const knownHostKey = service.ssh?.knownHostKey || learnedKey;
+  if (knownHostKey && isValidKnownHostKey(knownHostKey)) {
+    const identity = publicKeyInfo(knownHostKey);
     metadata.hostKey = {
-      algorithm: service.ssh.knownHostKey.split(/[ \t]+/, 1)[0],
+      algorithm: knownHostKey.split(/[ \t]+/, 1)[0],
       fingerprint: identity.fingerprint,
+      ...(learnedKey ? { publicKey: knownHostKey } : {}),
     };
   }
   return metadata;
@@ -525,7 +528,11 @@ export async function buildAdminSshService(
   if (typeof candidate['allowPrivateTarget'] !== 'boolean') {
     throw new Error('Private target choice is required');
   }
-  const knownHostKey = normalizeKnownHostKey(candidate['knownHostKey']);
+  if (candidate['trustOnFirstUse'] !== undefined && typeof candidate['trustOnFirstUse'] !== 'boolean') {
+    throw new Error('trustOnFirstUse must be true or false');
+  }
+  const trustOnFirstUse = candidate['trustOnFirstUse'] === true;
+  const knownHostKey = trustOnFirstUse ? undefined : normalizeKnownHostKey(candidate['knownHostKey']);
   const key = candidate['key'];
   const keyMode = keyModeFrom(key, existing !== undefined);
   const keyObject = key as JsonObject;
@@ -565,6 +572,7 @@ export async function buildAdminSshService(
     ssh: {
       ...(base?.ssh || {}),
       knownHostKey,
+      trustOnFirstUse,
       allowPrivateTarget: candidate['allowPrivateTarget'],
     },
   };

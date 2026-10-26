@@ -161,6 +161,7 @@ function makeHarness(tmpDir, options = {}) {
     })),
     sessionCompletionGraceMs: options.sessionCompletionGraceMs,
     sessionActivationTimeoutMs: options.sessionActivationTimeoutMs,
+    scanHostKeys: options.scanHostKeys,
     allowNonRootForTests: true,
   });
 
@@ -236,6 +237,69 @@ async function closeHarness(harness, tmpDir) {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 }
+
+test('first-use SSH identity is saved only after approval and remains pinned across broker/database restarts', async () => {
+  const { AuditLogger } = require('../dist/audit');
+  const tmpDir = fs.mkdtempSync('/tmp/cg-tofu-');
+  const dbPath = path.join(tmpDir, 'audit.db');
+  const config = makeConfig(tmpDir);
+  config.services.production.ssh = { trustOnFirstUse: true, allowPrivateTarget: false };
+  let audit = new AuditLogger(dbPath);
+  let scans = 0;
+  const scanHostKeys = async (addresses, port) => {
+    scans++;
+    assert.deepEqual(addresses, [RESOLVED_TARGET]);
+    assert.equal(port, 2222);
+    return [{ publicKey: KNOWN_HOST_KEY }];
+  };
+  let harness = makeHarness(tmpDir, { audit, config, scanHostKeys, approved: false });
+  try {
+    await harness.broker.start();
+    assert.equal((await openSession(config.sshBroker.socketPath)).status, 403);
+    assert.equal(scans, 0);
+    assert.equal(audit.getSshHostIdentity('production', config.services.production.upstream), undefined);
+    await harness.broker.close();
+    harness = makeHarness(tmpDir, { audit, config, scanHostKeys });
+    await harness.broker.start();
+    const first = await openSession(config.sshBroker.socketPath);
+    assert.equal(first.status, 201, first.raw);
+    assert.ok(first.body.target.knownHostsLine.endsWith(KNOWN_HOST_KEY));
+    assert.equal(scans, 1);
+    assert.equal(audit.getSshHostIdentity('production', config.services.production.upstream).publicKey, KNOWN_HOST_KEY);
+    await harness.broker.close(); audit.close();
+    audit = new AuditLogger(dbPath);
+    harness = makeHarness(tmpDir, { audit, config,
+      scanHostKeys: async () => { throw new Error('A saved identity must never be replaced by a scan'); } });
+    await harness.broker.start();
+    const second = await openSession(config.sshBroker.socketPath);
+    assert.equal(second.status, 201, second.raw);
+    assert.equal(second.body.target.knownHostsLine, first.body.target.knownHostsLine);
+    const competingKey = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDifferentTestKey';
+    assert.equal(audit.rememberSshHostIdentity('production', config.services.production.upstream, competingKey), KNOWN_HOST_KEY);
+    assert.equal(audit.getSshHostIdentity('production', 'ssh://other.example:2222'), undefined);
+  } finally {
+    await harness.broker.close(); audit.close(); fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('first-use scan failure does not create credentials or save an identity', async () => {
+  const { AuditLogger } = require('../dist/audit');
+  const tmpDir = fs.mkdtempSync('/tmp/cg-tofu-');
+  const audit = new AuditLogger(path.join(tmpDir, 'audit.db'));
+  const config = makeConfig(tmpDir);
+  config.services.production.ssh = { trustOnFirstUse: true, allowPrivateTarget: false };
+  const harness = makeHarness(tmpDir, { audit, config, scanHostKeys: async () => [] });
+  try {
+    await harness.broker.start();
+    const result = await openSession(config.sshBroker.socketPath);
+    assert.notEqual(result.status, 201);
+    assert.equal(harness.pluginCalls.length, 0);
+    assert.equal(harness.createCalls.length, 0);
+    assert.equal(audit.getSshHostIdentity('production', config.services.production.upstream), undefined);
+  } finally {
+    await harness.broker.close(); audit.close(); fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
 
 test('approved session returns only the fixed resolved target and completion releases lease with audit', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-broker-'));

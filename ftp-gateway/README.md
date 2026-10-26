@@ -127,7 +127,10 @@ PKI process.
 
 ## Mint and use a lease
 
-Every lease requires a fresh Telegram decision; HTTP policy auto-approval and
+Every lease normally requires a fresh Telegram decision. The operator can use
+`/allow <service> <duration> read_only` or `read_write` to permit new leases
+temporarily with mandatory silent logs. `/revoke <service>` ends the grant;
+existing leases keep their normal lifetime. HTTP policy auto-approval and
 cached approval windows are deliberately ignored. Prefer the optional HTTPS
 listener because the response contains the ephemeral gateway password:
 

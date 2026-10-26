@@ -235,6 +235,34 @@ test('rejection is terminal, duplicates are idempotent, and strict mode blocks a
   });
 });
 
+test('owner can select first-use trust on an existing SSH proposal without a host key, or supply a verified key', async () => {
+  await withGateway(async ({ request, config, audit }) => {
+    const ssh = { protocol: 'ssh', upstream: 'ssh://127.0.0.1:22',
+      auth: { type: 'plugin', pluginPath: 'ssh-agent-key', pluginConfig: { username: 'root', privateKey: credential } },
+      policy: { default: 'require_approval' }, ssh: { allowPrivateTarget: true, knownHostKey: { $clawguard: 'input' } } };
+    const id = await submit(request, 'first-use', ssh);
+    const approved = await request(`/__admin/api/service-proposals/${id}/approve`, 'POST', {
+      sshTrustOnFirstUse: true, allowUpstreams: true,
+      credentials: { '/auth/pluginConfig/privateKey': { value: 'TEST-ONLY-KEY' } },
+    }, owner);
+    assert.equal(approved.status, 200, JSON.stringify(approved.body));
+    assert.equal(config.services['first-use'].ssh.trustOnFirstUse, true);
+    assert.equal(config.services['first-use'].ssh.knownHostKey, undefined);
+    assert.equal(audit.getSshHostIdentity('first-use', ssh.upstream), undefined, 'approval does not contact the upstream');
+    const proposedTofu = { ...ssh, ssh: { allowPrivateTarget: true, trustOnFirstUse: true } };
+    const pinnedId = await submit(request, 'pinned', proposedTofu);
+    assert.equal((await request(`/__admin/api/service-proposals/${pinnedId}/approve`, 'POST', {
+      sshTrustOnFirstUse: false, inputs: { '/ssh/knownHostKey': hostKey },
+      credentials: { '/auth/pluginConfig/privateKey': { value: 'TEST-ONLY-KEY' } },
+    }, owner)).status, 200);
+    assert.equal(config.services.pinned.ssh.knownHostKey, hostKey);
+    assert.equal(config.services.pinned.ssh.trustOnFirstUse, undefined);
+    const invalid = await request('/__proposals/services', 'POST', { name: 'conflicting',
+      config: { ...ssh, ssh: { allowPrivateTarget: true, trustOnFirstUse: true, knownHostKey: hostKey } } });
+    assert.equal(invalid.status, 400);
+  });
+});
+
 test('pending proposals and approved upstreams/services survive a database reopen; strict mode ignores overrides', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clawguard-proposals-'));
   const dbPath = path.join(dir, 'audit.db');

@@ -120,15 +120,28 @@ Service aliases are intentionally restricted to 1-64 letters, digits,
 hyphens or underscores because the same alias crosses YAML, broker JSON and
 the forced-command parser.
 
-`knownHostKey` must be the upstream server's complete, single-line OpenSSH host
-public key (`key-type base64`), not just its fingerprint. Obtain the key from
-the server administrator or configuration management and verify its fingerprint
-through an independent trusted channel. ClawGuard does not use
-trust-on-first-use, and a mismatch terminates the connection.
+Choose one server identity mode:
+
+- `knownHostKey`: the complete, single-line OpenSSH public host key
+  (`key-type base64`), not its fingerprint. Verify it through a trusted channel.
+- `trustOnFirstUse: true`: omit `knownHostKey`. During the first approved
+  connection, ClawGuard scans the validated target IP and saves its public key
+  in SQLite. The first observed identity is trusted without independent
+  verification. Later connections use that saved key with strict OpenSSH
+  checking. A mismatch terminates the connection; it never replaces the key.
+
+The saved identity is bound to the service alias and upstream URL. It survives
+restarts. The SSH wizard and proposal review offer both modes. To accept a
+verified server key rotation, use the wizard's **Detect and review it now** or
+manual mode and save the new pinned key. Do not delete the saved identity to
+bypass a mismatch.
 
 Telegram must be configured and paired. Unlike development HTTP behavior, SSH
 never auto-approves when Telegram is absent: no approver, bot error, denial or
-timeout all fail closed, and cached HTTP approvals are not reused.
+timeout all fail closed, and cached HTTP approvals are not reused. An explicit
+Telegram `/allow <service> <duration>` grant permits new sessions until its
+expiry, with mandatory silent logs. `/revoke <service>` ends it early. These
+commands do not terminate sessions that are already open.
 
 If you customize `sshBroker.socketPath`, set the sidecar environment variable
 `CLAWGUARD_SSH_BROKER_SOCKET` to the same path and mount its parent at the same

@@ -7,6 +7,8 @@ import TelegramBot, {
 import { TelegramConfig, RequestMeta, RequestApprovalInfo, FtpAccessMode } from './types';
 import { AuditLogger } from './audit';
 import { PairThrottle } from './pair-throttle';
+import { TemporaryApprovalController, temporaryApprovalDuration } from './temporary-approval';
+import { ServiceConfig } from './types';
 import {
   TelegramPollingRecovery,
   TelegramPollingRecoveryOptions,
@@ -128,6 +130,7 @@ export class TelegramNotifier {
   private lastPollingError: string | null = null;
   private lastUpdateAt: number | null = null;
   private lastCallbackAt: number | null = null;
+  private serviceCommands?: { services: () => Record<string, ServiceConfig>; controller: TemporaryApprovalController };
 
   constructor(
     config: TelegramConfig,
@@ -168,6 +171,18 @@ export class TelegramNotifier {
     this.setupPollingDiagnostics();
     this.setupCallbackHandler();
     this.setupPairingHandler();
+    this.setupServiceCommands();
+    if (typeof this.bot.setMyCommands === 'function') {
+      void this.bot.setMyCommands([
+        { command: 'help', description: 'List ClawGuard commands' },
+        { command: 'status', description: 'Show pairing and temporary approvals' },
+        { command: 'allow', description: 'Allow one service for a limited time, with silent logs' },
+        { command: 'revoke', description: 'Revoke approvals for one service' },
+        { command: 'showlog', description: 'Show or change automatic-call logs: on or off' },
+        { command: 'pair', description: 'Pair this chat with ClawGuard' },
+        { command: 'unpair', description: 'Remove this chat pairing' },
+      ]).catch(() => console.warn('⚠️ Could not register the Telegram command menu'));
+    }
 
     // Pairing status is derived live from the DB (per-chat), not a mutable flag.
     if (config.pairing.enabled) {
@@ -197,6 +212,78 @@ export class TelegramNotifier {
   private isConfiguredChatPaired(): boolean {
     if (!this.config.pairing.enabled) return true;
     return this.audit.isPairedUser(this.config.chatId);
+  }
+
+  configureServiceCommands(services: () => Record<string, ServiceConfig>, controller: TemporaryApprovalController): void {
+    this.serviceCommands = { services, controller };
+  }
+
+  canUseTemporaryApproval(chatId: string): boolean {
+    return this.isConfiguredChat(chatId) && this.isConfiguredChatPaired()
+      && !this.pollingRecovery.getState().circuitOpen;
+  }
+
+  private setupServiceCommands(): void {
+    this.bot.onText(/^\/help(?:@\w+)?\s*$/i, async (msg) => {
+      if (!this.isConfiguredChat(String(msg.chat.id))) return;
+      await this.safeSendMessage(String(msg.chat.id), [
+        'ClawGuard commands', '',
+        '/help — List commands.',
+        '/pair <secret> — Pair this chat.',
+        '/unpair — Remove pairing and cancel temporary approvals.',
+        '/status — Show pairing, showlog and temporary approvals.',
+        '/showlog [on|off] — Show or change automatic-call logs.',
+        '/allow <service> <duration> — Allow HTTP or SSH requests for one service.',
+        '/allow <service> <duration> read_only|read_write — Allow FTP/FTPS leases.',
+        '/revoke <service> — Revoke all approvals for that service.', '',
+        'Example: /allow lombax-coolify-1 1h',
+        'Duration: 1m to 24h. Temporary approvals enable silent showlog messages.',
+        'They cover all requests for the named service, including requests that normally need a new decision.',
+        'Expiry or revocation blocks new sessions under this grant. Existing sessions keep their normal lifetime.',
+      ].join('\n'), this.sendOptions({ parse_mode: undefined }));
+    });
+    this.bot.onText(/^\/(allow|revoke)(?:@\w+)?(?:\s+([^\n]*))?\s*$/i, async (msg, match) => {
+      const chatId = String(msg.chat.id);
+      if (!this.isConfiguredChat(chatId)) return;
+      if (!this.isConfiguredChatPaired() || !msg.from || msg.from.is_bot || msg.sender_chat
+        || !this.isAllowedApprover(msg.from)) {
+        await this.safeSendMessage(chatId, 'Access denied. Pair this chat and use an allowed approver account.');
+        return;
+      }
+      if (!this.serviceCommands) {
+        await this.safeSendMessage(chatId, 'Service commands are not ready. Try again after startup.');
+        return;
+      }
+      const action = match![1].toLowerCase();
+      const args = (match?.[2] || '').trim().split(/\s+/).filter(Boolean);
+      const [name, duration, mode] = args;
+      const { services, controller } = this.serviceCommands;
+      try {
+        if (action === 'revoke') {
+          if (args.length !== 1) throw new Error('Usage: /revoke <service>');
+          const revoked = controller.revokeApproval(name);
+          await this.safeSendMessage(chatId, revoked ? `Approvals revoked for ${name}.` : `No active approval for ${name}.`, this.sendOptions({ parse_mode: undefined }));
+          return;
+        }
+        if (args.length < 2 || args.length > 3) throw new Error('Usage: /allow <service> <duration> [read_only|read_write]. Example: /allow lombax-coolify-1 1h');
+        if (!Object.hasOwn(services(), name)) throw new Error(`Unknown service: ${name}`);
+        const service = services()[name];
+        const ftp = service.protocol === 'ftp' || service.protocol === 'ftps';
+        if (ftp && mode !== 'read_only' && mode !== 'read_write') throw new Error('For FTP/FTPS, specify read_only or read_write.');
+        if (!ftp && mode !== undefined) throw new Error('The access mode applies only to FTP/FTPS.');
+        const seconds = temporaryApprovalDuration(duration);
+        const approvedBy = `${msg.from.username || msg.from.first_name || 'Telegram user'} (${msg.from.id})`;
+        const approval = controller.grantTemporaryServiceApproval(name, service, seconds, approvedBy, chatId,
+          mode as 'read_only' | 'read_write' | undefined);
+        await this.safeSendMessage(chatId,
+          `${name}: temporary approval active until ${new Date(approval.expiresAt).toLocaleString('it-IT', { timeZone: 'Europe/Rome' })} (Europe/Rome).\n`
+          + `Target: ${service.upstream}\n${ftp ? `Access: ${mode}\n` : ''}`
+          + `Showlog is on. Calls covered by this approval produce silent log messages.\nRevoke: /revoke ${name}`,
+          this.sendOptions({ parse_mode: undefined }));
+      } catch (error) {
+        await this.safeSendMessage(chatId, error instanceof Error ? error.message : 'Command failed.', this.sendOptions({ parse_mode: undefined }));
+      }
+    });
   }
 
   // ─── Polling diagnostics & watchdog ──────────────────────
@@ -365,11 +452,12 @@ export class TelegramNotifier {
         return;
       }
       this.audit.unpairUser(chatId);
+      this.audit.revokeTemporaryServiceApprovals?.();
       console.log(`🔓 Telegram unpaired: chat ${chatId}`);
       await this.safeSendMessage(chatId, '🔓 Unpaired. You will no longer receive approval requests.');
     });
 
-    this.bot.onText(/\/status/, async (msg) => {
+    this.bot.onText(/^\/status(?:@\w+)?\s*$/i, async (msg) => {
       const chatId = msg.chat.id.toString();
       if (!this.isConfiguredChat(chatId)) {
         console.log(`🚫 Ignoring /status from non-configured chat ${chatId}`);
@@ -378,14 +466,16 @@ export class TelegramNotifier {
       const isPaired = this.isConfiguredChatPaired();
       const status = isPaired ? '✅ Paired' : '❌ Not paired';
       const showlog = isPaired && this.audit.isShowlogEnabled(chatId) ? 'on' : 'off';
+      const temporary = this.serviceCommands?.controller.getTemporaryServiceApprovals() ?? [];
+      const grants = temporary.map(item => `${item.service}: ${Math.ceil((item.expiresAt - Date.now()) / 60000)} min${item.accessMode ? ` (${item.accessMode})` : ''}`).join('\n');
       await this.safeSendMessage(
         chatId,
-        `🛡️ *ClawGuard Status*\n\nPairing: ${status}\nShowlog: ${showlog}`,
-        { parse_mode: 'Markdown' },
+        `ClawGuard Status\n\nPairing: ${status}\nShowlog: ${showlog}\nTemporary approvals:\n${grants || 'None'}`,
+        this.sendOptions({ parse_mode: undefined }),
       );
     });
 
-    this.bot.onText(/^\/showlog(?:\s+(on|off))?/i, async (msg, match) => {
+    this.bot.onText(/^\/showlog(?:@\w+)?(?:\s+(on|off))?\s*$/i, async (msg, match) => {
       const chatId = msg.chat.id.toString();
       if (!this.isConfiguredChat(chatId)) {
         console.log(`🚫 Ignoring /showlog from non-configured chat ${chatId}`);
@@ -409,7 +499,7 @@ export class TelegramNotifier {
       const icon = arg === 'on' ? '🔔' : '🔕';
       await this.safeSendMessage(
         chatId,
-        `${icon} Showlog *${arg}* — you will ${arg === 'on' ? 'now' : 'no longer'} receive info-only notifications for auto-approved calls.`,
+        `${icon} Showlog *${arg}* — you will ${arg === 'on' ? 'now' : 'no longer'} receive info-only notifications for auto-approved calls. Temporary service approvals always keep silent logs enabled.`,
         { parse_mode: 'Markdown' },
       );
     });
@@ -838,26 +928,28 @@ export class TelegramNotifier {
     reason: string,
     meta?: RequestMeta,
     approvalInfo?: RequestApprovalInfo,
+    options?: { force?: boolean; silent?: boolean },
   ): void {
-    const chatIds = this.audit.getShowlogEnabledChatIds();
+    const chatIds = options?.force && this.isConfiguredChatPaired()
+      ? [this.config.chatId] : this.audit.getShowlogEnabledChatIds();
     if (chatIds.length === 0) return;
 
     const text = [
       `ℹ️ *ClawGuard — Auto-approved call*`,
       ``,
-      `🔹 Service: *${service}*`,
-      `🔹 Method: \`${method}\``,
-      `🔹 Path: \`${path}\``,
+      `🔹 Service: *${sanitizeForTelegram(service)}*`,
+      `🔹 Method: \`${sanitizeForTelegram(method)}\``,
+      `🔹 Path: \`${sanitizeForTelegram(path)}\``,
       ...approvalInfoLines(approvalInfo),
       ...metaLines(meta),
-      `🔹 Agent IP: \`${agentIp}\``,
+      `🔹 Agent IP: \`${sanitizeForTelegram(agentIp)}\``,
       `🔹 Time: ${new Date().toLocaleString('it-IT', { timeZone: 'Europe/Rome' })}`,
-      `🔹 Auto-approve: _${reason}_`,
+      `🔹 Auto-approve: _${sanitizeForTelegram(reason)}_`,
     ].join('\n');
 
     for (const chatId of chatIds) {
       // fire-and-forget; errors surface via safeSendMessage logging
-      this.safeSendMessage(chatId, text, { parse_mode: 'Markdown' });
+      this.safeSendMessage(chatId, text, this.sendOptions({ disable_notification: options?.silent === true }));
     }
   }
 
