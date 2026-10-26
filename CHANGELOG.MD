@@ -8,6 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 
+- **Telegram approval buttons**: `/allow` opens a paginated service picker;
+  `/allow <service>` opens that service directly. Duration buttons offer 15m,
+  30m, 1h, 4h, 8h and 24h. FTP/FTPS requires an access-mode choice. Confirmation
+  messages include a Revoke now button. Menus bind choices to the initiating
+  account, chat, message and reviewed service configuration, with expiry and
+  single-use callbacks. Existing text commands and mandatory silent logs remain.
 - **SSH first-use server identity**: owner-selected `ssh.trustOnFirstUse`
   records the first approved connection's host public key in SQLite. Later
   sessions use that key with strict OpenSSH verification. Proposal review

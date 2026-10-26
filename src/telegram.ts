@@ -9,6 +9,7 @@ import { AuditLogger } from './audit';
 import { PairThrottle } from './pair-throttle';
 import { TemporaryApprovalController, temporaryApprovalDuration } from './temporary-approval';
 import { ServiceConfig } from './types';
+import { TelegramServiceMenu } from './telegram-service-menu';
 import {
   TelegramPollingRecovery,
   TelegramPollingRecoveryOptions,
@@ -131,6 +132,7 @@ export class TelegramNotifier {
   private lastUpdateAt: number | null = null;
   private lastCallbackAt: number | null = null;
   private serviceCommands?: { services: () => Record<string, ServiceConfig>; controller: TemporaryApprovalController };
+  private serviceMenu: TelegramServiceMenu;
 
   constructor(
     config: TelegramConfig,
@@ -168,6 +170,18 @@ export class TelegramNotifier {
         recoveryOptions.onCircuitOpen?.();
       },
     });
+    this.serviceMenu = new TelegramServiceMenu({
+      chatId: config.chatId,
+      services: () => this.serviceCommands?.services() ?? {},
+      controller: () => this.serviceCommands?.controller,
+      allowed: (chatId, user) => !user.is_bot && this.canUseTemporaryApproval(chatId) && this.isAllowedApprover(user),
+      send: (text, keyboard) => this.safeSendMessage(config.chatId, text,
+        this.sendOptions({ parse_mode: undefined, reply_markup: keyboard })),
+      edit: (messageId, text, keyboard) => this.bot.editMessageText(text, {
+        chat_id: config.chatId, message_id: messageId, parse_mode: undefined, reply_markup: keyboard,
+      }),
+      answer: (queryId, text) => this.bot.answerCallbackQuery(queryId, { text }),
+    });
     this.setupPollingDiagnostics();
     this.setupCallbackHandler();
     this.setupPairingHandler();
@@ -176,7 +190,7 @@ export class TelegramNotifier {
       void this.bot.setMyCommands([
         { command: 'help', description: 'List ClawGuard commands' },
         { command: 'status', description: 'Show pairing and temporary approvals' },
-        { command: 'allow', description: 'Allow one service for a limited time, with silent logs' },
+        { command: 'allow', description: 'Choose a service and duration with buttons' },
         { command: 'revoke', description: 'Revoke approvals for one service' },
         { command: 'showlog', description: 'Show or change automatic-call logs: on or off' },
         { command: 'pair', description: 'Pair this chat with ClawGuard' },
@@ -233,11 +247,14 @@ export class TelegramNotifier {
         '/unpair — Remove pairing and cancel temporary approvals.',
         '/status — Show pairing, showlog and temporary approvals.',
         '/showlog [on|off] — Show or change automatic-call logs.',
+        '/allow — Choose a service and duration with buttons.',
+        '/allow <service> — Open the approval buttons for that service.',
         '/allow <service> <duration> — Allow HTTP or SSH requests for one service.',
         '/allow <service> <duration> read_only|read_write — Allow FTP/FTPS leases.',
         '/revoke <service> — Revoke all approvals for that service.', '',
         'Example: /allow lombax-coolify-1 1h',
         'Duration: 1m to 24h. Temporary approvals enable silent showlog messages.',
+        'Quick buttons: 15m, 30m, 1h, 4h, 8h, 24h. Use Revoke now to end the grant.',
         'They cover all requests for the named service, including requests that normally need a new decision.',
         'Expiry or revocation blocks new sessions under this grant. Existing sessions keep their normal lifetime.',
       ].join('\n'), this.sendOptions({ parse_mode: undefined }));
@@ -265,6 +282,10 @@ export class TelegramNotifier {
           await this.safeSendMessage(chatId, revoked ? `Approvals revoked for ${name}.` : `No active approval for ${name}.`, this.sendOptions({ parse_mode: undefined }));
           return;
         }
+        if (args.length <= 1) {
+          await this.serviceMenu.open(msg.from, name);
+          return;
+        }
         if (args.length < 2 || args.length > 3) throw new Error('Usage: /allow <service> <duration> [read_only|read_write]. Example: /allow lombax-coolify-1 1h');
         if (!Object.hasOwn(services(), name)) throw new Error(`Unknown service: ${name}`);
         const service = services()[name];
@@ -275,11 +296,7 @@ export class TelegramNotifier {
         const approvedBy = `${msg.from.username || msg.from.first_name || 'Telegram user'} (${msg.from.id})`;
         const approval = controller.grantTemporaryServiceApproval(name, service, seconds, approvedBy, chatId,
           mode as 'read_only' | 'read_write' | undefined);
-        await this.safeSendMessage(chatId,
-          `${name}: temporary approval active until ${new Date(approval.expiresAt).toLocaleString('it-IT', { timeZone: 'Europe/Rome' })} (Europe/Rome).\n`
-          + `Target: ${service.upstream}\n${ftp ? `Access: ${mode}\n` : ''}`
-          + `Showlog is on. Calls covered by this approval produce silent log messages.\nRevoke: /revoke ${name}`,
-          this.sendOptions({ parse_mode: undefined }));
+        await this.serviceMenu.showGranted(approval, service, msg.from);
       } catch (error) {
         await this.safeSendMessage(chatId, error instanceof Error ? error.message : 'Command failed.', this.sendOptions({ parse_mode: undefined }));
       }
@@ -453,6 +470,7 @@ export class TelegramNotifier {
       }
       this.audit.unpairUser(chatId);
       this.audit.revokeTemporaryServiceApprovals?.();
+      this.serviceMenu.clear();
       console.log(`🔓 Telegram unpaired: chat ${chatId}`);
       await this.safeSendMessage(chatId, '🔓 Unpaired. You will no longer receive approval requests.');
     });
@@ -535,11 +553,17 @@ export class TelegramNotifier {
 
   private setupCallbackHandler(): void {
     this.bot.on('callback_query', async (query) => {
-      if (!query.data || !query.message) return;
+      if (!query.data) return;
       this.lastCallbackAt = Date.now();
       this.lastUpdateAt = this.lastCallbackAt;
       this.consecutivePollingErrors = 0;
       this.pollingRecovery.noteHealthy();
+
+      if (this.serviceMenu.owns(query.data)) {
+        await this.serviceMenu.handle(query);
+        return;
+      }
+      if (!query.message) return;
 
       const chatId = query.message.chat.id.toString();
 
@@ -989,6 +1013,7 @@ export class TelegramNotifier {
   // ─── Lifecycle ─────────────────────────────────────────────
 
   async stop(): Promise<void> {
+    this.serviceMenu.clear();
     await this.pollingRecovery.stop();
   }
 }

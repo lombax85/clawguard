@@ -15,12 +15,26 @@ const { createProxy } = require('../dist/proxy');
 class TelegramTransport extends EventEmitter {
   handlers = [];
   messages = [];
+  answers = [];
   onText(pattern, callback) { this.handlers.push({ pattern, callback }); }
   async setMyCommands(commands) { this.commands = commands; }
   async sendMessage(chat, text, options) {
     const message = { message_id: this.messages.length + 1, chat: { id: Number(chat) }, text, options };
     this.messages.push(message);
     return message;
+  }
+  async editMessageText(text, options) {
+    const message = this.messages.find(item => item.message_id === options.message_id && String(item.chat.id) === String(options.chat_id));
+    assert.ok(message, 'edited message must exist');
+    message.text = text;
+    message.options = { ...message.options, ...options };
+    return message;
+  }
+  async answerCallbackQuery(id, options) { this.answers.push({ id, ...options }); }
+  async tap(message, data, overrides = {}) {
+    const query = { id: `tap-${this.answers.length}`, from: { id: 7, username: 'owner', is_bot: false },
+      data, message: structuredClone(message), ...overrides };
+    for (const listener of this.listeners('callback_query')) await listener(query);
   }
   isPolling() { return true; }
   async stopPolling() {}
@@ -33,6 +47,13 @@ class TelegramTransport extends EventEmitter {
       if (match) await callback(message, match);
     }
   }
+}
+
+function button(message, text) {
+  const match = message.options.reply_markup?.inline_keyboard.flat().find(item => item.text === text);
+  assert.ok(match, `Missing button: ${text}`);
+  assert.ok(Buffer.byteLength(match.callback_data) <= 64, 'Telegram callback data must fit in 64 bytes');
+  return match.callback_data;
 }
 
 async function listen(server) {
@@ -172,5 +193,152 @@ test('Telegram grants cover fresh SSH decisions and explicit FTP access modes, w
     assert.equal(await f.manager.checkSshSessionApproval('ssh', f.config.services.ssh, '/exec', '127.0.0.1'), false);
     f.manager.revokeAll();
     assert.equal(await f.manager.checkFtpSessionApproval('ftp', f.config.services.ftp, '/lease', '127.0.0.1'), false);
+  });
+});
+
+test('/allow buttons select a service and duration, grant only once, keep silent logs and revoke through the proxy', async () => {
+  await fixture(async f => {
+    await f.transport.command('/allow');
+    const menu = f.transport.messages.at(-1);
+    assert.equal(menu.options.message_thread_id, 9);
+    assert.equal(f.audit.getTemporaryServiceApprovals().length, 0);
+    await f.transport.tap(menu, button(menu, 'app'));
+    const beforeBack = button(menu, '1h');
+    await f.transport.tap(menu, button(menu, '← Services'));
+    await f.transport.tap(menu, beforeBack);
+    assert.equal(f.audit.getTemporaryServiceApprovals().length, 0);
+    await f.transport.tap(menu, button(menu, 'app'));
+    assert.match(menu.text, /Target: http:\/\/127.0.0.1:/);
+    assert.match(menu.text, /approve all requests/);
+    assert.equal(f.audit.getTemporaryServiceApprovals().length, 0);
+    for (const duration of ['15m', '30m', '1h', '4h', '8h', '24h']) button(menu, duration);
+    const durationButton = button(menu, '1h');
+    await Promise.all([f.transport.tap(menu, durationButton), f.transport.tap(menu, durationButton)]);
+    const [grant] = f.audit.getTemporaryServiceApprovals();
+    assert.ok(grant);
+    assert.equal(grant.expiresAt - grant.approvedAt, 3_600_000);
+    assert.equal(grant.service, 'app');
+    assert.equal(f.audit.isShowlogEnabled('100'), true);
+    assert.equal(await f.request('POST'), 200);
+    assert.equal(f.transport.messages.at(-1).options.disable_notification, true);
+    await f.transport.tap(menu, durationButton);
+    assert.deepEqual(f.audit.getTemporaryServiceApprovals(), [grant], 'replay must not extend or duplicate a grant');
+    await f.transport.tap(menu, button(menu, '🔒 Revoke now'));
+    assert.equal(f.audit.getTemporaryServiceApprovals().length, 0);
+    assert.deepEqual(menu.options.reply_markup.inline_keyboard, []);
+    assert.equal(await f.request(), 403);
+  });
+});
+
+test('direct service menus require explicit FTP access and cancellation never grants', async () => {
+  await fixture(async f => {
+    f.config.services.ftp = { ...f.config.services.app, protocol: 'ftps', upstream: 'ftps://test.example:21' };
+    await f.transport.command('/allow ftp');
+    let menu = f.transport.messages.at(-1);
+    const initialMode = button(menu, '✍️ Read/write');
+    await f.transport.tap(menu, button(menu, '👁 Read only'));
+    assert.match(menu.text, /Access: Read only/);
+    assert.equal(f.audit.getTemporaryServiceApprovals().length, 0);
+    await f.transport.tap(menu, initialMode);
+    assert.match(f.transport.answers.at(-1).text, /expired/);
+    await f.transport.tap(menu, button(menu, '30m'));
+    assert.equal(await f.manager.checkFtpSessionApproval('ftp', f.config.services.ftp, '/lease', '127.0.0.1'), 'read_only');
+    assert.equal(f.audit.getTemporaryServiceApprovals()[0].expiresAt - f.audit.getTemporaryServiceApprovals()[0].approvedAt, 1_800_000);
+    await f.transport.command('/allow ftp');
+    menu = f.transport.messages.at(-1);
+    await f.transport.tap(menu, button(menu, '✍️ Read/write'));
+    await f.transport.tap(menu, button(menu, '15m'));
+    assert.equal(await f.manager.checkFtpSessionApproval('ftp', f.config.services.ftp, '/lease', '127.0.0.1'), 'read_write');
+    await f.transport.command('/allow app');
+    menu = f.transport.messages.at(-1);
+    const oldButton = button(menu, '24h');
+    await f.transport.tap(menu, button(menu, 'Cancel'));
+    await f.transport.tap(menu, oldButton);
+    assert.equal(f.audit.getTemporaryServiceApprovals().some(item => item.service === 'app'), false);
+  });
+});
+
+test('menu callbacks reject other accounts, chats, messages and unoffered actions without consuming the owner choice', async () => {
+  await fixture(async f => {
+    await f.transport.command('/allow app');
+    const menu = f.transport.messages.at(-1);
+    const data = button(menu, '1h');
+    for (const overrides of [{ from: { id: 8, is_bot: false } }, { from: { id: 7, is_bot: true } },
+      { message: { ...menu, chat: { id: 200 } } }, { message: { ...menu, message_id: 9999 } }]) {
+      await f.transport.tap(menu, data, overrides);
+      assert.equal(f.audit.getTemporaryServiceApprovals().length, 0);
+    }
+    for (const forged of [data.replace(':duration:1h', ':duration:48h'), data.replace(':duration:1h', ':revoke'),
+      data + ':extra', data.replace(':duration:1h', ':mode:read_write')]) {
+      await f.transport.tap(menu, forged);
+      assert.equal(f.audit.getTemporaryServiceApprovals().length, 0);
+    }
+    await f.transport.tap(menu, data);
+    assert.equal(await f.request(), 200);
+  });
+});
+
+test('menus expire, bind the reviewed configuration and stop working after restart or unpairing', async t => {
+  await fixture(async f => {
+    await f.transport.command('/allow app');
+    let menu = f.transport.messages.at(-1);
+    let data = button(menu, '1h');
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() + 601_000 });
+    await f.transport.tap(menu, data);
+    assert.equal(f.audit.getTemporaryServiceApprovals().length, 0);
+    t.mock.timers.reset();
+    await f.transport.command('/allow app');
+    menu = f.transport.messages.at(-1);
+    data = button(menu, '1h');
+    f.config.services.app.http.allowedMethods.push('PUT');
+    await f.transport.tap(menu, data);
+    assert.match(f.transport.answers.at(-1).text, /Service changed/);
+    assert.equal(f.audit.getTemporaryServiceApprovals().length, 0);
+    await f.transport.command('/allow app');
+    menu = f.transport.messages.at(-1);
+    data = button(menu, '1h');
+    await f.restart();
+    await f.transport.tap(menu, data);
+    assert.equal(f.audit.getTemporaryServiceApprovals().length, 0);
+    await f.transport.command('/allow app');
+    menu = f.transport.messages.at(-1);
+    data = button(menu, '1h');
+    await f.transport.command('/unpair');
+    await f.transport.tap(menu, data);
+    assert.equal(f.audit.getTemporaryServiceApprovals().length, 0);
+  });
+});
+
+test('service menus paginate long aliases with bounded callback data and never remap an index', async () => {
+  await fixture(async f => {
+    for (let i = 0; i < 17; i++) f.config.services[`service-${String(i).padStart(2, '0')}-${'x'.repeat(53)}`] = structuredClone(f.config.services.app);
+    await f.transport.command('/allow');
+    const menu = f.transport.messages.at(-1);
+    const firstApp = button(menu, 'app');
+    await f.transport.tap(menu, button(menu, 'Next →'));
+    await f.transport.tap(menu, firstApp);
+    assert.match(f.transport.answers.at(-1).text, /expired/);
+    await f.transport.tap(menu, button(menu, 'Next →'));
+    const lastAlias = Object.keys(f.config.services).sort().at(-1);
+    const select = button(menu, lastAlias);
+    delete f.config.services.app;
+    await f.transport.tap(menu, select);
+    await f.transport.tap(menu, button(menu, '4h'));
+    assert.equal(f.audit.getTemporaryServiceApprovals()[0].service, lastAlias);
+  });
+});
+
+test('a stale revoke button cannot revoke a renewed grant and typed commands also provide a revoke button', async () => {
+  await fixture(async f => {
+    await f.transport.command('/allow app 1h');
+    const oldMenu = f.transport.messages.at(-1);
+    const oldRevoke = button(oldMenu, '🔒 Revoke now');
+    await f.transport.command('/allow app 8h');
+    const newMenu = f.transport.messages.at(-1);
+    const [renewed] = f.audit.getTemporaryServiceApprovals();
+    await f.transport.tap(oldMenu, oldRevoke);
+    assert.deepEqual(f.audit.getTemporaryServiceApprovals(), [renewed]);
+    await f.transport.tap(newMenu, button(newMenu, '🔒 Revoke now'));
+    assert.equal(f.audit.getTemporaryServiceApprovals().length, 0);
   });
 });

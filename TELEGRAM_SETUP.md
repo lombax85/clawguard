@@ -115,6 +115,8 @@ Tap **Approve 1h** and the request goes through!
 | `/unpair` | Removes pairing and revokes temporary service approvals |
 | `/status` | Shows pairing, showlog and temporary approvals with time remaining |
 | `/showlog [on\|off]` | Shows or changes info-only logs for automatic calls |
+| `/allow` | Opens buttons to choose a service and duration |
+| `/allow <service>` | Opens approval buttons for the named service |
 | `/allow <service> <duration>` | Temporarily approves HTTP requests or SSH sessions for one service |
 | `/allow <service> <duration> read_only\|read_write` | Temporarily approves FTP/FTPS leases with the selected access mode |
 | `/revoke <service>` | Revokes temporary and cached approvals for that service |
@@ -126,9 +128,25 @@ Bot accounts and anonymous group senders cannot create or revoke grants.
 
 To permit work while you cannot answer approval requests:
 
-1. Send `/allow lombax-coolify-1 1h` in the configured chat.
-2. Send `/status` to see the remaining time.
-3. Send `/revoke lombax-coolify-1` to end the grant early.
+1. Send `/allow` in the configured chat.
+2. Tap the service name. Use **Next** or **Previous** for more services.
+3. For FTP/FTPS, tap **Read only** or **Read/write**.
+4. Tap a duration: **15m**, **30m**, **1h**, **4h**, **8h** or **24h**.
+5. Tap **Revoke now** in the confirmation to end the grant early.
+
+The duration button activates the approval. The message shows the service,
+target and access mode before that choice. **Services** goes back to the list;
+**Cancel** closes the menu without granting access. You can also send
+`/allow lombax-coolify-1` to open that service directly, or use the complete
+command `/allow lombax-coolify-1 1h`. `/status` shows the remaining time.
+
+Selection menus expire after ten minutes and can be used only by the account
+that opened the menu. The confirmation's revoke button lasts until the grant
+expires. Each click replaces the previous buttons. A changed or
+deleted service requires a new review. Double taps cannot duplicate or extend
+a grant. A stale **Revoke now** button cannot revoke a newer grant. After a
+ClawGuard restart, use `/allow` to open a new menu, or `/revoke <service>` to
+revoke an existing grant.
 
 Use a duration from `1m` to `24h`, such as `30m`, `1h` or `8h`. A grant covers
 all new requests for that service, including operations that normally require
