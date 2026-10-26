@@ -161,7 +161,13 @@ export function validateSshService(service: ServiceConfig, security: SecurityCon
   if (typeof service.ssh.allowPrivateTarget !== 'boolean') {
     return { valid: false, reason: 'ssh.allowPrivateTarget must be explicitly true or false' };
   }
-  if (!isValidKnownHostKey(service.ssh.knownHostKey)) {
+  if (service.ssh.trustOnFirstUse !== undefined && typeof service.ssh.trustOnFirstUse !== 'boolean') {
+    return { valid: false, reason: 'ssh.trustOnFirstUse must be true or false' };
+  }
+  if (service.ssh.trustOnFirstUse === true && service.ssh.knownHostKey !== undefined) {
+    return { valid: false, reason: 'Choose ssh.trustOnFirstUse or ssh.knownHostKey, not both' };
+  }
+  if (service.ssh.trustOnFirstUse !== true && !isValidKnownHostKey(service.ssh.knownHostKey)) {
     return { valid: false, reason: 'ssh.knownHostKey must be one complete single-line OpenSSH public key (keytype base64)' };
   }
 

@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { AuditEntry, Approval, DashboardStats, FtpAccessMode, ServiceConfig } from './types';
+import { AuditEntry, Approval, DashboardStats, FtpAccessMode, ServiceConfig, ServiceProposal, TemporaryServiceApproval } from './types';
 
 export type SshSessionAction = 'shell' | 'exec';
 
@@ -168,6 +168,39 @@ export class AuditLogger {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS service_proposals (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        proposal_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'approving', 'approved', 'rejected')),
+        created_at TEXT NOT NULL,
+        decided_at TEXT
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_service_proposals_pending_name
+        ON service_proposals(name) WHERE status IN ('pending', 'approving');
+      CREATE TABLE IF NOT EXISTS admin_upstreams (
+        hostname TEXT PRIMARY KEY,
+        proposal_id TEXT NOT NULL,
+        approved_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS ssh_host_identities (
+        service TEXT NOT NULL,
+        upstream TEXT NOT NULL,
+        public_key TEXT NOT NULL,
+        learned_at TEXT NOT NULL,
+        PRIMARY KEY (service, upstream)
+      );
+      CREATE TABLE IF NOT EXISTS temporary_service_approvals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        service TEXT NOT NULL,
+        approval_json TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        revoked INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_temporary_approvals_service_expiry
+        ON temporary_service_approvals(service, expires_at, revoked);
 
       CREATE TABLE IF NOT EXISTS ssh_sessions (
         id TEXT PRIMARY KEY,
@@ -365,6 +398,100 @@ export class AuditLogger {
   }
 
   // ─── Service overrides (admin API) ────────────────────────
+
+  getSshHostIdentity(service: string, upstream: string): { publicKey: string; learnedAt: string } | undefined {
+    return this.db.prepare('SELECT public_key AS publicKey, learned_at AS learnedAt FROM ssh_host_identities WHERE service = ? AND upstream = ?')
+      .get(service, upstream) as { publicKey: string; learnedAt: string } | undefined;
+  }
+
+  rememberSshHostIdentity(service: string, upstream: string, publicKey: string): string {
+    // First writer wins. A concurrent connection must use the stored key.
+    this.db.prepare('INSERT OR IGNORE INTO ssh_host_identities VALUES (?, ?, ?, ?)')
+      .run(service, upstream, publicKey, new Date().toISOString());
+    return this.getSshHostIdentity(service, upstream)!.publicKey;
+  }
+
+  saveTemporaryServiceApproval(approval: TemporaryServiceApproval): void {
+    this.db.transaction(() => {
+      this.revokeTemporaryServiceApprovals(approval.service);
+      this.db.prepare('INSERT INTO temporary_service_approvals(service, approval_json, expires_at) VALUES (?, ?, ?)')
+        .run(approval.service, JSON.stringify(approval), approval.expiresAt);
+      this.setShowlog(approval.chatId, true);
+    })();
+  }
+
+  getTemporaryServiceApprovals(): TemporaryServiceApproval[] {
+    return (this.db.prepare('SELECT approval_json FROM temporary_service_approvals WHERE revoked = 0 AND expires_at > ? ORDER BY id')
+      .all(Date.now()) as { approval_json: string }[]).map(row => JSON.parse(row.approval_json));
+  }
+
+  revokeTemporaryServiceApprovals(service?: string): number {
+    return service === undefined
+      ? this.db.prepare('UPDATE temporary_service_approvals SET revoked = 1 WHERE revoked = 0').run().changes
+      : this.db.prepare('UPDATE temporary_service_approvals SET revoked = 1 WHERE service = ? AND revoked = 0').run(service).changes;
+  }
+
+  getServiceProposal(id: string): ServiceProposal | undefined {
+    const row = this.db.prepare('SELECT proposal_json, status, decided_at FROM service_proposals WHERE id = ?')
+      .get(id) as { proposal_json: string; status: ServiceProposal['status']; decided_at: string | null } | undefined;
+    return row ? { ...JSON.parse(row.proposal_json), status: row.status, decidedAt: row.decided_at } : undefined;
+  }
+
+  getServiceProposals(): ServiceProposal[] {
+    const rows = this.db.prepare(`SELECT id FROM service_proposals
+      ORDER BY CASE WHEN status IN ('pending', 'approving') THEN 0 ELSE 1 END, created_at DESC LIMIT 500`)
+      .all() as { id: string }[];
+    return rows.map((row) => this.getServiceProposal(row.id)!);
+  }
+
+  getPendingServiceProposal(name: string): ServiceProposal | undefined {
+    const row = this.db.prepare("SELECT id FROM service_proposals WHERE name = ? AND status IN ('pending', 'approving')")
+      .get(name) as { id: string } | undefined;
+    return row ? this.getServiceProposal(row.id) : undefined;
+  }
+
+  saveServiceProposal(proposal: ServiceProposal): void {
+    const count = this.db.prepare("SELECT COUNT(*) AS count FROM service_proposals WHERE status IN ('pending', 'approving')")
+      .get() as { count: number };
+    if (count.count >= 100) throw new Error('Pending proposal limit reached (100); review existing proposals first');
+    this.db.prepare(`INSERT INTO service_proposals (id, name, proposal_json, status, created_at)
+      VALUES (?, ?, ?, 'pending', ?)`)
+      .run(proposal.id, proposal.name, JSON.stringify(proposal), proposal.createdAt);
+  }
+
+  claimServiceProposal(id: string): boolean {
+    return this.db.prepare("UPDATE service_proposals SET status = 'approving' WHERE id = ? AND status = 'pending'")
+      .run(id).changes === 1;
+  }
+
+  releaseServiceProposal(id: string): void {
+    this.db.prepare("UPDATE service_proposals SET status = 'pending' WHERE id = ? AND status = 'approving'").run(id);
+  }
+
+  recoverServiceProposals(): void {
+    this.db.prepare("UPDATE service_proposals SET status = 'pending' WHERE status = 'approving'").run();
+  }
+
+  rejectServiceProposal(id: string): boolean {
+    return this.db.prepare("UPDATE service_proposals SET status = 'rejected', decided_at = ? WHERE id = ? AND status = 'pending'")
+      .run(new Date().toISOString(), id).changes === 1;
+  }
+
+  approveServiceProposal(id: string, name: string, service: ServiceConfig, upstreams: string[]): void {
+    this.db.transaction(() => {
+      const updated = this.db.prepare("UPDATE service_proposals SET status = 'approved', decided_at = ? WHERE id = ? AND status = 'approving'")
+        .run(new Date().toISOString(), id);
+      if (updated.changes !== 1) throw new Error('Proposal is no longer awaiting approval');
+      this.saveServiceOverride(name, service);
+      const insert = this.db.prepare('INSERT OR IGNORE INTO admin_upstreams VALUES (?, ?, ?)');
+      for (const hostname of upstreams) insert.run(hostname, id, new Date().toISOString());
+    })();
+  }
+
+  getAdminUpstreams(): string[] {
+    return (this.db.prepare('SELECT hostname FROM admin_upstreams ORDER BY hostname').all() as { hostname: string }[])
+      .map((row) => row.hostname);
+  }
 
   getServiceOverrides(): Record<string, ServiceConfig> {
     const rows = this.db.prepare('SELECT service_name, config_json FROM services_override').all() as { service_name: string; config_json: string }[];

@@ -110,9 +110,61 @@ Tap **Approve 1h** and the request goes through!
 
 | Command | What it does |
 |---|---|
+| `/help` | Lists commands, arguments and examples |
 | `/pair <secret>` | Links your Telegram to ClawGuard (required before approving) |
-| `/unpair` | Removes the link (you stop receiving requests) |
-| `/status` | Check if you're currently paired |
+| `/unpair` | Removes pairing and revokes temporary service approvals |
+| `/status` | Shows pairing, showlog and temporary approvals with time remaining |
+| `/showlog [on\|off]` | Shows or changes info-only logs for automatic calls |
+| `/allow` | Opens buttons to choose a service and duration |
+| `/allow <service>` | Opens approval buttons for the named service |
+| `/allow <service> <duration>` | Temporarily approves HTTP requests or SSH sessions for one service |
+| `/allow <service> <duration> read_only\|read_write` | Temporarily approves FTP/FTPS leases with the selected access mode |
+| `/revoke <service>` | Revokes temporary and cached approvals for that service |
+
+ClawGuard registers these commands in the Telegram bot menu at startup. All
+commands apply only in the configured chat. `/allow` and `/revoke` also require
+a paired chat and an account permitted by `allowedApprovers`, when configured.
+Bot accounts and anonymous group senders cannot create or revoke grants.
+
+To permit work while you cannot answer approval requests:
+
+1. Send `/allow` in the configured chat.
+2. Tap the service name. Use **Next** or **Previous** for more services.
+3. For FTP/FTPS, tap **Read only** or **Read/write**.
+4. Tap a duration: **15m**, **30m**, **1h**, **4h**, **8h** or **24h**.
+5. Tap **Revoke now** in the confirmation to end the grant early.
+
+The duration button activates the approval. The message shows the service,
+target and access mode before that choice. **Services** goes back to the list;
+**Cancel** closes the menu without granting access. You can also send
+`/allow lombax-coolify-1` to open that service directly, or use the complete
+command `/allow lombax-coolify-1 1h`. `/status` shows the remaining time.
+
+Selection menus expire after ten minutes and can be used only by the account
+that opened the menu. The confirmation's revoke button lasts until the grant
+expires. Each click replaces the previous buttons. A changed or
+deleted service requires a new review. Double taps cannot duplicate or extend
+a grant. A stale **Revoke now** button cannot revoke a newer grant. After a
+ClawGuard restart, use `/allow` to open a new menu, or `/revoke <service>` to
+revoke an existing grant.
+
+Use a duration from `1m` to `24h`, such as `30m`, `1h` or `8h`. A grant covers
+all new requests for that service, including operations that normally require
+a fresh decision. It does not bypass method allowlists, blocked operations,
+target checks, host-key checks or credential isolation. Pending prompts retain
+their original decision and timeout; the grant applies to subsequent requests.
+
+Creating a grant enables `/showlog`. Calls under that grant always send silent,
+info-only log messages, even if `/showlog off` is sent later. These messages do
+not have approval buttons. Telegram suppresses their notification sound;
+client notification display depends on the Telegram app settings. Logs for
+other automatically approved services follow the normal showlog setting.
+
+Grants persist across restarts with their original expiry. A service
+configuration change invalidates its grant when it is next used. Expiry,
+revocation or unpairing stops use of the grant for new requests. Existing SSH
+sessions and FTP leases keep their normal lifetime. Regular service policy
+and other still-valid HTTP approvals apply after a grant expires.
 
 ## Troubleshooting
 

@@ -19,6 +19,7 @@ Use it with API calls made by **OpenClaw**, **OpenAI Codex**, **Claude Code**, o
 Run ClawGuard on a trusted machine whose files the agent cannot read, configure your services, and pair Telegram. Then connect the agent to the proxy.
 
 - [Setup and configuration](docs/GUIDE.md#quick-start)
+- [Agent service proposals](docs/agent-service-proposals.md)
 - [Telegram setup](TELEGRAM_SETUP.md)
 - [Local forwarder](forwarder/INSTALL.md) · [OpenClaw setup](openclaw/INSTALL.md)
 - [SSH gateway](ssh-gateway/README.md) · [FTP/FTPS gateway](ftp-gateway/README.md)

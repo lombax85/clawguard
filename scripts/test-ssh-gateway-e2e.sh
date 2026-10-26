@@ -161,6 +161,7 @@ start_broker() {
   local known_host_public_key=$2
   local lease_ttl_seconds=${3:-30}
   local max_concurrent_leases=${4:-4}
+  local trust_on_first_use=${5:-0}
   rm -f -- "$TEMP_ROOT/results/broker.ready"
   CONTAINERS+=("$container")
   docker run -d \
@@ -169,6 +170,7 @@ start_broker() {
     --label "$RESOURCE_LABEL" \
     --env "E2E_LEASE_TTL_SECONDS=$lease_ttl_seconds" \
     --env "E2E_MAX_CONCURRENT_LEASES=$max_concurrent_leases" \
+    --env "E2E_TRUST_ON_FIRST_USE=$trust_on_first_use" \
     --mount "type=volume,src=$RUNTIME_VOLUME,dst=/run/clawguard-ssh" \
     --mount "type=bind,src=$TEMP_ROOT/upstream_identity,dst=/e2e-secrets/upstream_identity,readonly" \
     --mount "type=bind,src=$known_host_public_key,dst=/e2e-config/upstream_host.pub,readonly" \
@@ -447,6 +449,45 @@ grep -Eiq 'host key verification failed|remote host identification has changed' 
 wait_for_event_count '"outcome":"remote_exit_nonzero"' "$((NONZERO_FINALS_BEFORE + 1))"
 assert_no_agent_lease_dirs "$MISMATCH_BROKER_CONTAINER"
 log 'PASS: pinned upstream host-key mismatch fails closed and releases the lease'
+
+log 'learning the upstream identity on the first approved SSH connection'
+docker stop -t 10 "$MISMATCH_BROKER_CONTAINER" >/dev/null
+TOFU_BROKER_CONTAINER="$RUN_ID-broker-tofu"
+start_broker "$TOFU_BROKER_CONTAINER" "$TEMP_ROOT/upstream-config/ssh_host_ed25519_key.pub" 30 4 1
+TOFU_OUTPUT=$(ssh "${SSH_COMMON[@]}" gateway@127.0.0.1 -- production -- printf first-use-ok)
+[ "$TOFU_OUTPUT" = 'first-use-ok' ] || fail 'first-use SSH connection failed'
+wait_for_event_count '"outcome":"host_identity_learned"' 1
+
+log 'restarting the broker and reusing its saved server identity'
+docker stop -t 10 "$TOFU_BROKER_CONTAINER" >/dev/null
+TOFU_RESTART_CONTAINER="$RUN_ID-broker-tofu-restart"
+start_broker "$TOFU_RESTART_CONTAINER" "$TEMP_ROOT/upstream-config/ssh_host_ed25519_key.pub" 30 4 1
+TOFU_OUTPUT=$(ssh "${SSH_COMMON[@]}" gateway@127.0.0.1 -- production -- printf saved-identity-ok)
+[ "$TOFU_OUTPUT" = 'saved-identity-ok' ] || fail 'persisted first-use identity did not survive restart'
+[ "$(grep -c '"outcome":"host_identity_learned"' "$TEMP_ROOT/results/events.ndjson")" -eq 1 ] \
+  || fail 'the broker learned a second identity after restart'
+
+log 'rotating the fixture upstream host key and checking strict rejection'
+cp "$TEMP_ROOT/mismatch_host_identity" "$TEMP_ROOT/upstream-config/ssh_host_ed25519_key"
+docker restart "$UPSTREAM_CONTAINER" >/dev/null
+# Wait for sshd in the restarted container, not a matching line from old logs.
+for _ in $(seq 1 50); do
+  if docker exec "$UPSTREAM_CONTAINER" sh -c 'nc -z 127.0.0.1 2222'; then break; fi
+  sleep 0.1
+done
+set +e
+ssh "${SSH_COMMON[@]}" gateway@127.0.0.1 -- production -- printf rotated-key-must-not-run \
+  >"$TEMP_ROOT/tofu-rotation.stdout" 2>"$TEMP_ROOT/tofu-rotation.stderr"
+TOFU_ROTATION_STATUS=$?
+set -e
+[ "$TOFU_ROTATION_STATUS" -ne 0 ] || fail 'TOFU accepted a changed server identity'
+if grep -Fq 'rotated-key-must-not-run' "$TEMP_ROOT/tofu-rotation.stdout"; then
+  fail 'command ran after an unapproved server identity change'
+fi
+grep -Eiq 'host key verification failed|remote host identification has changed' \
+  "$TEMP_ROOT/tofu-rotation.stderr" || fail 'expected host-key mismatch after rotation'
+assert_no_agent_lease_dirs "$TOFU_RESTART_CONTAINER"
+log 'PASS: first-use identity survives restart and rejects a real server key change'
 
 if grep -Fq 'BEGIN OPENSSH PRIVATE KEY' "$TEMP_ROOT/results/events.ndjson"; then
   fail 'private-key material leaked into broker audit events'

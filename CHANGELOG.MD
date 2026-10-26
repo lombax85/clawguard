@@ -6,6 +6,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+### Added
+
+- **Telegram approval buttons**: `/allow` opens a paginated service picker;
+  `/allow <service>` opens that service directly. Duration buttons offer 15m,
+  30m, 1h, 4h, 8h and 24h. FTP/FTPS requires an access-mode choice. Confirmation
+  messages include a Revoke now button. Menus bind choices to the initiating
+  account, chat, message and reviewed service configuration, with expiry and
+  single-use callbacks. Existing text commands and mandatory silent logs remain.
+- **SSH first-use server identity**: owner-selected `ssh.trustOnFirstUse`
+  records the first approved connection's host public key in SQLite. Later
+  sessions use that key with strict OpenSSH verification. Proposal review
+  supports existing pending host-key placeholders and the SSH wizard shows
+  learned fingerprints. Explicit verified keys remain supported.
+- **Telegram command help and temporary service approvals**: `/help` and the
+  bot command menu list supported commands. `/allow <service> <duration>`
+  permits a service for 1 minute to 24 hours, with mandatory silent showlog
+  messages. FTP/FTPS requires an explicit access mode. `/revoke <service>`
+  ends approvals early. Grants persist with their original expiry, respect
+  configured approvers and are invalidated by service configuration changes.
+- **Agent service proposals**: agent-key-authenticated submission and status
+  endpoints for HTTP, SSH and FTP/FTPS configurations with explicit credential
+  placeholders. Proposals are validated and persisted without activating a
+  service, loading a plugin, resolving secrets or contacting an upstream.
+  The PIN/IP-protected dashboard provides review, rejection, credential entry
+  and server-side selection of existing managed credentials. New upstream
+  domains require explicit administrator consent and persist alongside the
+  approved service. Strict mode blocks activation. Plugin initialization or
+  persistence failures leave the proposal pending; repeated approvals cannot
+  activate it twice. Agent status and proposal history never contain supplied
+  credentials.
+- **HTTP method allowlists**: optional `http.allowedMethods` rejects unlisted
+  methods with HTTP 405 before approval and credential injection in direct,
+  host-based and HTTPS MITM proxy modes.
+
 ### Experimental SSH gateway loop
 
 - **2026-08-02 18:09 CEST — iteration 0 (`bcf5099`)**: created `experimental-ssh-gateway`, persisted the terminate-and-reoriginate SSH architecture, security boundaries, acceptance criteria and execution backlog in `LOOP_PLAN.md` / `LOOP_TODO.md`. Gate: `git diff --check`. Next: protocol-aware configuration and isolated SSH auth-plugin support.
@@ -17,6 +51,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - **2026-08-11**: added a disabled-by-default FTP/explicit-FTPS access gateway. ClawGuard performs one-time fail-closed Telegram approval, fixed-target/DNS validation, isolated credential-plugin retrieval, metadata-only audit, and hard lease lifecycle; a Linux sidecar runs one minimal rclone process per approved lease and exposes only random ephemeral gateway credentials. Each Telegram decision now chooses enforced **Read only** or **Read/write** access. Outbound control and passive data connections are pinned to the validated upstream IP set. The Docker E2E verifies read/write and read-only behavior through plain FTP and explicit FTPS without returning the upstream password.
 
 ### Fixed
+- **Pasted SSH keys and setup diagnostics**: normalize CRLF and a missing final
+  newline before passing private keys to OpenSSH, including credentials already
+  saved on ClawGuard. The SSH wizard uses the same normalization. Broker errors
+  now distinguish host identity discovery/storage, credential retrieval,
+  ssh-agent startup and ssh-add rejection. Responses, audit and container logs
+  contain fixed error codes, never plugin messages or subprocess output.
 - **Admin endpoint stalls and Telegram HTTP timeouts**: added covering SQLite indexes for every synchronous dashboard aggregation. Opening the dashboard no longer leaves lightweight endpoints such as `admin-config` queued behind repeated full-table scans of the audit log. Transient Telegram long-poll timeouts are now logged compactly as automatic retries, escalating to an error only after three consecutive failures while remaining visible in health diagnostics.
 - **Read-only FTPS upload rejection**: eagerly completes the passive data-channel TLS handshake and closes failed `STOR`/`APPE` sockets, so clients receive the FTP denial immediately instead of timing out; the real Docker E2E now verifies both commands over FTP and explicit FTPS and confirms that no file is created.
 - **Telegram 409 polling restart loop**: removed the scheduled/raw-`getUpdates` lock-reclaim path that could create two long-poll chains inside one ClawGuard process. Poll ownership recovery now performs a graceful serialized stop, waits 15 seconds, retries once without replacing a live poll, and opens a fail-closed circuit after a second conflict so a genuinely duplicated deployment cannot create an infinite request/log storm. Pending and new approvals are denied immediately while the circuit is open. Polling transport and shutdown are bounded, recovery timers cannot survive teardown, and the dashboard exposes conflict/retry/circuit state.

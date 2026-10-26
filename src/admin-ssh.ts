@@ -1,5 +1,6 @@
 import { ChildProcess, spawn } from 'child_process';
 import crypto from 'crypto';
+import { normalizeSshPrivateKey } from './ssh-key-material';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -58,6 +59,7 @@ export interface AdminSshWizardMetadata {
   hostKey?: {
     algorithm: string;
     fingerprint: string;
+    publicKey?: string;
   };
 }
 
@@ -87,7 +89,7 @@ function runProcess(
   command: string,
   args: string[],
   env: NodeJS.ProcessEnv,
-  input?: string
+  input?: string | Buffer
 ): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { env, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -128,7 +130,7 @@ function runProcess(
     }, SSH_KEY_TOOL_TIMEOUT_MS);
 
     if (input !== undefined) {
-      const inputBuffer = Buffer.from(input, 'utf8');
+      const inputBuffer = Buffer.isBuffer(input) ? Buffer.from(input) : Buffer.from(input, 'utf8');
       child.stdin.end(inputBuffer, () => inputBuffer.fill(0));
     } else {
       child.stdin.end();
@@ -261,7 +263,12 @@ async function inspectWithEphemeralAgent(
   try {
     await waitForAgentSocket(socketPath, agent);
     const env = { ...process.env, SSH_AUTH_SOCK: socketPath };
-    await runProcess(sshAddPath, ['-'], env, privateKey);
+    const normalizedKey = normalizeSshPrivateKey(privateKey);
+    try {
+      await runProcess(sshAddPath, ['-'], env, normalizedKey);
+    } finally {
+      normalizedKey.fill(0);
+    }
     const listed = await runProcess(sshAddPath, ['-L'], env);
     const keys = listed.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
     if (keys.length !== 1) throw new Error('SSH agent did not return exactly one public key');
@@ -397,15 +404,17 @@ export function listAdminSshKeySources(config: Config): AdminSshKeySource[] {
   return [...sourcesByPrivateKey.values()];
 }
 
-export function getAdminSshWizardMetadata(service: ServiceConfig): AdminSshWizardMetadata {
+export function getAdminSshWizardMetadata(service: ServiceConfig, learnedKey?: string): AdminSshWizardMetadata {
   const username = reusableUsername(service);
   if (!username || !reusablePrivateKey(service)) return { available: false };
   const metadata: AdminSshWizardMetadata = { available: true, username };
-  if (service.ssh?.knownHostKey && isValidKnownHostKey(service.ssh.knownHostKey)) {
-    const identity = publicKeyInfo(service.ssh.knownHostKey);
+  const knownHostKey = service.ssh?.knownHostKey || learnedKey;
+  if (knownHostKey && isValidKnownHostKey(knownHostKey)) {
+    const identity = publicKeyInfo(knownHostKey);
     metadata.hostKey = {
-      algorithm: service.ssh.knownHostKey.split(/[ \t]+/, 1)[0],
+      algorithm: knownHostKey.split(/[ \t]+/, 1)[0],
       fingerprint: identity.fingerprint,
+      ...(learnedKey ? { publicKey: knownHostKey } : {}),
     };
   }
   return metadata;
@@ -525,7 +534,11 @@ export async function buildAdminSshService(
   if (typeof candidate['allowPrivateTarget'] !== 'boolean') {
     throw new Error('Private target choice is required');
   }
-  const knownHostKey = normalizeKnownHostKey(candidate['knownHostKey']);
+  if (candidate['trustOnFirstUse'] !== undefined && typeof candidate['trustOnFirstUse'] !== 'boolean') {
+    throw new Error('trustOnFirstUse must be true or false');
+  }
+  const trustOnFirstUse = candidate['trustOnFirstUse'] === true;
+  const knownHostKey = trustOnFirstUse ? undefined : normalizeKnownHostKey(candidate['knownHostKey']);
   const key = candidate['key'];
   const keyMode = keyModeFrom(key, existing !== undefined);
   const keyObject = key as JsonObject;
@@ -565,6 +578,7 @@ export async function buildAdminSshService(
     ssh: {
       ...(base?.ssh || {}),
       knownHostKey,
+      trustOnFirstUse,
       allowPrivateTarget: candidate['allowPrivateTarget'],
     },
   };

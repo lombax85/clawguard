@@ -6,6 +6,7 @@ import { ApprovalManager } from './approval';
 import { AuditLogger } from './audit';
 import { TelegramNotifier } from './telegram';
 import { getPassthroughHosts } from './mitm-proxy';
+import { createAdminProposalRouter, isProposalApplying } from './service-proposals';
 import {
   AdminServiceRuntime,
   createAdminServiceRuntime,
@@ -133,6 +134,24 @@ export function createAdminRouter(
     next();
   };
 
+  router.use('/api', pinAuth, createAdminProposalRouter(config, audit, serviceRuntime));
+  // A proposal may be asynchronously initializing credentials on either the
+  // HTTP or HTTPS listener. Reserve its alias across ordinary admin writes.
+  router.use('/api', (req: Request, res: Response, next: NextFunction) => {
+    if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) { next(); return; }
+    let name: unknown;
+    try { name = JSON.parse(req.body?.toString() || '{}').name; } catch { /* handler reports malformed JSON */ }
+    const pathName = /^\/(?:services|ssh-services)\/([^/]+)/.exec(req.path)?.[1];
+    let decodedName: string | undefined;
+    try { decodedName = pathName ? decodeURIComponent(pathName) : undefined; } catch { /* route reports invalid encoding */ }
+    if ((typeof name === 'string' && isProposalApplying(config, name))
+      || (decodedName && isProposalApplying(config, decodedName))) {
+      res.status(409).json({ error: 'This service is being approved; wait for the proposal to finish' });
+      return;
+    }
+    next();
+  });
+
   // ─── Dashboard stats ─────────────────────────────────────
 
   router.get('/api/stats', pinAuth, (req: Request, res: Response) => {
@@ -188,7 +207,8 @@ export function createAdminRouter(
         hostnames: svc.hostnames,
         ssh: svc.ssh,
         ftp: svc.ftp,
-        sshWizard: getAdminSshWizardMetadata(svc),
+        sshWizard: getAdminSshWizardMetadata(svc, svc.ssh?.trustOnFirstUse
+          ? audit.getSshHostIdentity?.(name, svc.upstream)?.publicKey : undefined),
         editableConfig: redactServiceForAdmin(svc),
       };
     }

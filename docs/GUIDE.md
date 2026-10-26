@@ -10,6 +10,7 @@ This guide covers installing ClawGuard on a trusted machine, connecting autonomo
 - [FTP/FTPS gateway](#ftpftps-access-gateway-experimental)
 - [VMware ESXi](#vmware-esxi-soap-gateway)
 - [Web dashboard](#web-dashboard)
+- [Agent service proposals](agent-service-proposals.md)
 - [Configuration](#configuration)
 
 ## Architecture: Why Separate Machines Matter
@@ -388,8 +389,11 @@ ssh gateway@CLAWGUARD_HOST -p 2222 -- \
   production-ssh --reason "Check the remote kernel version" -- uname -a
 ```
 
-Each attempt produces a new Telegram request. SSH approval is deliberately
-one-time: it does not use HTTP policy auto-approval or cached approval windows.
+Each attempt normally produces a new Telegram request. SSH does not use HTTP
+policy auto-approval or cached HTTP approvals. An owner can explicitly allow
+new sessions for a limited time with `/allow <service> <duration>`, which
+enables silent showlog messages. `/allow` opens service and duration buttons.
+See [Telegram commands](../TELEGRAM_SETUP.md#telegram-bot-commands).
 The approval includes the supplied reason. Legacy clients that omit
 `--reason` remain compatible and receive an action-specific fallback reason.
 No configured/paired Telegram approver, denial, bot failure, or timeout all
@@ -408,9 +412,10 @@ session, and the broker has bounded cleanup for a missing completion callback.
 
 - Port forwarding, agent forwarding, Unix-socket forwarding, X11, extra
   channels, `ProxyJump`, SCP and SFTP are disabled or unsupported.
-- The upstream host key is pinned as the complete OpenSSH public key;
-  fingerprints alone and trust-on-first-use are rejected. Obtain and verify
-  the key independently before configuration.
+- The upstream host key is pinned as a complete OpenSSH public key. The owner
+  can supply a verified `ssh.knownHostKey`, or set `ssh.trustOnFirstUse: true`
+  to remember the first observed key. Later connections reject key changes.
+  First-use trust does not independently verify the initial server identity.
 - The upstream key never reaches the inbound SSH client. However, a compromised
   sidecar could use an approved session's agent socket for the lease lifetime
   against any reachable host that accepts that same key. Keep leases short and
@@ -560,8 +565,9 @@ can include:
 
 Read-only and session operations can be auto-approved by policy. Every write,
 destructive, oversized, empty, or unrecognized SOAP operation is forced to one
-fresh Telegram decision for that exact request: it cannot use a cached approval
-and the decision is not persisted. Ticket/session-export methods such as
+fresh Telegram decision for that exact request, except while an explicit
+`/allow` service grant is active. It cannot use a cached HTTP approval and a
+one-request decision is not persisted. Ticket/session-export methods such as
 `AcquireCloneTicket`, `AcquireGenericServiceTicket`, `CloneSession`, and
 impersonation/token login are blocked.
 
@@ -778,6 +784,16 @@ Tap **[Deny]**. The repo is safe. That's ClawGuard in action.
 
 ClawGuard includes a built-in dashboard at `http://clawguard-host:9090/__admin`, protected by PIN and localhost-only access (configurable via `admin.allowedIPs`).
 
+**Service proposals** — agents can POST an HTTP, SSH or FTP/FTPS service
+configuration with credential placeholders to `/__proposals/services`. Valid
+configurations wait in **Service proposals** without changing live services or
+allowlists. The administrator reviews the target and policy, supplies credentials
+or selects managed credentials, explicitly allows any new upstream domains, then
+chooses **Approve & add service**. The agent key cannot approve or access the
+credential picker. Approvals require `admin.strictMode: false`; strict mode still
+permits review and rejection. Proposals, decisions, services and approved domains
+persist in SQLite. See [the API and protocol examples](agent-service-proposals.md).
+
 **Analytics** — requests per service, hourly heatmap, approve/deny ratio, HTTP method breakdown:
 
 <p align="center">
@@ -785,6 +801,10 @@ ClawGuard includes a built-in dashboard at `http://clawguard-host:9090/__admin`,
 </p>
 
 **Service management** — add, edit, duplicate, and remove HTTP, SSH, FTP, and FTPS services when `admin.strictMode: false`. SSH has a dedicated host wizard: enter the host ID, target and username, then let ClawGuard detect the server identity and remember it after showing the SHA-256 fingerprint. Existing private keys appear as saved backend credentials grouped by the services that use them; selecting one never returns private material to the browser. A new Ed25519 credential can be generated server-side, while manual key import and the complete JSON editor remain available as advanced paths. Credentials in that editor are represented by `{"$clawguard":"keep-secret"}` and are resolved or copied only on the server. In strict mode, YAML remains the only source of truth and the dashboard is read-only:
+
+The SSH wizard also offers **Remember it at the first approved connection**.
+This saves the first observed server key and rejects later key changes. The
+saved fingerprint appears in the wizard after that connection.
 
 <p align="center">
   <img src="screenshots/services.png" alt="Configured services with masked tokens" width="700">
@@ -997,7 +1017,9 @@ Path-prefix routing (`/:service/*`) cleanly disambiguates those services. Host-b
 | `/:service/*` | Agent key | Proxy to configured service |
 | `/__status` | Agent key | Active approvals and services |
 | `/__audit` | Agent key | Recent request log |
-| `POST /__ftp/session` | Agent key + fresh Telegram decision | Mint one bounded FTP/FTPS lease |
+| `POST /__proposals/services` | Agent key | Validate and queue a credential-free service proposal |
+| `GET /__proposals/services/:id` | Agent key | Read the proposal decision without credentials |
+| `POST /__ftp/session` | Agent key + Telegram decision or temporary service grant | Mint one bounded FTP/FTPS lease |
 | `DELETE /__ftp/session/:id` | Agent key + opaque lease ID | Revoke the caller-held FTP/FTPS lease |
 | `/__audit/ftp` | Agent key | Recent FTP metadata, with lease IDs redacted |
 | `/__admin` | PIN (IP restricted) | Web dashboard |
@@ -1006,9 +1028,18 @@ Path-prefix routing (`/:service/*`) cleanly disambiguates those services. Host-b
 
 | Command | Description |
 |---|---|
+| `/help` | List commands and usage examples |
 | `/pair <secret>` | Pair your Telegram account with ClawGuard |
-| `/unpair` | Remove pairing (stop receiving approval requests) |
-| `/status` | Check pairing status |
+| `/unpair` | Remove pairing and revoke temporary service grants |
+| `/status` | Show pairing, logging and temporary grants |
+| `/showlog [on\|off]` | Show or change automatic-call logs |
+| `/allow [service]` | Choose a service and approval duration with buttons |
+| `/allow <service> <duration>` | Temporarily approve an HTTP or SSH service with silent logs |
+| `/allow <service> <duration> read_only\|read_write` | Temporarily approve FTP/FTPS leases with explicit permissions |
+| `/revoke <service>` | Revoke the service's temporary and cached approvals |
+
+See [Telegram commands](../TELEGRAM_SETUP.md#telegram-bot-commands) for durations,
+button behavior and expiry rules.
 
 ## Environment Variables
 

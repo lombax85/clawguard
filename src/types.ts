@@ -11,15 +11,30 @@ export interface PolicyRule {
 export type ServiceProtocol = 'http' | 'ssh' | 'ftp' | 'ftps';
 
 export interface SshServiceConfig {
-  // Complete OpenSSH public host key (`keytype base64`), never a TOFU fingerprint.
-  knownHostKey: string;
+  // Complete OpenSSH public host key (`keytype base64`).
+  knownHostKey?: string;
+  // Owner opt-in: remember the key during the first approved connection.
+  trustOnFirstUse?: boolean;
   // Private/link-local/loopback literals and DNS answers require this explicit opt-in.
   allowPrivateTarget: boolean;
+}
+
+export interface TemporaryServiceApproval {
+  service: string;
+  configHash: string;
+  protocol: ServiceProtocol;
+  approvedAt: number;
+  expiresAt: number;
+  approvedBy: string;
+  chatId: string;
+  accessMode?: FtpAccessMode;
 }
 
 export type FtpTlsMode = 'explicit' | 'implicit';
 
 export interface HttpServiceConfig {
+  // When present, reject other HTTP methods before approval/auth injection.
+  allowedMethods?: string[];
   // Private/link-local/loopback literals require this explicit per-service opt-in.
   allowPrivateTarget?: boolean;
   // Explicit upstream-only escape hatch for private/self-signed HTTPS services.
@@ -73,6 +88,18 @@ export interface ServiceConfig {
   http?: HttpServiceConfig;
   ssh?: SshServiceConfig;
   ftp?: FtpServiceConfig;
+}
+
+export interface ServiceProposal {
+  id: string;
+  name: string;
+  config: Record<string, unknown>;
+  status: 'pending' | 'approving' | 'approved' | 'rejected';
+  createdAt: string;
+  decidedAt: string | null;
+  requestUser?: string;
+  requestReason?: string;
+  clientIp: string;
 }
 
 // ─── Security ────────────────────────────────────────────────

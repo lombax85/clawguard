@@ -120,15 +120,28 @@ Service aliases are intentionally restricted to 1-64 letters, digits,
 hyphens or underscores because the same alias crosses YAML, broker JSON and
 the forced-command parser.
 
-`knownHostKey` must be the upstream server's complete, single-line OpenSSH host
-public key (`key-type base64`), not just its fingerprint. Obtain the key from
-the server administrator or configuration management and verify its fingerprint
-through an independent trusted channel. ClawGuard does not use
-trust-on-first-use, and a mismatch terminates the connection.
+Choose one server identity mode:
+
+- `knownHostKey`: the complete, single-line OpenSSH public host key
+  (`key-type base64`), not its fingerprint. Verify it through a trusted channel.
+- `trustOnFirstUse: true`: omit `knownHostKey`. During the first approved
+  connection, ClawGuard scans the validated target IP and saves its public key
+  in SQLite. The first observed identity is trusted without independent
+  verification. Later connections use that saved key with strict OpenSSH
+  checking. A mismatch terminates the connection; it never replaces the key.
+
+The saved identity is bound to the service alias and upstream URL. It survives
+restarts. The SSH wizard and proposal review offer both modes. To accept a
+verified server key rotation, use the wizard's **Detect and review it now** or
+manual mode and save the new pinned key. Do not delete the saved identity to
+bypass a mismatch.
 
 Telegram must be configured and paired. Unlike development HTTP behavior, SSH
 never auto-approves when Telegram is absent: no approver, bot error, denial or
-timeout all fail closed, and cached HTTP approvals are not reused.
+timeout all fail closed, and cached HTTP approvals are not reused. An explicit
+Telegram `/allow <service> <duration>` grant permits new sessions until its
+expiry, with mandatory silent logs. `/revoke <service>` ends it early. These
+commands do not terminate sessions that are already open.
 
 If you customize `sshBroker.socketPath`, set the sidecar environment variable
 `CLAWGUARD_SSH_BROKER_SOCKET` to the same path and mount its parent at the same
@@ -247,6 +260,18 @@ for this experimental feature.
 - **Approval denied or timed out** — inspect Telegram pairing/bot health and
   make a new attempt only after resolving it; the denied session receives no
   lease.
+- **SSH setup failed after approval** — inspect the error code in the client
+  response or `docker compose logs clawguard`. The broker logs the service,
+  session ID and a fixed code even when payload logging is disabled. It does
+  not log plugin error text, key material or raw tool output.
+  `ssh_host_identity_scan_failed` identifies a failed first-use host-key scan;
+  check the host, port and reachability from ClawGuard.
+  `ssh_key_rejected` means `ssh-add` rejected the managed private key; use a
+  complete unencrypted private key. Pasted CRLF and missing final newlines are
+  normalized at use time, without changing the saved credential.
+  `ssh_credential_retrieval_failed` or `ssh_credential_timeout` identifies the
+  credential plugin. `ssh_agent_start_failed`, `ssh_agent_exited`,
+  `ssh_agent_timeout` and `ssh_agent_lease_failed` identify local agent setup.
 - **Host-key verification failed** — do not bypass the check. Confirm whether
   the upstream host key was intentionally rotated, verify it independently,
   then update `knownHostKey`.
