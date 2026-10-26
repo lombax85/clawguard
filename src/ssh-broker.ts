@@ -13,7 +13,7 @@ import {
   SshCredentials,
 } from './ssh-credential-plugins/ISshCredentialPlugin';
 import { getSshCredentialPlugin } from './ssh-credential-plugins/loader';
-import { SshAgentLease, SshAgentLeaseManager } from './ssh-agent-lease';
+import { SshAgentLease, SshAgentLeaseError, SshAgentLeaseManager } from './ssh-agent-lease';
 
 const MAX_BODY_BYTES = 4096;
 const MAX_SERVICE_LENGTH = 64;
@@ -21,6 +21,27 @@ const MAX_USERNAME_LENGTH = 64;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{32,64}$/;
 const SESSION_COMPLETION_GRACE_MS = 10_000;
 const SESSION_ACTIVATION_TIMEOUT_MS = 10_000;
+
+// Only fixed messages and codes reach clients, audit records and logs.
+// Plugin errors and subprocess output can contain private key material.
+const SSH_SETUP_ERRORS = {
+  ssh_host_identity_storage_failed: 'SSH server identity could not be read or saved in the ClawGuard database',
+  ssh_host_identity_scan_failed: 'SSH server identity could not be read from the target; check the host, port and firewall from ClawGuard',
+  ssh_host_identity_invalid: 'SSH server identity is missing or invalid',
+  ssh_setup_target_changed: 'SSH request or service changed during server identity detection',
+  ssh_credential_retrieval_failed: 'SSH credential plugin could not retrieve credentials',
+  ssh_credential_timeout: 'SSH credential retrieval timed out',
+  ssh_username_invalid: 'SSH credential plugin returned an invalid username',
+  ssh_session_storage_failed: 'SSH session could not be recorded in the ClawGuard database',
+  ssh_agent_lease_failed: 'SSH credential lease could not be created; check ssh-agent runtime permissions and capacity',
+  ssh_agent_start_failed: 'ClawGuard could not start ssh-agent',
+  ssh_agent_exited: 'ssh-agent exited during SSH credential setup',
+  ssh_agent_timeout: 'ssh-agent did not create its socket before the timeout',
+  ssh_add_start_failed: 'ClawGuard could not start ssh-add',
+  ssh_add_timeout: 'ssh-add timed out while loading the SSH private key',
+  ssh_add_write_failed: 'ClawGuard could not pass the SSH private key to ssh-add',
+  ssh_key_rejected: 'ssh-add rejected the SSH private key; check that the managed credential is a complete, unencrypted private key',
+} as const;
 
 interface BrokerSessionRequest {
   service: string;
@@ -568,6 +589,7 @@ export class SshBroker {
 
       let lease: SshAgentLease | undefined;
       let activeRegistration: ActiveBrokerSession | undefined;
+      let failureCode: keyof typeof SSH_SETUP_ERRORS = 'ssh_host_identity_storage_failed';
       try {
         let knownHostKey = service.ssh.knownHostKey;
         if (service.ssh.trustOnFirstUse === true) {
@@ -581,21 +603,31 @@ export class SshBroker {
               this.config.sshBroker.sshAgentPath, this.config.sshBroker.sshAddPath,
               this.config.sshBroker.sshKeyscanPath
             ).scanHost;
+            failureCode = 'ssh_host_identity_scan_failed';
             const keys = await this.waitUnlessShuttingDown(scan([connectHost], target.port));
+            failureCode = 'ssh_setup_target_changed';
             if (disconnected || this.config.services[input.service] !== service) {
               throw new Error('SSH request or service changed during identity detection');
             }
             const detected = keys[0]?.publicKey;
+            failureCode = 'ssh_host_identity_invalid';
             if (!isValidKnownHostKey(detected)) throw new Error('No valid SSH host identity received');
+            failureCode = 'ssh_host_identity_storage_failed';
             knownHostKey = audit.rememberSshHostIdentity(input.service, service.upstream, detected);
+            failureCode = 'ssh_session_storage_failed';
             this.dependencies.audit.updateSshSession(sessionId, { outcome: 'host_identity_learned' });
           }
+          failureCode = 'ssh_host_identity_invalid';
           if (!isValidKnownHostKey(knownHostKey)) throw new Error('Stored SSH host identity is invalid');
         }
+        failureCode = 'ssh_credential_retrieval_failed';
         const credentials = await this.getCredentialsBounded(plugin, input.service);
-        validateUsername(credentials.username);
-        this.dependencies.audit.updateSshSession(sessionId, { upstreamUser: credentials.username });
         try {
+          failureCode = 'ssh_username_invalid';
+          validateUsername(credentials.username);
+          failureCode = 'ssh_session_storage_failed';
+          this.dependencies.audit.updateSshSession(sessionId, { upstreamUser: credentials.username });
+          failureCode = 'ssh_agent_lease_failed';
           lease = await this.dependencies.leaseManager.create(credentials.privateKey);
         } finally {
           if (Buffer.isBuffer(credentials.privateKey)) credentials.privateKey.fill(0);
@@ -617,6 +649,7 @@ export class SshBroker {
           throw new BrokerHttpError(499, 'SSH gateway client disconnected');
         }
 
+        failureCode = 'ssh_session_storage_failed';
         const expiresAtIso = new Date(lease.expiresAt).toISOString();
         // Persist the active transition before registering timers/quota. If
         // audit storage fails, the catch below can still release the lease
@@ -700,16 +733,22 @@ export class SshBroker {
           }
         }
         if (err instanceof BrokerHttpError || err instanceof BrokerShutdownError) throw err;
+        if (failureCode === 'ssh_agent_lease_failed' && err instanceof SshAgentLeaseError
+          && Object.hasOwn(SSH_SETUP_ERRORS, err.code)) failureCode = err.code;
+        if (err instanceof CredentialRetrievalTimeoutError) failureCode = 'ssh_credential_timeout';
+        console.error('❌ SSH session setup failed: ' + JSON.stringify({
+          service: input.service, sessionId, code: failureCode,
+        }));
         try {
           this.dependencies.audit.finalizeSshSession(sessionId, {
             approved: true,
             outcome: 'credential_lease_failed',
-            closeReason: 'credential_or_lease_setup_failed',
+            closeReason: failureCode,
           });
         } catch {
           // Cleanup already happened; preserve a sanitized broker response.
         }
-        throw new BrokerHttpError(502, 'SSH credential lease could not be created');
+        throw new BrokerHttpError(502, `${SSH_SETUP_ERRORS[failureCode]} (${failureCode})`);
       }
     } catch (err) {
       if (err instanceof BrokerShutdownError) {

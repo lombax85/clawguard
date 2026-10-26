@@ -35,7 +35,9 @@ async function main() {
     if (error.code !== 'ENOENT') throw error;
   }
 
-  const retainedPrivateKey = fs.readFileSync(upstreamPrivateKeyPath);
+  // Simulate a key pasted with CRLF and no final newline. The broker must
+  // still load the same identity into stock OpenSSH and complete both legs.
+  const retainedPrivateKey = Buffer.from(fs.readFileSync(upstreamPrivateKeyPath, 'utf8').trim().replace(/\n/g, '\r\n'));
   const knownHostKey = readOpenSshPublicKey(upstreamHostPublicKeyPath);
   const leaseTtlSecondsText = process.env.E2E_LEASE_TTL_SECONDS || '30';
   if (!/^[1-9][0-9]*$/.test(leaseTtlSecondsText)) {

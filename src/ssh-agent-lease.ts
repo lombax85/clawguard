@@ -2,6 +2,14 @@ import { randomBytes } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
+import { normalizeSshPrivateKey } from './ssh-key-material';
+
+export class SshAgentLeaseError extends Error {
+  constructor(readonly code: 'ssh_agent_start_failed' | 'ssh_agent_exited' | 'ssh_agent_timeout'
+    | 'ssh_add_start_failed' | 'ssh_add_timeout' | 'ssh_add_write_failed' | 'ssh_key_rejected', message: string) {
+    super(message);
+  }
+}
 
 export interface SshAgentLeaseManagerOptions {
   runtimeDir: string;
@@ -36,7 +44,6 @@ interface AgentDiagnostics {
 
 const DEFAULT_STARTUP_TIMEOUT_MS = 5000;
 const MAX_TOOL_OUTPUT_BYTES = 4096;
-const MAX_PRIVATE_KEY_BYTES = 1024 * 1024;
 // Darwin sockaddr_un.sun_path is 104 bytes including its terminating NUL.
 // Staying within 103 bytes also works on Linux (108-byte sun_path).
 const MAX_PORTABLE_UNIX_SOCKET_PATH_BYTES = 103;
@@ -105,7 +112,7 @@ async function waitForSocket(
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (diagnostics.spawnError) {
-      throw new Error(`Failed to start ssh-agent${diagnosticSuffix(diagnostics)}`);
+      throw new SshAgentLeaseError('ssh_agent_start_failed', `Failed to start ssh-agent${diagnosticSuffix(diagnostics)}`);
     }
     if (!isProcessRunning(child)) {
       // A failed spawn reports its `error` event on a later turn. Give it one
@@ -113,10 +120,10 @@ async function waitForSocket(
       if (child.pid === undefined) {
         await new Promise<void>((resolve) => setImmediate(resolve));
         if (diagnostics.spawnError) {
-          throw new Error(`Failed to start ssh-agent${diagnosticSuffix(diagnostics)}`);
+          throw new SshAgentLeaseError('ssh_agent_start_failed', `Failed to start ssh-agent${diagnosticSuffix(diagnostics)}`);
         }
       }
-      throw new Error(`ssh-agent exited before creating its socket${diagnosticSuffix(diagnostics)}`);
+      throw new SshAgentLeaseError('ssh_agent_exited', `ssh-agent exited before creating its socket${diagnosticSuffix(diagnostics)}`);
     }
     try {
       if (fs.lstatSync(socketPath).isSocket()) return;
@@ -125,7 +132,7 @@ async function waitForSocket(
     }
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  throw new Error(`Timed out waiting for ssh-agent socket${diagnosticSuffix(diagnostics)}`);
+  throw new SshAgentLeaseError('ssh_agent_timeout', `Timed out waiting for ssh-agent socket${diagnosticSuffix(diagnostics)}`);
 }
 
 function generatedSocketPath(runtimeDir: string): string {
@@ -278,11 +285,7 @@ export class SshAgentLeaseManager {
     this.reserveCreate();
     let keyBuffer: Buffer | undefined;
     try {
-      keyBuffer = Buffer.isBuffer(privateKey)
-        ? Buffer.from(privateKey)
-        : Buffer.from(privateKey, 'utf8');
-      if (keyBuffer.length === 0) throw new Error('SSH private key is empty');
-      if (keyBuffer.length > MAX_PRIVATE_KEY_BYTES) throw new Error('SSH private key is too large');
+      keyBuffer = normalizeSshPrivateKey(privateKey);
       return await this.createReserved(keyBuffer);
     } finally {
       keyBuffer?.fill(0);
@@ -335,7 +338,7 @@ export class SshAgentLeaseManager {
       await this.addKey(socketPath, keyBuffer);
       if (this.closing) throw new Error('SSH agent lease manager is shutting down');
       if (agentExited || !isProcessRunning(agent)) {
-        throw new Error(`ssh-agent exited while loading the private key${diagnosticSuffix(diagnostics)}`);
+        throw new SshAgentLeaseError('ssh_agent_exited', `ssh-agent exited while loading the private key${diagnosticSuffix(diagnostics)}`);
       }
 
       const expiresAt = Date.now() + this.options.leaseTtlSeconds * 1000;
@@ -390,7 +393,7 @@ export class SshAgentLeaseManager {
         if (isProcessRunning(child)) child.kill('SIGTERM');
         killTimer = setTimeout(() => {
           if (isProcessRunning(child)) child.kill('SIGKILL');
-          settle(new Error('Timed out while loading the configured private key with ssh-add'));
+          settle(new SshAgentLeaseError('ssh_add_timeout', 'Timed out while loading the configured private key with ssh-add'));
         }, 250);
         killTimer.unref();
       }, this.options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS);
@@ -406,19 +409,19 @@ export class SshAgentLeaseManager {
       };
 
       child.once('error', (err) => {
-        settle(new Error(`Failed to start ssh-add: ${err.message}`));
+        settle(new SshAgentLeaseError('ssh_add_start_failed', `Failed to start ssh-add: ${err.message}`));
       });
       child.stdin.on('error', (err: NodeJS.ErrnoException) => {
         // ssh-add may reject and close stdin before all key bytes are written.
         // Its close status and bounded stderr are the authoritative diagnostic.
         if (err.code !== 'EPIPE') {
           if (isProcessRunning(child)) child.kill('SIGTERM');
-          settle(new Error(`Failed to write private key to ssh-add: ${err.message}`));
+          settle(new SshAgentLeaseError('ssh_add_write_failed', `Failed to write private key to ssh-add: ${err.message}`));
         }
       });
       child.once('close', (code, signal) => {
         if (timedOut) {
-          settle(new Error('Timed out while loading the configured private key with ssh-add'));
+          settle(new SshAgentLeaseError('ssh_add_timeout', 'Timed out while loading the configured private key with ssh-add'));
           return;
         }
         if (code === 0) {
@@ -427,7 +430,7 @@ export class SshAgentLeaseManager {
         }
         const detail = stderr().trim().replace(/[\r\n]+/g, ' ').slice(0, 500);
         const status = code === null && signal ? ` (signal ${signal})` : '';
-        settle(new Error(
+        settle(new SshAgentLeaseError('ssh_key_rejected',
           `ssh-add rejected the configured private key${status}${detail ? `: ${detail}` : ''}`
         ));
       });
@@ -436,7 +439,7 @@ export class SshAgentLeaseManager {
         child.stdin.end(privateKey);
       } catch (err) {
         if (isProcessRunning(child)) child.kill('SIGTERM');
-        settle(new Error(`Failed to write private key to ssh-add: ${(err as Error).message}`));
+        settle(new SshAgentLeaseError('ssh_add_write_failed', `Failed to write private key to ssh-add: ${(err as Error).message}`));
       }
     });
   }

@@ -260,6 +260,18 @@ for this experimental feature.
 - **Approval denied or timed out** — inspect Telegram pairing/bot health and
   make a new attempt only after resolving it; the denied session receives no
   lease.
+- **SSH setup failed after approval** — inspect the error code in the client
+  response or `docker compose logs clawguard`. The broker logs the service,
+  session ID and a fixed code even when payload logging is disabled. It does
+  not log plugin error text, key material or raw tool output.
+  `ssh_host_identity_scan_failed` identifies a failed first-use host-key scan;
+  check the host, port and reachability from ClawGuard.
+  `ssh_key_rejected` means `ssh-add` rejected the managed private key; use a
+  complete unencrypted private key. Pasted CRLF and missing final newlines are
+  normalized at use time, without changing the saved credential.
+  `ssh_credential_retrieval_failed` or `ssh_credential_timeout` identifies the
+  credential plugin. `ssh_agent_start_failed`, `ssh_agent_exited`,
+  `ssh_agent_timeout` and `ssh_agent_lease_failed` identify local agent setup.
 - **Host-key verification failed** — do not bypass the check. Confirm whether
   the upstream host key was intentionally rotated, verify it independently,
   then update `knownHostKey`.

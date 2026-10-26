@@ -77,6 +77,8 @@ async function main() {
     await page.locator('#ssh-host').fill('127.0.0.1');
     await page.locator('#ssh-username').fill('root');
     await page.locator('#ssh-allow-private').check();
+    await page.locator('#ssh-key-mode').selectOption('paste');
+    await page.locator('#ssh-private-key').fill(key.privateKey.trim());
     assert.equal(await page.locator('#ssh-host-key-mode').inputValue(), 'first-use');
     let scans = 0;
     page.on('request', request => { if (request.url().includes('/ssh-host-keys/scan')) scans++; });
@@ -94,7 +96,7 @@ async function main() {
     assert.match(await page.locator('#ssh-host-key-saved-status').innerText(), /SHA256:/);
     await page.screenshot({ path: '/tmp/clawguard-ssh-first-use-ui.png', fullPage: true });
     assert.deepEqual(errors, []);
-    console.log('PASS: existing proposal, first-use/pinned choice, managed key reuse, SSH wizard and learned fingerprint');
+    console.log('PASS: existing proposal, first-use/pinned choice, managed key reuse, pasted key without final newline, SSH wizard and learned fingerprint');
   } finally {
     await browser.close(); await new Promise(resolve => server.close(resolve)); audit.close();
   }

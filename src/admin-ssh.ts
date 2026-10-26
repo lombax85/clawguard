@@ -1,5 +1,6 @@
 import { ChildProcess, spawn } from 'child_process';
 import crypto from 'crypto';
+import { normalizeSshPrivateKey } from './ssh-key-material';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -88,7 +89,7 @@ function runProcess(
   command: string,
   args: string[],
   env: NodeJS.ProcessEnv,
-  input?: string
+  input?: string | Buffer
 ): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { env, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -129,7 +130,7 @@ function runProcess(
     }, SSH_KEY_TOOL_TIMEOUT_MS);
 
     if (input !== undefined) {
-      const inputBuffer = Buffer.from(input, 'utf8');
+      const inputBuffer = Buffer.isBuffer(input) ? Buffer.from(input) : Buffer.from(input, 'utf8');
       child.stdin.end(inputBuffer, () => inputBuffer.fill(0));
     } else {
       child.stdin.end();
@@ -262,7 +263,12 @@ async function inspectWithEphemeralAgent(
   try {
     await waitForAgentSocket(socketPath, agent);
     const env = { ...process.env, SSH_AUTH_SOCK: socketPath };
-    await runProcess(sshAddPath, ['-'], env, privateKey);
+    const normalizedKey = normalizeSshPrivateKey(privateKey);
+    try {
+      await runProcess(sshAddPath, ['-'], env, normalizedKey);
+    } finally {
+      normalizedKey.fill(0);
+    }
     const listed = await runProcess(sshAddPath, ['-L'], env);
     const keys = listed.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
     if (keys.length !== 1) throw new Error('SSH agent did not return exactly one public key');
