@@ -10,6 +10,7 @@ import { PairThrottle } from './pair-throttle';
 import { TemporaryApprovalController, temporaryApprovalDuration } from './temporary-approval';
 import { ServiceConfig } from './types';
 import { TelegramServiceMenu } from './telegram-service-menu';
+import type { WebhookNotifier } from './webhook';
 import {
   TelegramPollingRecovery,
   TelegramPollingRecoveryOptions,
@@ -133,6 +134,7 @@ export class TelegramNotifier {
   private lastCallbackAt: number | null = null;
   private serviceCommands?: { services: () => Record<string, ServiceConfig>; controller: TemporaryApprovalController };
   private serviceMenu: TelegramServiceMenu;
+  private webhookAlerts?: WebhookNotifier;
 
   constructor(
     config: TelegramConfig,
@@ -189,7 +191,8 @@ export class TelegramNotifier {
     if (typeof this.bot.setMyCommands === 'function') {
       void this.bot.setMyCommands([
         { command: 'help', description: 'List ClawGuard commands' },
-        { command: 'status', description: 'Show pairing and temporary approvals' },
+        { command: 'status', description: 'Show pairing, enhanced alerts and temporary approvals' },
+        { command: 'alerts', description: 'Home Assistant/webhook alerts: on, off or status' },
         { command: 'allow', description: 'Choose a service and duration with buttons' },
         { command: 'revoke', description: 'Revoke approvals for one service' },
         { command: 'showlog', description: 'Show or change automatic-call logs: on or off' },
@@ -232,6 +235,15 @@ export class TelegramNotifier {
     this.serviceCommands = { services, controller };
   }
 
+  configureWebhookAlerts(webhook: WebhookNotifier): void {
+    this.webhookAlerts = webhook;
+  }
+
+  private webhookAlertStatus(): string {
+    if (!this.webhookAlerts) return 'not configured (notifications.webhook.enabled must be true)';
+    return this.webhookAlerts.isAlertsEnabled() ? 'ON' : 'OFF';
+  }
+
   canUseTemporaryApproval(chatId: string): boolean {
     return this.isConfiguredChat(chatId) && this.isConfiguredChatPaired()
       && !this.pollingRecovery.getState().circuitOpen;
@@ -245,7 +257,8 @@ export class TelegramNotifier {
         '/help — List commands.',
         '/pair <secret> — Pair this chat.',
         '/unpair — Remove pairing and cancel temporary approvals.',
-        '/status — Show pairing, showlog and temporary approvals.',
+        '/status — Show pairing, enhanced alerts, showlog and temporary approvals.',
+        '/alerts [on|off|status] — Control Home Assistant/webhook alerts. Telegram approvals stay active.',
         '/showlog [on|off] — Show or change automatic-call logs.',
         '/allow — Choose a service and duration with buttons.',
         '/allow <service> — Open the approval buttons for that service.',
@@ -257,6 +270,39 @@ export class TelegramNotifier {
         'Quick buttons: 15m, 30m, 1h, 4h, 8h, 24h. Use Revoke now to end the grant.',
         'They cover all requests for the named service, including requests that normally need a new decision.',
         'Expiry or revocation blocks new sessions under this grant. Existing sessions keep their normal lifetime.',
+      ].join('\n'), this.sendOptions({ parse_mode: undefined }));
+    });
+    this.bot.onText(/^\/alerts(?:@\w+)?(?:\s+([^\n]*))?\s*$/i, async (msg, match) => {
+      const chatId = String(msg.chat.id);
+      if (!this.isConfiguredChat(chatId)) return;
+      if (!this.isConfiguredChatPaired() || !msg.from || msg.from.is_bot || msg.sender_chat
+        || !this.isAllowedApprover(msg.from)) {
+        await this.safeSendMessage(chatId, 'Access denied. Pair this chat and use an allowed approver account.',
+          this.sendOptions({ parse_mode: undefined }));
+        return;
+      }
+      const action = (match?.[1] || 'status').trim().toLowerCase();
+      if (!['on', 'off', 'status'].includes(action)) {
+        await this.safeSendMessage(chatId, 'Usage: /alerts on, /alerts off or /alerts status.',
+          this.sendOptions({ parse_mode: undefined }));
+        return;
+      }
+      if (this.webhookAlerts && action !== 'status') {
+        try {
+          this.webhookAlerts.setAlertsEnabled(action === 'on');
+        } catch {
+          await this.safeSendMessage(chatId, 'Could not save the alert setting. The previous setting remains active.',
+            this.sendOptions({ parse_mode: undefined }));
+          return;
+        }
+      }
+      await this.safeSendMessage(chatId, [
+        `Home Assistant / webhook alerts: ${this.webhookAlertStatus()}.`,
+        'Telegram approval requests remain active.',
+        ...(this.webhookAlerts ? [
+          'This setting survives restarts. Use /alerts on or /alerts off to change it.',
+          ...(!this.webhookAlerts.isAlertsEnabled() ? ['Queued alerts are cancelled. Re-enabling does not replay them.'] : []),
+        ] : []),
       ].join('\n'), this.sendOptions({ parse_mode: undefined }));
     });
     this.bot.onText(/^\/(allow|revoke)(?:@\w+)?(?:\s+([^\n]*))?\s*$/i, async (msg, match) => {
@@ -488,7 +534,7 @@ export class TelegramNotifier {
       const grants = temporary.map(item => `${item.service}: ${Math.ceil((item.expiresAt - Date.now()) / 60000)} min${item.accessMode ? ` (${item.accessMode})` : ''}`).join('\n');
       await this.safeSendMessage(
         chatId,
-        `ClawGuard Status\n\nPairing: ${status}\nShowlog: ${showlog}\nTemporary approvals:\n${grants || 'None'}`,
+        `ClawGuard Status\n\nPairing: ${status}\nEnhanced alerts (webhook): ${this.webhookAlertStatus()}\nShowlog: ${showlog}\nTemporary approvals:\n${grants || 'None'}`,
         this.sendOptions({ parse_mode: undefined }),
       );
     });

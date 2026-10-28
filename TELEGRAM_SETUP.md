@@ -113,7 +113,8 @@ Tap **Approve 1h** and the request goes through!
 | `/help` | Lists commands, arguments and examples |
 | `/pair <secret>` | Links your Telegram to ClawGuard (required before approving) |
 | `/unpair` | Removes pairing and revokes temporary service approvals |
-| `/status` | Shows pairing, showlog and temporary approvals with time remaining |
+| `/status` | Shows pairing, enhanced alerts, showlog and temporary approvals with time remaining |
+| `/alerts [on\|off\|status]` | Shows or changes Home Assistant/webhook alerts; Telegram approvals stay active |
 | `/showlog [on\|off]` | Shows or changes info-only logs for automatic calls |
 | `/allow` | Opens buttons to choose a service and duration |
 | `/allow <service>` | Opens approval buttons for the named service |
@@ -122,9 +123,37 @@ Tap **Approve 1h** and the request goes through!
 | `/revoke <service>` | Revokes temporary and cached approvals for that service |
 
 ClawGuard registers these commands in the Telegram bot menu at startup. All
-commands apply only in the configured chat. `/allow` and `/revoke` also require
+commands apply only in the configured chat. `/allow`, `/revoke` and `/alerts` also require
 a paired chat and an account permitted by `allowedApprovers`, when configured.
-Bot accounts and anonymous group senders cannot create or revoke grants.
+Bot accounts and anonymous group senders cannot create or revoke grants or change alerts.
+
+### Home Assistant and webhook alerts
+
+Send `/alerts off` to stop new enhanced alerts without changing Telegram
+approval requests, service policies or logs. This cancels queued escalation
+timers as well. The setting is global for the configured outbound webhook and
+persists in SQLite across restarts. `/alerts on` enables alerts for new requests;
+it does not replay requests queued or received while alerts were off. `/alerts`
+and `/alerts status` show the current setting.
+
+An alert already sent cannot be recalled. If `cancelOnResolve: true`, ClawGuard
+still sends its matching `approval_resolved` event when the request finishes,
+so Home Assistant can clear it. Muted requests generate neither event.
+
+The webhook must already be configured with `notifications.webhook.enabled: true`.
+The command cannot enable a webhook disabled in YAML. To disable the channel
+through configuration instead, set the existing flag and restart ClawGuard:
+
+```yaml
+notifications:
+  webhook:
+    enabled: false
+```
+
+Keep the existing Telegram configuration and other webhook fields. Changing
+`escalateAfterSeconds` to `0` sends alerts immediately; it does not disable them.
+
+### Temporary service approvals
 
 To permit work while you cannot answer approval requests:
 

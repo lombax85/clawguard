@@ -162,6 +162,11 @@ export class AuditLogger {
         paired_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS notification_preferences (
+        channel TEXT PRIMARY KEY,
+        enabled INTEGER NOT NULL CHECK (enabled IN (0, 1))
+      );
+
       CREATE TABLE IF NOT EXISTS services_override (
         service_name TEXT PRIMARY KEY,
         config_json TEXT NOT NULL,
@@ -395,6 +400,19 @@ export class AuditLogger {
   getShowlogEnabledChatIds(): string[] {
     const rows = this.db.prepare('SELECT chat_id as chatId FROM telegram_paired_users WHERE showlog = 1').all() as { chatId: string }[];
     return rows.map(r => r.chatId);
+  }
+
+  getWebhookAlertsEnabled(): boolean {
+    const row = this.db.prepare("SELECT enabled FROM notification_preferences WHERE channel = 'webhook'")
+      .get() as { enabled: number } | undefined;
+    return row === undefined || row.enabled === 1;
+  }
+
+  setWebhookAlertsEnabled(enabled: boolean): void {
+    this.db.prepare(`
+      INSERT INTO notification_preferences (channel, enabled) VALUES ('webhook', ?)
+      ON CONFLICT(channel) DO UPDATE SET enabled = excluded.enabled
+    `).run(enabled ? 1 : 0);
   }
 
   // ─── Service overrides (admin API) ────────────────────────

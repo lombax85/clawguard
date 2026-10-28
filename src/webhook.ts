@@ -1,5 +1,10 @@
 import { WebhookConfig, RequestMeta, RequestApprovalInfo } from './types';
 
+export interface WebhookAlertPreferences {
+  getWebhookAlertsEnabled(): boolean;
+  setWebhookAlertsEnabled(enabled: boolean): void;
+}
+
 /**
  * Outbound webhook notifier — fire-and-forget side channel.
  *
@@ -19,18 +24,43 @@ import { WebhookConfig, RequestMeta, RequestApprovalInfo } from './types';
  */
 export class WebhookNotifier {
   private config: WebhookConfig;
+  private alertsEnabled: boolean;
   // requestId → timer for the deferred 'approval_required' send
   private pendingTimers: Map<string, NodeJS.Timeout> = new Map();
   // requestIds for which 'approval_required' was actually sent
   // (so we know whether to send the matching 'approval_resolved')
   private firedRequests: Set<string> = new Set();
 
-  constructor(config: WebhookConfig) {
+  constructor(config: WebhookConfig, private preferences?: WebhookAlertPreferences) {
     this.config = config;
+    this.alertsEnabled = config.enabled && (preferences?.getWebhookAlertsEnabled() ?? true);
     const dest = new URL(config.url);
     const escalate = config.escalateAfterSeconds ?? 0;
     const escalateNote = escalate > 0 ? `, escalate after ${escalate}s` : '';
     console.log(`🪝 Webhook notifier started — ${config.method ?? 'POST'} ${dest.protocol}//${dest.host}${dest.pathname}${escalateNote}`);
+    if (!this.alertsEnabled) console.log('🔕 Webhook alerts are off');
+  }
+
+  isAlertsEnabled(): boolean {
+    return this.alertsEnabled;
+  }
+
+  setAlertsEnabled(enabled: boolean): void {
+    if (enabled && !this.config.enabled) throw new Error('Webhook is disabled in configuration');
+    // Save first. A failed write must not silently change the running state.
+    this.preferences?.setWebhookAlertsEnabled(enabled);
+    this.alertsEnabled = enabled;
+    if (!enabled) this.clearPendingTimers();
+  }
+
+  private clearPendingTimers(): void {
+    for (const timer of this.pendingTimers.values()) clearTimeout(timer);
+    this.pendingTimers.clear();
+  }
+
+  stop(): void {
+    this.alertsEnabled = false;
+    this.clearPendingTimers();
   }
 
   notifyApprovalRequired(
@@ -42,6 +72,7 @@ export class WebhookNotifier {
     meta?: RequestMeta,
     approvalInfo?: RequestApprovalInfo
   ): void {
+    if (!this.alertsEnabled) return;
     const payload = {
       event: 'approval_required',
       requestId,
@@ -62,6 +93,7 @@ export class WebhookNotifier {
 
     const fire = () => {
       this.pendingTimers.delete(requestId);
+      if (!this.alertsEnabled) return;
       this.firedRequests.add(requestId);
       void this.send(payload);
     };
@@ -85,7 +117,8 @@ export class WebhookNotifier {
       return;
     }
 
-    // Only send 'resolved' if 'required' actually fired for this requestId
+    // Keep resolution events for alerts already sent, even after /alerts off,
+    // so the receiver can clear them. Muted requests never enter this set.
     if (!this.firedRequests.delete(requestId)) return;
 
     if (!this.config.cancelOnResolve) return;

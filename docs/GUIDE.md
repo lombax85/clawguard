@@ -1031,7 +1031,8 @@ Path-prefix routing (`/:service/*`) cleanly disambiguates those services. Host-b
 | `/help` | List commands and usage examples |
 | `/pair <secret>` | Pair your Telegram account with ClawGuard |
 | `/unpair` | Remove pairing and revoke temporary service grants |
-| `/status` | Show pairing, logging and temporary grants |
+| `/status` | Show pairing, enhanced alerts, logging and temporary grants |
+| `/alerts [on\|off\|status]` | Control Home Assistant/webhook alerts without disabling Telegram approvals |
 | `/showlog [on\|off]` | Show or change automatic-call logs |
 | `/allow [service]` | Choose a service and approval duration with buttons |
 | `/allow <service> <duration>` | Temporarily approve an HTTP or SSH service with silent logs |
@@ -1040,6 +1041,13 @@ Path-prefix routing (`/:service/*`) cleanly disambiguates those services. Host-b
 
 See [Telegram commands](../TELEGRAM_SETUP.md#telegram-bot-commands) for durations,
 button behavior and expiry rules.
+
+Use `/alerts off` to stop Home Assistant/webhook alerts and cancel queued
+escalation timers. The setting survives restarts. `/alerts on` enables alerts
+for new requests without replaying muted requests. Already-sent alerts can
+still receive a resolution event so the receiver can clear them. See
+[webhook alert controls](../TELEGRAM_SETUP.md#home-assistant-and-webhook-alerts)
+for configuration and permissions.
 
 ## Environment Variables
 

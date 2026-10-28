@@ -85,7 +85,8 @@ async function main() {
   // Init Webhook (optional informational side channel — fire-and-forget)
   let webhookNotifier: WebhookNotifier | undefined;
   if (config.notifications?.webhook?.enabled) {
-    webhookNotifier = new WebhookNotifier(config.notifications.webhook);
+    webhookNotifier = new WebhookNotifier(config.notifications.webhook, audit);
+    telegram?.configureWebhookAlerts(webhookNotifier);
   } else {
     console.log('🪝 Webhook: disabled (not configured)');
   }
@@ -262,6 +263,7 @@ async function main() {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log('\n🛑 Shutting down ClawGuard...');
+    webhookNotifier?.stop();
     // Stop accepting new requests before waiting for protocol brokers and
     // Telegram's active long poll to finish.
     await Promise.all([
