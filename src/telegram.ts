@@ -742,8 +742,8 @@ export class TelegramNotifier {
         case 'approve_1h':
           approved = true;
           ttlSeconds = 3600;
-          ackText = '✅ Approved for 1 hour';
-          finalText = `${originalText}\n\n✅ *Approved for 1h* by ${userName}`;
+          ackText = '✅ Approved for 1 hour (method-wide)';
+          finalText = `${originalText}\n\n✅ *Approved for 1h (method-wide)* by ${userName}`;
           break;
         case 'approve_24h':
           approved = true;
@@ -864,7 +864,8 @@ export class TelegramNotifier {
       ].join('\n');
 
       this.pendingTexts.set(requestId, text);
-      this.httpMessages.set(requestId, { messageId: 0, actions: new Set(['approve_once', 'deny']) });
+      const actions = new Set(['approve_once', 'deny', ...(approvalInfo?.oneTime ? [] : ['approve_1h'])]);
+      this.httpMessages.set(requestId, { messageId: 0, actions });
       const scopeAction = approvalInfo?.oneTime ? undefined
         : this.scopeMenu.register(requestId, service, method, path, deadline, allowedMethods);
 
@@ -880,6 +881,9 @@ export class TelegramNotifier {
               { text: '✅ Only this request', callback_data: `approve_once:${requestId}` },
               ...(scopeAction ? [{ text: '🎯 Choose scope', callback_data: scopeAction }] : []),
               { text: '❌ Deny', callback_data: `deny:${requestId}` },
+            ], [
+              { text: '⚡ Quick once', callback_data: `approve_once:${requestId}` },
+              { text: '⚡ 1h method-wide', callback_data: `approve_1h:${requestId}` },
             ]],
           },
         }));
@@ -891,7 +895,7 @@ export class TelegramNotifier {
         }
 
         if (this.pendingCallbacks.has(requestId)) {
-          this.httpMessages.set(requestId, { messageId: sent.message_id, actions: new Set(['approve_once', 'deny']) });
+          this.httpMessages.set(requestId, { messageId: sent.message_id, actions });
           this.scopeMenu.attach(requestId, sent.message_id);
         }
 

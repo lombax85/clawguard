@@ -155,7 +155,7 @@ export class ApprovalManager {
     const exactKey = this.approvalKey(service, method, path);
     const exact = this.activeApprovals.get(exactKey);
     if (exact) {
-      if (Date.now() > exact.expiresAt) {
+      if (Date.now() >= exact.expiresAt) {
         this.activeApprovals.delete(exactKey);
         this.audit.revokeApprovalInDb(service, method, path);
         console.log(`⏰ Approval expired for ${service} ${method.toUpperCase()} path=${path}`);
@@ -167,7 +167,7 @@ export class ApprovalManager {
     const wideKey = this.approvalKey(service, method, null);
     const wide = this.activeApprovals.get(wideKey);
     if (wide) {
-      if (Date.now() > wide.expiresAt) {
+      if (Date.now() >= wide.expiresAt) {
         this.activeApprovals.delete(wideKey);
         this.audit.revokeApprovalInDb(service, method, null);
         console.log(`⏰ Approval expired for ${service} ${method.toUpperCase()} (method-wide)`);
@@ -183,7 +183,7 @@ export class ApprovalManager {
     if (path === undefined) {
       const wide = this.activeApprovals.get(this.approvalKey(service, method, null));
       if (!wide) return false;
-      if (Date.now() > wide.expiresAt) {
+      if (Date.now() >= wide.expiresAt) {
         this.activeApprovals.delete(this.approvalKey(service, method, null));
         this.audit.revokeApprovalInDb(service, method, null);
         return false;
@@ -612,7 +612,7 @@ export class ApprovalManager {
   getActiveCount(): number {
     // Clean expired first
     for (const [key, approval] of this.activeApprovals) {
-      if (Date.now() > approval.expiresAt) {
+      if (Date.now() >= approval.expiresAt) {
         this.activeApprovals.delete(key);
       }
     }

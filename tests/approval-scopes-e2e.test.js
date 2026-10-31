@@ -42,6 +42,59 @@ async function withAdmin(f, run) {
   try { await run(admin); } finally { await new Promise(resolve => server.close(resolve)); }
 }
 
+test('initial quick buttons keep the existing choices and Quick once never grants reusable access', async () => {
+  await fixture(async f => {
+    const r = await begin(f, '/quick');
+    assert.deepEqual(r.menu.options.reply_markup.inline_keyboard.map(row => row.map(b => b.text)), [
+      ['✅ Only this request', '🎯 Choose scope', '❌ Deny'],
+      ['⚡ Quick once', '⚡ 1h method-wide'],
+    ]);
+    const quick = button(r.menu, '⚡ Quick once');
+    await f.transport.tap(r.menu, quick);
+    assert.equal(await r.response, 200);
+    assert.deepEqual(f.audit.getActiveApprovals(), []);
+    assert.deepEqual(f.audit.getScopedApprovals(), []);
+    await f.transport.tap(r.menu, quick);
+    await deny(f, '/quick');
+  }, 3000);
+});
+
+test('quick 1h is limited to its service and method, survives restart, and expires exactly on time', async t => {
+  await fixture(async f => {
+    f.config.services.other = structuredClone(f.config.services.app);
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    try {
+      const r = await begin(f, '/repo/refs?service=upload');
+      const quick = button(r.menu, '⚡ 1h method-wide');
+      for (const overrides of [{ from: { id: 8, is_bot: false } }, { from: { id: 7, is_bot: true } },
+        { message: { ...r.menu, chat: { id: 200 } } }, { message: { ...r.menu, message_id: -1 } }]) {
+        await f.transport.tap(r.menu, quick, overrides);
+        assert.equal(f.hits(), 0);
+      }
+      await Promise.all([f.transport.tap(r.menu, quick), f.transport.tap(r.menu, quick)]);
+      assert.equal(await r.response, 200);
+      assert.match(r.menu.text, /1h \(method-wide\)/);
+      const [grant] = f.audit.getActiveApprovals();
+      assert.equal(grant.method, 'GET');
+      assert.equal(grant.path, null);
+      assert.equal(grant.expiresAt - grant.approvedAt, 3600_000);
+      assert.equal(await f.request('GET', 'app', '/different-repo?new=query'), 200);
+      await deny(f, '/repo/refs?service=upload', 'POST');
+      await deny(f, '/repo/refs?service=upload', 'GET', 'other');
+      await f.restart();
+      t.mock.timers.setTime(grant.expiresAt - 1);
+      assert.equal(await f.request('GET', 'app', '/different-repo'), 200);
+      t.mock.timers.setTime(grant.expiresAt);
+      await deny(f, '/different-repo');
+      const renewed = await begin(f, '/repo/refs');
+      await renewed.tap('⚡ 1h method-wide');
+      assert.equal(await renewed.response, 200);
+      await f.transport.command('/revoke app');
+      await deny(f, '/different-repo');
+    } finally { t.mock.timers.reset(); }
+  }, 3000);
+});
+
 test('week and month buttons persist the selected duration and expire at the exact boundary', async t => {
   for (const [label, days] of [['1w', 7], ['1month', 30]]) {
     await t.test(label, async t => {
@@ -304,6 +357,9 @@ test('a root scope cannot authorize a plugin operation that requires a fresh dec
     assert.deepEqual(prompt.options.reply_markup.inline_keyboard.flat().map(b => b.text), ['✅ Approve this request', '❌ Deny']);
     // Let sendMessage finish binding the returned message before the callback.
     await delay(0);
+    const forgedWide = button(prompt, '✅ Approve this request').replace('approve_once:', 'approve_1h:');
+    await f.transport.tap(prompt, forgedWide);
+    assert.match(f.transport.answers.at(-1).text, /Choice not available/);
     await f.transport.tap(prompt, button(prompt, '❌ Deny'));
     assert.equal(await decision, false);
   }, 3000);
