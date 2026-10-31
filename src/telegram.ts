@@ -882,7 +882,6 @@ export class TelegramNotifier {
               ...(scopeAction ? [{ text: '🎯 Choose scope', callback_data: scopeAction }] : []),
               { text: '❌ Deny', callback_data: `deny:${requestId}` },
             ], [
-              { text: '⚡ Quick once', callback_data: `approve_once:${requestId}` },
               { text: '⚡ 1h method-wide', callback_data: `approve_1h:${requestId}` },
             ]],
           },

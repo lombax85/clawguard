@@ -42,14 +42,14 @@ async function withAdmin(f, run) {
   try { await run(admin); } finally { await new Promise(resolve => server.close(resolve)); }
 }
 
-test('initial quick buttons keep the existing choices and Quick once never grants reusable access', async () => {
+test('initial buttons offer one single-request action and the method-wide shortcut', async () => {
   await fixture(async f => {
     const r = await begin(f, '/quick');
     assert.deepEqual(r.menu.options.reply_markup.inline_keyboard.map(row => row.map(b => b.text)), [
       ['✅ Only this request', '🎯 Choose scope', '❌ Deny'],
-      ['⚡ Quick once', '⚡ 1h method-wide'],
+      ['⚡ 1h method-wide'],
     ]);
-    const quick = button(r.menu, '⚡ Quick once');
+    const quick = button(r.menu, '✅ Only this request');
     await f.transport.tap(r.menu, quick);
     assert.equal(await r.response, 200);
     assert.deepEqual(f.audit.getActiveApprovals(), []);

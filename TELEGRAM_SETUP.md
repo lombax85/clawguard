@@ -102,16 +102,15 @@ You should receive a Telegram message like:
 🔹 Time: 28/2/2026, 15:30:00
 
 [✅ Only this request] [🎯 Choose scope] [❌ Deny]
-[⚡ Quick once] [⚡ 1h method-wide]
+[⚡ 1h method-wide]
 ```
 
 Tap **Only this request** to approve one request. To reuse an approval, tap
 **Choose scope**, review its scope, then tap a duration.
 
-The second row provides quick approvals. **Quick once** approves only the
-pending request, like **Only this request**. **1h method-wide** approves the
+The second row provides a quick approval. **1h method-wide** approves the
 request's HTTP method on all paths and queries of that service for one hour.
-It does not approve other methods or other services. These shortcuts do not
+It does not approve other methods or other services. This shortcut does not
 replace the scope editor. Requests that require a fresh decision do not offer
 the method-wide shortcut.
 
@@ -160,7 +159,7 @@ request. Editing does not extend its approval timeout. Menu buttons are bound
 to the message and the approver who opened the editor. Old buttons, double
 taps and expired requests cannot create or extend a grant. If a URL cannot
 be safely matched, or is too long for the editor, **Choose scope** is not
-offered. The quick buttons remain available for ordinary HTTP requests.
+offered. The quick approval remains available for ordinary HTTP requests.
 
 Scopes retain their expiry after a restart. A service configuration change
 invalidates its scopes when next used. The dashboard's **Approvals** page shows
