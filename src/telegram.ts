@@ -194,7 +194,7 @@ export class TelegramNotifier {
         { command: 'status', description: 'Show pairing, enhanced alerts and temporary approvals' },
         { command: 'alerts', description: 'Home Assistant/webhook alerts: on, off or status' },
         { command: 'allow', description: 'Choose a service and duration with buttons' },
-        { command: 'revoke', description: 'Revoke approvals for one service' },
+        { command: 'revoke', description: 'Choose an active temporary approval to revoke' },
         { command: 'showlog', description: 'Show or change automatic-call logs: on or off' },
         { command: 'pair', description: 'Pair this chat with ClawGuard' },
         { command: 'unpair', description: 'Remove this chat pairing' },
@@ -264,9 +264,11 @@ export class TelegramNotifier {
         '/allow <service> — Open the approval buttons for that service.',
         '/allow <service> <duration> — Allow HTTP or SSH requests for one service.',
         '/allow <service> <duration> read_only|read_write — Allow FTP/FTPS leases.',
+        '/revoke — Choose an active temporary approval to revoke.',
         '/revoke <service> — Revoke all approvals for that service.', '',
         'Example: /allow lombax-coolify-1 1h',
         'Duration: 1m to 24h. Temporary approvals enable silent showlog messages.',
+        'An /allow replaces earlier approvals for that service. Use /showlog off to mute its logs.',
         'Quick buttons: 15m, 30m, 1h, 4h, 8h, 24h. Use Revoke now to end the grant.',
         'They cover all requests for the named service, including requests that normally need a new decision.',
         'Expiry or revocation blocks new sessions under this grant. Existing sessions keep their normal lifetime.',
@@ -323,6 +325,10 @@ export class TelegramNotifier {
       const { services, controller } = this.serviceCommands;
       try {
         if (action === 'revoke') {
+          if (args.length === 0) {
+            await this.serviceMenu.openRevoke(msg.from);
+            return;
+          }
           if (args.length !== 1) throw new Error('Usage: /revoke <service>');
           const revoked = controller.revokeApproval(name);
           await this.safeSendMessage(chatId, revoked ? `Approvals revoked for ${name}.` : `No active approval for ${name}.`, this.sendOptions({ parse_mode: undefined }));
@@ -563,7 +569,7 @@ export class TelegramNotifier {
       const icon = arg === 'on' ? '🔔' : '🔕';
       await this.safeSendMessage(
         chatId,
-        `${icon} Showlog *${arg}* — you will ${arg === 'on' ? 'now' : 'no longer'} receive info-only notifications for auto-approved calls. Temporary service approvals always keep silent logs enabled.`,
+        `${icon} Showlog *${arg}* — you will ${arg === 'on' ? 'now' : 'no longer'} receive info-only notifications for auto-approved calls, including temporary service approvals.`,
         { parse_mode: 'Markdown' },
       );
     });
@@ -998,10 +1004,9 @@ export class TelegramNotifier {
     reason: string,
     meta?: RequestMeta,
     approvalInfo?: RequestApprovalInfo,
-    options?: { force?: boolean; silent?: boolean },
+    options?: { silent?: boolean },
   ): void {
-    const chatIds = options?.force && this.isConfiguredChatPaired()
-      ? [this.config.chatId] : this.audit.getShowlogEnabledChatIds();
+    const chatIds = this.audit.getShowlogEnabledChatIds().filter(chatId => this.isConfiguredChat(chatId));
     if (chatIds.length === 0) return;
 
     const text = [

@@ -19,7 +19,8 @@ interface Menu {
   configHash?: string;
   accessMode?: FtpAccessMode;
   grant?: string;
-  step: 'services' | 'mode' | 'duration' | 'revoke';
+  grants?: Record<string, string>;
+  step: 'services' | 'mode' | 'duration' | 'revoke' | 'revoke-services';
 }
 
 export interface ServiceMenuOptions {
@@ -98,8 +99,11 @@ export class TelegramServiceMenu {
     const names = menu.names!;
     const page = menu.page ?? 0;
     const pages = Math.max(1, Math.ceil(names.length / PAGE_SIZE));
+    const text = menu.step === 'revoke-services'
+      ? `Revoke service approvals\nChoose a service with an active /allow (${page + 1}/${pages}).\nThis revokes its temporary and cached approvals.`
+      : `Temporary service approval\nChoose a service (${page + 1}/${pages}).\nYou will choose its duration next.`;
     await this.display(menu,
-      `Temporary service approval\nChoose a service (${page + 1}/${pages}).\nYou will choose its duration next.`, token => {
+      text, token => {
         const rows = names.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE).map((name, index) => [{
           text: name, callback_data: `${PREFIX}${token}:service:${page * PAGE_SIZE + index}`,
         }]);
@@ -117,7 +121,7 @@ export class TelegramServiceMenu {
     await this.display(menu, header + (menu.step === 'mode'
       ? 'Choose access for new FTP/FTPS leases. You will choose the duration next.'
       : `${menu.accessMode ? `Access: ${menu.accessMode === 'read_only' ? 'Read only' : 'Read/write'}\n` : ''}`
-        + 'Choose the duration to approve all requests for this service.\nSilent showlog messages stay enabled.'), token => ({
+        + 'Choose the duration to approve all requests for this service.\nThis replaces earlier approvals and enables silent logs. Use /showlog off to mute them.'), token => ({
       inline_keyboard: menu.step === 'mode'
         ? [[{ text: '👁 Read only', callback_data: `${PREFIX}${token}:mode:read_only` },
           { text: '✍️ Read/write', callback_data: `${PREFIX}${token}:mode:read_write` }],
@@ -128,6 +132,19 @@ export class TelegramServiceMenu {
           [{ text: '← Services', callback_data: `${PREFIX}${token}:back` },
             { text: 'Cancel', callback_data: `${PREFIX}${token}:cancel` }]],
     }));
+  }
+
+  async openRevoke(user: User): Promise<void> {
+    const approvals = this.options.controller()?.getTemporaryServiceApprovals() ?? [];
+    if (!approvals.length) {
+      await this.options.send('No active temporary approvals. Use /revoke <service> to revoke cached HTTP approvals.', { inline_keyboard: [] });
+      return;
+    }
+    await this.showServices({
+      userId: user.id, expiresAt: Date.now() + MENU_TTL_MS, step: 'revoke-services', page: 0,
+      names: approvals.map(item => item.service).sort(),
+      grants: Object.fromEntries(approvals.map(item => [item.service, JSON.stringify(item)])),
+    });
   }
 
   async open(user: User, name?: string): Promise<void> {
@@ -153,7 +170,7 @@ export class TelegramServiceMenu {
     await this.display(menu,
       `${approval.service}: temporary approval active until ${new Date(approval.expiresAt).toLocaleString('it-IT', { timeZone: 'Europe/Rome' })} (Europe/Rome).\n`
       + `Target: ${this.target(service)}\n${approval.accessMode ? `Access: ${approval.accessMode}\n` : ''}`
-      + `Showlog is on. Calls covered by this approval produce silent log messages.\nRevoke: /revoke ${approval.service}`,
+      + `Earlier approvals were replaced. Showlog is on; use /showlog off to mute logs.\nRevoke: /revoke ${approval.service}`,
       token => ({ inline_keyboard: [[{ text: '🔒 Revoke now', callback_data: `${PREFIX}${token}:revoke` }]] }));
   }
 
@@ -170,20 +187,21 @@ export class TelegramServiceMenu {
     const menu = this.menus.get(token);
     if (!menu || menu.expiresAt <= Date.now() || parts.length > 4) {
       if (menu?.expiresAt && menu.expiresAt <= Date.now()) this.menus.delete(token);
-      await this.answer(query.id, 'Menu expired. Send /allow to open a new menu.');
+      await this.answer(query.id, 'Menu expired. Send /allow or /revoke to open a new menu.');
       return true;
     }
     if (menu.userId !== query.from.id || menu.messageId !== query.message.message_id) {
-      await this.answer(query.id, 'Open your own menu with /allow.');
+      await this.answer(query.id, 'Open your own menu with /allow or /revoke.');
       return true;
     }
     const controller = this.options.controller();
     if (!controller) { await this.answer(query.id, 'Service commands are not ready.'); return true; }
     const number = value !== undefined && /^\d+$/.test(value) ? Number(value) : -1;
+    const serviceList = menu.step === 'services' || menu.step === 'revoke-services';
     const valid = (action === 'cancel' && value === undefined && menu.step !== 'revoke')
       || (action === 'back' && value === undefined && (menu.step === 'mode' || menu.step === 'duration'))
-      || (action === 'page' && menu.step === 'services' && number >= 0 && number < Math.ceil(menu.names!.length / PAGE_SIZE))
-      || (action === 'service' && menu.step === 'services' && number >= (menu.page ?? 0) * PAGE_SIZE
+      || (action === 'page' && serviceList && number >= 0 && number < Math.ceil(menu.names!.length / PAGE_SIZE))
+      || (action === 'service' && serviceList && number >= (menu.page ?? 0) * PAGE_SIZE
         && number < Math.min(((menu.page ?? 0) + 1) * PAGE_SIZE, menu.names!.length))
       || (action === 'mode' && menu.step === 'mode' && ['read_only', 'read_write'].includes(value))
       || (action === 'duration' && menu.step === 'duration' && DURATIONS.includes(value))
@@ -195,7 +213,7 @@ export class TelegramServiceMenu {
     try {
       if (action === 'cancel') {
         await this.answer(query.id, 'Cancelled.');
-        await this.finish(menu, 'Temporary approval cancelled.');
+        await this.finish(menu, menu.step === 'revoke-services' ? 'Revocation cancelled. Approvals unchanged.' : 'Temporary approval cancelled.');
         return true;
       }
       if (action === 'page') {
@@ -208,16 +226,18 @@ export class TelegramServiceMenu {
         await this.showServices({ ...menu, step: 'services', service: undefined, configHash: undefined, accessMode: undefined });
         return true;
       }
-      if (action === 'revoke') {
-        const current = controller.getTemporaryServiceApprovals().find(item => item.service === menu.service);
-        if (!current || JSON.stringify(current) !== menu.grant) {
-          await this.answer(query.id, 'This approval expired or was replaced. Check /status.');
-          await this.finish(menu, 'This approval expired or was replaced. Check /status.');
+      if (action === 'revoke' || (action === 'service' && menu.step === 'revoke-services')) {
+        const name = action === 'revoke' ? menu.service! : menu.names![number];
+        const expected = action === 'revoke' ? menu.grant : menu.grants![name];
+        const current = controller.getTemporaryServiceApprovals().find(item => item.service === name);
+        if (!current || JSON.stringify(current) !== expected) {
+          await this.answer(query.id, 'This approval expired or was replaced. Open /revoke again.');
+          await this.finish(menu, 'This approval expired or was replaced. Open /revoke again.');
           return true;
         }
-        controller.revokeApproval(menu.service!);
+        controller.revokeApproval(name);
         await this.answer(query.id, 'Approval revoked.');
-        await this.finish(menu, `Approvals revoked for ${menu.service}. Existing sessions keep their normal lifetime.`);
+        await this.finish(menu, `Approvals revoked for ${name}. Existing sessions keep their normal lifetime.`);
         return true;
       }
       const name = action === 'service' ? menu.names![number] : menu.service!;

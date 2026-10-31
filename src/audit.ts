@@ -432,6 +432,8 @@ export class AuditLogger {
   saveTemporaryServiceApproval(approval: TemporaryServiceApproval): void {
     this.db.transaction(() => {
       this.revokeTemporaryServiceApprovals(approval.service);
+      // A shorter /allow must replace earlier HTTP approvals, including on restart.
+      this.revokeApprovalInDb(approval.service);
       this.db.prepare('INSERT INTO temporary_service_approvals(service, approval_json, expires_at) VALUES (?, ?, ?)')
         .run(approval.service, JSON.stringify(approval), approval.expiresAt);
       this.setShowlog(approval.chatId, true);

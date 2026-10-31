@@ -1037,7 +1037,12 @@ Path-prefix routing (`/:service/*`) cleanly disambiguates those services. Host-b
 | `/allow [service]` | Choose a service and approval duration with buttons |
 | `/allow <service> <duration>` | Temporarily approve an HTTP or SSH service with silent logs |
 | `/allow <service> <duration> read_only\|read_write` | Temporarily approve FTP/FTPS leases with explicit permissions |
+| `/revoke` | Choose a service with an active temporary grant to revoke |
 | `/revoke <service>` | Revoke the service's temporary and cached approvals |
+
+`/allow` replaces earlier cached approvals for that service and enables logs.
+Use `/showlog off` to stop automatic-call logs, including temporary-grant logs.
+After the grant expires, the configured service policy applies again.
 
 See [Telegram commands](../TELEGRAM_SETUP.md#telegram-bot-commands) for durations,
 button behavior and expiry rules.

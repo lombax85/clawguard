@@ -120,6 +120,7 @@ Tap **Approve 1h** and the request goes through!
 | `/allow <service>` | Opens approval buttons for the named service |
 | `/allow <service> <duration>` | Temporarily approves HTTP requests or SSH sessions for one service |
 | `/allow <service> <duration> read_only\|read_write` | Temporarily approves FTP/FTPS leases with the selected access mode |
+| `/revoke` | Opens buttons for services with an active temporary approval |
 | `/revoke <service>` | Revokes temporary and cached approvals for that service |
 
 ClawGuard registers these commands in the Telegram bot menu at startup. All
@@ -174,8 +175,18 @@ that opened the menu. The confirmation's revoke button lasts until the grant
 expires. Each click replaces the previous buttons. A changed or
 deleted service requires a new review. Double taps cannot duplicate or extend
 a grant. A stale **Revoke now** button cannot revoke a newer grant. After a
-ClawGuard restart, use `/allow` to open a new menu, or `/revoke <service>` to
-revoke an existing grant.
+ClawGuard restart, send `/revoke` to get fresh buttons for active grants.
+
+To revoke a grant from the service list:
+
+1. Send `/revoke`.
+2. Tap the service to revoke its temporary and cached approvals.
+
+The list includes only services with an active `/allow`. Use **Next** or
+**Previous** to change pages. **Cancel** closes the list without a change.
+If a grant expires or is renewed after the list opens, its old button cannot
+revoke it. Send `/revoke` again to get the current list. The command
+`/revoke <service>` also works for a service with cached HTTP approvals only.
 
 Use a duration from `1m` to `24h`, such as `30m`, `1h` or `8h`. A grant covers
 all new requests for that service, including operations that normally require
@@ -183,17 +194,27 @@ a fresh decision. It does not bypass method allowlists, blocked operations,
 target checks, host-key checks or credential isolation. Pending prompts retain
 their original decision and timeout; the grant applies to subsequent requests.
 
-Creating a grant enables `/showlog`. Calls under that grant always send silent,
-info-only log messages, even if `/showlog off` is sent later. These messages do
-not have approval buttons. Telegram suppresses their notification sound;
-client notification display depends on the Telegram app settings. Logs for
-other automatically approved services follow the normal showlog setting.
+Creating or renewing a grant replaces earlier cached HTTP approvals for the
+same service, including approvals for an exact path. For example, `/allow app
+30m` replaces an earlier GET approval for one hour. That GET approval cannot
+resume after the 30 minutes. Approvals for other services remain valid.
+
+Creating or renewing a grant enables `/showlog`. While showlog is on, calls
+under the grant send silent, info-only log messages with no approval buttons.
+`/showlog off` stops these logs and other automatic-call logs. This setting
+persists across restarts. `/showlog on` enables logs again. A new `/allow` also
+enables logs again. This setting does not stop approval requests or the audit
+log. A message already sent to Telegram can still arrive after the setting
+changes. Telegram suppresses sound for temporary-grant logs; notification
+display depends on the Telegram app settings.
 
 Grants persist across restarts with their original expiry. A service
 configuration change invalidates its grant when it is next used. Expiry,
 revocation or unpairing stops use of the grant for new requests. Existing SSH
-sessions and FTP leases keep their normal lifetime. Regular service policy
-and other still-valid HTTP approvals apply after a grant expires.
+sessions and FTP leases keep their normal lifetime. After expiry, requests
+follow the configured service policy and any new HTTP approvals explicitly
+granted after `/allow`. An `auto_approve` policy still allows requests; `/allow`
+does not change that policy.
 
 ## Troubleshooting
 

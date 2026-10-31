@@ -51,12 +51,17 @@ export class ApprovalManager {
       && accessMode !== 'read_only' && accessMode !== 'read_write') {
       throw new Error('FTP requires an explicit read_only or read_write access mode');
     }
+    const now = Date.now();
     const approval: TemporaryServiceApproval = {
-      service, protocol, configHash: serviceApprovalHash(config), approvedAt: Date.now(),
-      expiresAt: Date.now() + ttlSeconds * 1000, approvedBy, chatId,
+      service, protocol, configHash: serviceApprovalHash(config), approvedAt: now,
+      expiresAt: now + ttlSeconds * 1000, approvedBy, chatId,
       ...((protocol === 'ftp' || protocol === 'ftps') ? { accessMode } : {}),
     };
     this.audit.saveTemporaryServiceApproval(approval);
+    // Change memory only after the replacement was saved successfully.
+    for (const [key, previous] of this.activeApprovals) {
+      if (previous.service === service) this.activeApprovals.delete(key);
+    }
     return approval;
   }
 
@@ -79,7 +84,7 @@ export class ApprovalManager {
     const mode = approval.accessMode ? `; ${approval.accessMode}` : '';
     this.telegram?.notifyAutoApproved(approval.service, method, path, agentIp,
       `temporary service approval until ${new Date(approval.expiresAt).toISOString()}${mode}`, meta, info,
-      { force: true, silent: true });
+      { silent: true });
   }
 
   constructor(
