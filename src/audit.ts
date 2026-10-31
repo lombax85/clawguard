@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { AuditEntry, Approval, DashboardStats, FtpAccessMode, ServiceConfig, ServiceProposal, TemporaryServiceApproval } from './types';
+import { AuditEntry, Approval, DashboardStats, FtpAccessMode, ServiceConfig, ServiceProposal, TemporaryServiceApproval, ScopedApproval } from './types';
 
 export type SshSessionAction = 'shell' | 'exec';
 
@@ -156,6 +156,14 @@ export class AuditLogger {
         revoked INTEGER NOT NULL DEFAULT 0
       );
 
+      CREATE TABLE IF NOT EXISTS scoped_approvals (
+        id TEXT PRIMARY KEY,
+        service TEXT NOT NULL,
+        approval_json TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        revoked INTEGER NOT NULL DEFAULT 0
+      );
+
       CREATE TABLE IF NOT EXISTS telegram_paired_users (
         chat_id TEXT PRIMARY KEY,
         user_name TEXT,
@@ -288,6 +296,24 @@ export class AuditLogger {
   }
 
   // ─── Approval logging ─────────────────────────────────────
+
+  saveScopedApproval(approval: ScopedApproval): void {
+    this.db.prepare('INSERT INTO scoped_approvals(id, service, approval_json, expires_at) VALUES (?, ?, ?, ?)')
+      .run(approval.id, approval.service, JSON.stringify(approval), approval.expiresAt);
+  }
+
+  getScopedApprovals(): ScopedApproval[] {
+    return (this.db.prepare('SELECT approval_json FROM scoped_approvals WHERE revoked = 0 AND expires_at > ?')
+      .all(Date.now()) as { approval_json: string }[]).map(row => JSON.parse(row.approval_json));
+  }
+
+  revokeScopedApprovals(service?: string, id?: string): number {
+    if (id !== undefined) return this.db.prepare('UPDATE scoped_approvals SET revoked = 1 WHERE service = ? AND id = ? AND revoked = 0')
+      .run(service, id).changes;
+    if (service !== undefined) return this.db.prepare('UPDATE scoped_approvals SET revoked = 1 WHERE service = ? AND revoked = 0')
+      .run(service).changes;
+    return this.db.prepare('UPDATE scoped_approvals SET revoked = 1 WHERE revoked = 0').run().changes;
+  }
 
   logApproval(service: string, method: string, approvedBy: string, ttlSeconds: number, path?: string | null): void {
     const now = new Date();
@@ -434,6 +460,7 @@ export class AuditLogger {
       this.revokeTemporaryServiceApprovals(approval.service);
       // A shorter /allow must replace earlier HTTP approvals, including on restart.
       this.revokeApprovalInDb(approval.service);
+      this.revokeScopedApprovals(approval.service);
       this.db.prepare('INSERT INTO temporary_service_approvals(service, approval_json, expires_at) VALUES (?, ?, ?)')
         .run(approval.service, JSON.stringify(approval), approval.expiresAt);
       this.setShowlog(approval.chatId, true);
@@ -753,9 +780,17 @@ export class AuditLogger {
   }
 
   getRecentApprovals(limit: number = 20): unknown[] {
-    return this.db.prepare(`
+    const legacy = this.db.prepare(`
       SELECT * FROM approvals ORDER BY id DESC LIMIT ?
-    `).all(limit);
+    `).all(limit) as { timestamp: string }[];
+    const scoped = (this.db.prepare('SELECT approval_json, revoked FROM scoped_approvals ORDER BY rowid DESC LIMIT ?')
+      .all(limit) as { approval_json: string; revoked: number }[]).map(row => {
+        const a: ScopedApproval = JSON.parse(row.approval_json);
+        return { id: a.id, service: a.service, method: a.scope.methods.join(', '), scope: a.scope,
+          timestamp: new Date(a.approvedAt).toISOString(), approved_by: a.approvedBy,
+          ttl_seconds: (a.expiresAt - a.approvedAt) / 1000, revoked: row.revoked };
+      });
+    return [...legacy, ...scoped].sort((a, b) => b.timestamp.localeCompare(a.timestamp)).slice(0, limit);
   }
 
   // ─── Dashboard aggregations ───────────────────────────────

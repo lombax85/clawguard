@@ -4,12 +4,13 @@ import TelegramBot, {
   type SendMessageParams,
   type User,
 } from 'node-telegram-bot-api';
-import { TelegramConfig, RequestMeta, RequestApprovalInfo, FtpAccessMode } from './types';
+import { TelegramConfig, RequestMeta, RequestApprovalInfo, FtpAccessMode, HttpApprovalScope } from './types';
 import { AuditLogger } from './audit';
 import { PairThrottle } from './pair-throttle';
 import { TemporaryApprovalController, temporaryApprovalDuration } from './temporary-approval';
 import { ServiceConfig } from './types';
 import { TelegramServiceMenu } from './telegram-service-menu';
+import { TelegramScopeMenu } from './telegram-scope-menu';
 import type { WebhookNotifier } from './webhook';
 import {
   TelegramPollingRecovery,
@@ -21,7 +22,8 @@ export type ApprovalCallback = (
   ttlSeconds: number,
   approvedBy: string,
   pathScoped: boolean,
-  ftpAccessMode?: FtpAccessMode
+  ftpAccessMode?: FtpAccessMode,
+  scope?: HttpApprovalScope
 ) => void;
 type SendMessageOptions = Omit<SendMessageParams, 'chat_id' | 'text'>;
 
@@ -134,6 +136,8 @@ export class TelegramNotifier {
   private lastCallbackAt: number | null = null;
   private serviceCommands?: { services: () => Record<string, ServiceConfig>; controller: TemporaryApprovalController };
   private serviceMenu: TelegramServiceMenu;
+  private scopeMenu: TelegramScopeMenu;
+  private httpMessages = new Map<string, { messageId: number; actions: Set<string> }>();
   private webhookAlerts?: WebhookNotifier;
 
   constructor(
@@ -183,6 +187,22 @@ export class TelegramNotifier {
         chat_id: config.chatId, message_id: messageId, parse_mode: undefined, reply_markup: keyboard,
       }),
       answer: (queryId, text) => this.bot.answerCallbackQuery(queryId, { text }),
+    });
+    this.scopeMenu = new TelegramScopeMenu({
+      chatId: config.chatId,
+      allowed: user => !user.is_bot && this.canUseTemporaryApproval(config.chatId) && this.isAllowedApprover(user),
+      pending: id => this.pendingCallbacks.has(id),
+      resolve: (id, scope, seconds, user, approved) => {
+        const callback = this.pendingCallbacks.get(id);
+        if (!callback) return false;
+        this.clearPendingRequest(id);
+        callback(approved, seconds, user.username || user.first_name || String(user.id), false, undefined, scope);
+        return true;
+      },
+      edit: (messageId, text, keyboard) => this.bot.editMessageText(text, {
+        chat_id: config.chatId, message_id: messageId, parse_mode: undefined, reply_markup: keyboard,
+      }),
+      answer: (id, text) => this.bot.answerCallbackQuery(id, { text }),
     });
     this.setupPollingDiagnostics();
     this.setupCallbackHandler();
@@ -422,12 +442,16 @@ export class TelegramNotifier {
   clearPendingRequest(requestId: string): void {
     this.pendingCallbacks.delete(requestId);
     this.pendingTexts.delete(requestId);
+    this.httpMessages.delete(requestId);
+    this.scopeMenu.clear(requestId);
   }
 
   private failPendingApprovals(approvedBy: string): void {
     const pending = [...this.pendingCallbacks.values()];
     this.pendingCallbacks.clear();
     this.pendingTexts.clear();
+    this.httpMessages.clear();
+    this.scopeMenu.clear();
     for (const callback of pending) {
       try {
         callback(false, 0, approvedBy, false);
@@ -611,6 +635,10 @@ export class TelegramNotifier {
       this.consecutivePollingErrors = 0;
       this.pollingRecovery.noteHealthy();
 
+      if (this.scopeMenu.owns(query.data)) {
+        await this.scopeMenu.handle(query);
+        return;
+      }
       if (this.serviceMenu.owns(query.data)) {
         await this.serviceMenu.handle(query);
         return;
@@ -618,6 +646,7 @@ export class TelegramNotifier {
       if (!query.message) return;
 
       const chatId = query.message.chat.id.toString();
+      if (!this.isConfiguredChat(chatId) || query.from.is_bot) return;
 
       // Verify the user is paired
       if (this.config.pairing.enabled && !this.audit.isPairedUser(chatId)) {
@@ -642,6 +671,11 @@ export class TelegramNotifier {
       }
 
       const [action, requestId] = query.data.split(':');
+      const httpMessage = this.httpMessages.get(requestId);
+      if (httpMessage && (httpMessage.messageId !== query.message.message_id || !httpMessage.actions.has(action))) {
+        await this.bot.answerCallbackQuery(query.id, { text: 'Choice not available for this request.' });
+        return;
+      }
       const callback = this.pendingCallbacks.get(requestId);
 
       console.log(`📲 Telegram callback: action=${action} requestId=${requestId} chatId=${chatId}`);
@@ -695,7 +729,7 @@ export class TelegramNotifier {
           break;
         case 'approve_once':
           approved = true;
-          ttlSeconds = 1;
+          ttlSeconds = 0;
           ackText = '✅ Approved once';
           finalText = `${originalText}\n\n✅ *Approved once* by ${userName}`;
           break;
@@ -789,8 +823,10 @@ export class TelegramNotifier {
     path: string,
     agentIp: string,
     meta?: RequestMeta,
-    approvalInfo?: RequestApprovalInfo
-  ): Promise<{ approved: boolean; ttlSeconds: number; approvedBy: string; pathScoped: boolean }> {
+    approvalInfo?: RequestApprovalInfo,
+    deadline: number = Date.now() + 120000,
+    allowedMethods?: string[]
+  ): Promise<{ approved: boolean; ttlSeconds: number; approvedBy: string; pathScoped: boolean; scope?: HttpApprovalScope }> {
     // If the configured chat isn't paired, deny immediately
     if (!this.isConfiguredChatPaired()) {
       console.log('❌ Cannot request approval: configured Telegram chat is not paired');
@@ -808,8 +844,8 @@ export class TelegramNotifier {
     }
 
     return new Promise((resolve) => {
-      const callback: ApprovalCallback = (approved, ttlSeconds, approvedBy, pathScoped) => {
-        resolve({ approved, ttlSeconds, approvedBy, pathScoped });
+      const callback: ApprovalCallback = (approved, ttlSeconds, approvedBy, pathScoped, _ftpMode, scope) => {
+        resolve({ approved, ttlSeconds, approvedBy, pathScoped, ...(scope ? { scope } : {}) });
       };
 
       this.pendingCallbacks.set(requestId, callback);
@@ -828,6 +864,9 @@ export class TelegramNotifier {
       ].join('\n');
 
       this.pendingTexts.set(requestId, text);
+      this.httpMessages.set(requestId, { messageId: 0, actions: new Set(['approve_once', 'deny']) });
+      const scopeAction = approvalInfo?.oneTime ? undefined
+        : this.scopeMenu.register(requestId, service, method, path, deadline, allowedMethods);
 
       (async () => {
         const sent = await this.safeSendMessage(this.config.chatId, text, this.sendOptions({
@@ -837,26 +876,11 @@ export class TelegramNotifier {
                 { text: '✅ Approve this request', callback_data: `approve_once:${requestId}` },
                 { text: '❌ Deny', callback_data: `deny:${requestId}` },
               ],
-            ] : [
-              [
-                { text: '✅ Once', callback_data: `approve_once:${requestId}` },
-                { text: '✅ 15m', callback_data: `approve_15m:${requestId}` },
-                { text: '✅ 1h', callback_data: `approve_1h:${requestId}` },
-              ],
-              [
-                { text: '✅ 24h', callback_data: `approve_24h:${requestId}` },
-                { text: '✅ 1w', callback_data: `approve_1w:${requestId}` },
-                { text: '✅ 1month', callback_data: `approve_1month:${requestId}` },
-              ],
-              [
-                { text: '🎯 15m-path', callback_data: `approve_15m_path:${requestId}` },
-                { text: '🎯 24h-path', callback_data: `approve_24h_path:${requestId}` },
-                { text: '🎯 forever-path', callback_data: `approve_forever_path:${requestId}` },
-              ],
-              [
-                { text: '❌ Deny', callback_data: `deny:${requestId}` },
-              ],
-            ],
+            ] : [[
+              { text: '✅ Only this request', callback_data: `approve_once:${requestId}` },
+              ...(scopeAction ? [{ text: '🎯 Choose scope', callback_data: scopeAction }] : []),
+              { text: '❌ Deny', callback_data: `deny:${requestId}` },
+            ]],
           },
         }));
 
@@ -864,6 +888,11 @@ export class TelegramNotifier {
           this.clearPendingRequest(requestId);
           resolve({ approved: false, ttlSeconds: 0, approvedBy: 'telegram_error', pathScoped: false });
           return;
+        }
+
+        if (this.pendingCallbacks.has(requestId)) {
+          this.httpMessages.set(requestId, { messageId: sent.message_id, actions: new Set(['approve_once', 'deny']) });
+          this.scopeMenu.attach(requestId, sent.message_id);
         }
 
         console.log(`📤 Telegram approval request sent: requestId=${requestId} service=${service} method=${method}`);
@@ -1065,6 +1094,7 @@ export class TelegramNotifier {
 
   async stop(): Promise<void> {
     this.serviceMenu.clear();
+    this.failPendingApprovals('shutdown');
     await this.pollingRecovery.stop();
   }
 }

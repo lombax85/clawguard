@@ -702,7 +702,7 @@ curl -s "http://CLAWGUARD-IP:9090/httpbin/headers" \
 What happens:
 1. ClawGuard receives the request
 2. Your phone buzzes — Telegram shows: `GET /headers` for service `httpbin`
-3. You tap **[Approve 1h]**
+3. You tap **Choose scope**, review the scope, then tap **1h**.
 4. ClawGuard injects `Authorization: Bearer test-secret-token-12345` and forwards to httpbin
 5. httpbin echoes back all headers — you can see the injected token in the response
 
@@ -987,7 +987,7 @@ Path-prefix routing (`/:service/*`) cleanly disambiguates those services. Host-b
 2. ClawGuard validates the agent key (`X-ClawGuard-Key` header)
 3. ClawGuard checks the policy: does this request need approval?
 4. If yes: sends a Telegram notification with inline buttons
-5. You tap **[Approve 1h]** on your phone
+5. You tap **Choose scope**, review the scope, then tap **1h** on your phone.
 6. ClawGuard injects the real API token and forwards to the upstream service
 7. Returns the response to the agent
 8. Logs everything in the audit trail
@@ -1046,6 +1046,12 @@ After the grant expires, the configured service policy applies again.
 
 See [Telegram commands](../TELEGRAM_SETUP.md#telegram-bot-commands) for durations,
 button behavior and expiry rules.
+
+For an HTTP approval request, **Choose scope** opens a path, query and method
+editor in Telegram. Select a path depth, choose whether to include subpaths,
+and match all, none or selected query parameters. A duration button applies
+the displayed scope. See [HTTP approval scopes](../TELEGRAM_SETUP.md#http-approval-scopes).
+The **Approvals** dashboard shows these scopes and can revoke each one.
 
 Use `/alerts off` to stop Home Assistant/webhook alerts and cancel queued
 escalation timers. The setting survives restarts. `/alerts on` enables alerts

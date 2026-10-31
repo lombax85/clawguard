@@ -45,7 +45,7 @@
   .sidebar nav a { display: flex; align-items: center; gap: 10px; padding: 10px 20px; color: var(--text2); text-decoration: none; font-size: 14px; transition: all 0.15s; }
   .sidebar nav a:hover, .sidebar nav a.active { color: var(--text); background: var(--bg3); }
   .sidebar nav a.active { border-right: 3px solid var(--accent); }
-  .main { margin-left: 220px; flex: 1; padding: 24px; }
+  .main { margin-left: 220px; flex: 1; min-width: 0; padding: 24px; }
 
   /* ─── Cards ────────────────────────────────── */
   .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
@@ -83,7 +83,8 @@
   .service-group-header { width: 100%; border: 0; background: var(--bg); color: var(--text); padding: 12px 14px; display: flex; align-items: center; justify-content: space-between; cursor: pointer; text-align: left; }
   .service-group-header:hover { background: var(--bg3); }
   .service-group-title { display: flex; align-items: center; gap: 8px; font-weight: 700; }
-  .service-group-body { padding: 12px; }
+  .service-group-body { padding: 12px; overflow-x: auto; }
+  .approval-scope { min-width: 240px; max-width: 480px; overflow-wrap: anywhere; }
   .service-group.collapsed .service-group-body { display: none; }
   .service-group-chevron { color: var(--text2); font-size: 12px; }
   .service-group.collapsed .service-group-chevron { transform: rotate(-90deg); }
@@ -1337,10 +1338,10 @@ function renderApprovalGroups(container, rows, mode) {
       ? `<button class="btn btn-danger btn-sm" data-service="${esc(service)}" onclick="event.stopPropagation(); revokeServiceApprovalsFromBtn(this)">Revoke service</button>`
       : '';
     group.innerHTML = `
-      <button class="service-group-header" data-mode="${esc(mode)}" data-service="${esc(service)}" onclick="toggleApprovalGroupFromHeader(this)">
+      <div class="service-group-header" role="button" tabindex="0" data-mode="${esc(mode)}" data-service="${esc(service)}" onclick="toggleApprovalGroupFromHeader(this)" onkeydown="if(event.target === this && (event.key === 'Enter' || event.key === ' ')){event.preventDefault();toggleApprovalGroupFromHeader(this)}">
         <span class="service-group-title"><span class="service-group-chevron">▼</span>${esc(service)} <span class="badge blue">${countLabel}</span></span>
         <span class="inline-actions">${revokeAllButton}</span>
-      </button>
+      </div>
       <div class="service-group-body">${approvalGroupTable(groupRows, mode)}</div>
     `;
     container.appendChild(group);
@@ -1358,7 +1359,7 @@ function approvalGroupTable(rows, mode) {
 function activeApprovalRow(info) {
   const method = info.method || '*';
   const path = info.path || null;
-  const scopeCell = path
+  const scopeCell = info.scope ? approvalScopeCell(info.scope) : path
     ? `<span class="badge" style="background:#3d2b5f;color:#c5a3ff">path</span> <code style="font-size:12px">${esc(path)}</code>`
     : `<span class="badge blue">method-wide</span>`;
   return `
@@ -1368,13 +1369,21 @@ function activeApprovalRow(info) {
       <td>${esc(info.approvedBy)}</td>
       <td>${new Date(info.expiresAt).toLocaleString()}</td>
       <td><span class="badge green">${info.remainingMinutes} min</span></td>
-      <td><button class="btn btn-danger btn-sm" data-service="${esc(info.service)}" data-method="${esc(method)}" data-path="${path === null ? '' : esc(path)}" data-pathscoped="${path === null ? '0' : '1'}" onclick="revokeApprovalFromBtn(this)">Revoke</button></td>
+      <td><button class="btn btn-danger btn-sm" data-service="${esc(info.service)}" data-scope-id="${esc(info.scopeId || '')}" data-method="${esc(method)}" data-path="${path === null ? '' : esc(path)}" data-pathscoped="${path === null ? '0' : '1'}" onclick="revokeApprovalFromBtn(this)">Revoke</button></td>
     </tr>
   `;
 }
 
+function approvalScopeCell(scope) {
+  const params = scope.query.params.map(([name, value]) => `${name}=${/token|secret|password|authorization|signature|api.?key|^key$|^code$/i.test(name) ? '[hidden]' : value}`).join('&');
+  const query = scope.query.mode === 'ignore' ? 'Ignored' : `${scope.query.mode === 'exact' ? 'All parameters' : 'Selected parameters'}: ${params || '(none)'}`;
+  return `<div class="approval-scope"><span class="badge" style="background:#3d2b5f;color:#c5a3ff">${scope.includeSubpaths ? 'path + subpaths' : 'exact path'}</span>
+    <code style="font-size:12px;overflow-wrap:anywhere">${esc(scope.path)}</code>
+    <div style="font-size:12px;overflow-wrap:anywhere">Query: ${esc(query)}</div></div>`;
+}
+
 function approvalHistoryRow(row) {
-  const pathCell = row.path
+  const pathCell = row.scope ? approvalScopeCell(row.scope) : row.path
     ? `<code style="font-size:12px">${esc(row.path)}</code>`
     : `<span style="color:var(--text2)">method-wide</span>`;
   return `
@@ -1383,7 +1392,7 @@ function approvalHistoryRow(row) {
       <td><span class="badge blue">${esc(row.method || '*')}</span></td>
       <td>${pathCell}</td>
       <td>${esc(row.approved_by)}</td>
-      <td>${Math.round(row.ttl_seconds / 3600)}h</td>
+      <td>${row.ttl_seconds >= 3600 ? `${Math.round(row.ttl_seconds / 3600)}h` : `${Math.round(row.ttl_seconds / 60)} min`}</td>
     </tr>
   `;
 }
@@ -1404,6 +1413,12 @@ async function revokeServiceApprovalsFromBtn(btn) {
 
 async function revokeApprovalFromBtn(btn) {
   const service = btn.dataset.service;
+  if (btn.dataset.scopeId) {
+    if (!confirm(`Revoke this scope for ${service}: ${btn.dataset.method} ${btn.dataset.path}?`)) return;
+    await api('POST', '/api/revoke/' + encodeURIComponent(service) + '?scopeId=' + encodeURIComponent(btn.dataset.scopeId));
+    loadApprovals();
+    return;
+  }
   const method = btn.dataset.method;
   const pathScoped = btn.dataset.pathscoped === '1';
   const path = btn.dataset.path;

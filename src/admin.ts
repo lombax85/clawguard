@@ -483,6 +483,15 @@ export function createAdminRouter(
 
   router.post('/api/revoke/:service', pinAuth, (req: Request, res: Response) => {
     const service = req.params['service'] as string;
+    if (req.query['scopeId'] !== undefined) {
+      const id = req.query['scopeId'];
+      if (typeof id !== 'string' || !/^[0-9a-f-]{36}$/i.test(id) || req.query['method'] !== undefined || req.query['path'] !== undefined) {
+        res.status(400).json({ error: 'Use one scopeId without method or path.' }); return;
+      }
+      const revoked = approvalManager.revokeScopedApproval(service, id);
+      res.status(revoked ? 200 : 404).json(revoked ? { ok: true, message: 'Scoped approval revoked' } : { error: 'Approval not found' });
+      return;
+    }
     const method = (req.query['method'] as string | undefined)?.toUpperCase();
     // path query param: omitted → any scope for that method; "" or "*" → method-wide; string → exact path
     const rawPath = req.query['path'] as string | undefined;

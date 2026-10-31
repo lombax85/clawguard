@@ -366,7 +366,7 @@ test('TelegramNotifier wires 409 errors into the guard without raw getUpdates ca
     releaseCallbackAck();
     assert.deepEqual(await claimedApproval, {
       approved: true,
-      ttlSeconds: 1,
+      ttlSeconds: 0,
       approvedBy: 'Alice',
       pathScoped: false,
     });

@@ -313,6 +313,23 @@ export interface Approval {
   approvedBy: string;
 }
 
+export interface HttpApprovalScope {
+  path: string;
+  includeSubpaths: boolean;
+  methods: string[];
+  query: { mode: 'exact' | 'ignore' | 'selected'; params: [string, string][] };
+}
+
+export interface ScopedApproval {
+  id: string;
+  service: string;
+  configHash: string;
+  scope: HttpApprovalScope;
+  approvedAt: number;
+  expiresAt: number;
+  approvedBy: string;
+}
+
 export interface PendingRequest {
   id: string;
   service: string;

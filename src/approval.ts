@@ -6,7 +6,10 @@ import {
   RequestApprovalInfo,
   FtpAccessMode,
   TemporaryServiceApproval,
+  HttpApprovalScope,
 } from './types';
+import { randomUUID } from 'crypto';
+import { scopeMatches, scopeLabel } from './approval-scope';
 import { MAX_TEMPORARY_APPROVAL_SECONDS, serviceApprovalHash } from './temporary-approval';
 import { TelegramNotifier } from './telegram';
 import { WebhookNotifier } from './webhook';
@@ -187,7 +190,8 @@ export class ApprovalManager {
       }
       return true;
     }
-    return this.findActiveApproval(service, method, path) !== null;
+    return this.findActiveApproval(service, method, path) !== null
+      || (this.audit.getScopedApprovals?.() ?? []).some(a => a.service === service && scopeMatches(a.scope, method, path));
   }
 
   async checkApproval(
@@ -234,6 +238,21 @@ export class ApprovalManager {
       return true;
     }
 
+    if (!oneTime) {
+      for (const approval of this.audit.getScopedApprovals?.() ?? []) {
+        if (approval.service !== service) continue;
+        if (approval.configHash !== serviceApprovalHash(serviceConfig)) {
+          this.audit.revokeScopedApprovals(service, approval.id);
+          continue;
+        }
+        if (scopeMatches(approval.scope, method, approvalPath)) {
+          this.telegram?.notifyAutoApproved(service, method, approvalPath, agentIp,
+            `approval:scope (${Math.ceil((approval.expiresAt - Date.now()) / 60000)}min left)`, meta, approvalInfo);
+          return true;
+        }
+      }
+    }
+
     // Request new approval
     console.log(`🔔 Requesting approval for: ${method} ${service}${approvalPath}`);
 
@@ -265,8 +284,11 @@ export class ApprovalManager {
       requestId, service, method, approvalPath, agentIp, meta, approvalInfo
     );
 
-    const timeoutPromise = new Promise<{ approved: boolean; ttlSeconds: number; approvedBy: string; pathScoped: boolean }>((resolve) => {
-      setTimeout(() => {
+    const configHash = serviceApprovalHash(serviceConfig);
+    const deadline = Date.now() + this.approvalTimeout;
+    let timer: NodeJS.Timeout | undefined;
+    const timeoutPromise = new Promise<{ approved: boolean; ttlSeconds: number; approvedBy: string; pathScoped: boolean; scope?: HttpApprovalScope }>((resolve) => {
+      timer = setTimeout(() => {
         this.telegram?.clearPendingRequest(requestId);
         resolve({ approved: false, ttlSeconds: 0, approvedBy: 'timeout', pathScoped: false });
       }, this.approvalTimeout);
@@ -274,17 +296,32 @@ export class ApprovalManager {
 
     const result = await Promise.race([
       this.telegram.requestApproval(
-        requestId, service, method, approvalPath, agentIp, meta, approvalInfo
+        requestId, service, method, approvalPath, agentIp, meta, approvalInfo, deadline, serviceConfig.http?.allowedMethods
       ),
       timeoutPromise,
-    ]);
+    ]).finally(() => { if (timer) clearTimeout(timer); this.telegram?.clearPendingRequest(requestId); });
+
+    if (result.scope && (Date.now() >= deadline || configHash !== serviceApprovalHash(serviceConfig)
+      || !scopeMatches(result.scope, method, approvalPath)
+      || !Number.isInteger(result.ttlSeconds) || result.ttlSeconds < 60 || result.ttlSeconds > 86400
+      || result.scope.methods.some(m => serviceConfig.http?.allowedMethods && !serviceConfig.http.allowedMethods.includes(m)))) {
+      result.approved = false;
+      result.approvedBy = 'scope_no_longer_valid';
+    }
 
     // Side-channel notification of resolution so external integrations can dismiss alerts
     this.webhook?.notifyApprovalResolved(requestId, result.approved, result.approvedBy);
 
     if (result.approved) {
-      if (oneTime) {
+      if (oneTime || result.ttlSeconds === 0) {
         console.log(`✅ One-time request approved by ${result.approvedBy} for ${service} ${approvalPath}`);
+        return true;
+      }
+      if (result.scope) {
+        const now = Date.now();
+        this.audit.saveScopedApproval({ id: randomUUID(), service, configHash, scope: result.scope,
+          approvedAt: now, expiresAt: now + result.ttlSeconds * 1000, approvedBy: result.approvedBy });
+        console.log(`✅ Scoped approval for ${service}: ${scopeLabel(result.scope)}`);
         return true;
       }
       const scopedPath = result.pathScoped ? approvalPath : null;
@@ -509,8 +546,16 @@ export class ApprovalManager {
    * - method set, path=string: revoke only the exact path-scoped approval
    */
   revokeApproval(service: string, method?: string, path?: string | null): boolean {
-    const temporaryRevoked = (!method || method === '*')
+    let temporaryRevoked = (!method || method === '*')
       ? (this.audit.revokeTemporaryServiceApprovals?.(service) ?? 0) > 0 : false;
+    if (!method) temporaryRevoked = (this.audit.revokeScopedApprovals?.(service) ?? 0) > 0 || temporaryRevoked;
+    else if (path === undefined) {
+      for (const a of this.audit.getScopedApprovals?.() ?? []) {
+        if (a.service === service && a.scope.methods.includes(method.toUpperCase())) {
+          temporaryRevoked = this.revokeScopedApproval(service, a.id) || temporaryRevoked;
+        }
+      }
+    }
     if (method && path !== undefined) {
       const key = this.approvalKey(service, method, path);
       if (this.activeApprovals.has(key)) {
@@ -548,7 +593,8 @@ export class ApprovalManager {
   }
 
   revokeAll(): number {
-    const count = this.activeApprovals.size + this.getTemporaryServiceApprovals().length;
+    const count = this.activeApprovals.size + this.getTemporaryServiceApprovals().length + (this.audit.getScopedApprovals?.() ?? []).length;
+    this.audit.revokeScopedApprovals?.();
     this.audit.revokeTemporaryServiceApprovals?.();
     const keys = [...this.activeApprovals.keys()];
     this.activeApprovals.clear();
@@ -568,11 +614,20 @@ export class ApprovalManager {
         this.activeApprovals.delete(key);
       }
     }
-    return this.activeApprovals.size + this.getTemporaryServiceApprovals().length;
+    return this.activeApprovals.size + this.getTemporaryServiceApprovals().length + (this.audit.getScopedApprovals?.() ?? []).length;
   }
 
-  getStatus(): Record<string, { service: string; method: string; path: string | null; expiresAt: string; approvedBy: string; remainingMinutes: number }> {
-    const status: Record<string, { service: string; method: string; path: string | null; expiresAt: string; approvedBy: string; remainingMinutes: number }> = {};
+  revokeScopedApproval(service: string, id: string): boolean {
+    return (this.audit.revokeScopedApprovals?.(service, id) ?? 0) > 0;
+  }
+
+  getStatus(): Record<string, { service: string; method: string; path: string | null; expiresAt: string; approvedBy: string; remainingMinutes: number; scopeId?: string; scope?: HttpApprovalScope }> {
+    const status: ReturnType<ApprovalManager['getStatus']> = {};
+    for (const a of this.audit.getScopedApprovals?.() ?? []) {
+      status[a.id] = { service: a.service, method: a.scope.methods.join(', '), path: a.scope.path,
+        scopeId: a.id, scope: a.scope, expiresAt: new Date(a.expiresAt).toISOString(), approvedBy: a.approvedBy,
+        remainingMinutes: Math.ceil((a.expiresAt - Date.now()) / 60000) };
+    }
     for (const approval of this.getTemporaryServiceApprovals()) {
       status[`${approval.service}::*::*`] = {
         service: approval.service, method: '*', path: null,

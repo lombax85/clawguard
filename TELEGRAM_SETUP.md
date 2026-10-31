@@ -101,10 +101,63 @@ You should receive a Telegram message like:
 🔹 Agent IP: ::1
 🔹 Time: 28/2/2026, 15:30:00
 
-[✅ Approve 1h] [✅ Approve 8h] [❌ Deny]
+[✅ Only this request] [🎯 Choose scope] [❌ Deny]
 ```
 
-Tap **Approve 1h** and the request goes through!
+Tap **Only this request** to approve one request. To reuse an approval, tap
+**Choose scope**, review its scope, then tap a duration.
+
+### HTTP approval scopes
+
+The scope editor updates the same Telegram message. It starts with the exact
+path, all query parameters and the request's HTTP method. No access is granted
+while you change the scope.
+
+1. Tap **Path** to select a complete path or an ancestor from the list.
+2. Tap **Query** to select how query parameters must match.
+3. Tap **Methods** to select additional HTTP methods, if needed.
+4. Tap a duration to approve the scope shown in the summary.
+
+Path choices show the actual prefix at each depth. Long lists have **Next** and
+**Previous** buttons. Selecting an ancestor includes its subpaths so the scope
+still covers the pending request. For the complete path, **Subpaths** switches
+between that path alone and that path with its descendants. `/repo` with
+subpaths matches `/repo` and `/repo/info`, but not `/repo-other`.
+
+| Query option | Matching rule |
+|---|---|
+| **Same parameters and values** | All names and values must match. Extra or missing parameters do not match. |
+| **Ignore query** | Query parameters do not restrict the scope. |
+| **Choose parameters** | Only the selected names must have the same values. Other parameters can change. |
+
+Query names and values are case-sensitive and use URL form decoding. Changing
+the order of different parameter names does not change the scope. Repeated
+parameters must retain their values, count and order for that name. Sensitive
+parameter values are hidden in the scope preview. The selected values still
+participate in matching.
+
+The original method stays selected. Additional methods come from the service's
+method allowlist, or the standard HTTP methods when no allowlist is configured.
+Choose **15m**, **30m**, **1h**, **4h** or **24h** in the summary to apply the grant.
+The grant always belongs to one service. Existing service restrictions still
+apply. Requests that require a fresh decision, including protected plugin
+operations, SSH sessions and FTP leases, do not gain reusable HTTP scopes.
+
+**Only this request** creates no reusable approval. **Deny** rejects the pending
+request. Editing does not extend its approval timeout. Menu buttons are bound
+to the message and the approver who opened the editor. Old buttons, double
+taps and expired requests cannot create or extend a grant. If an URL cannot
+be safely matched, or is too long for the editor, only one-request approval
+and denial are offered.
+
+Scopes retain their expiry after a restart. A service configuration change
+invalidates its scopes when next used. The dashboard's **Approvals** page shows
+the path, subpath setting, query rule, methods and expiry. **Revoke** removes
+that scope; **Revoke service** and `/revoke <service>` remove all approvals for
+the service. `/allow` replaces existing scopes for that service.
+
+Existing method-wide and exact-path approvals keep their original meaning
+after an upgrade. They remain visible and revocable in the dashboard.
 
 ## Telegram Bot Commands
 
