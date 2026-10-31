@@ -138,7 +138,11 @@ participate in matching.
 
 The original method stays selected. Additional methods come from the service's
 method allowlist, or the standard HTTP methods when no allowlist is configured.
-Choose **15m**, **30m**, **1h**, **4h** or **24h** in the summary to apply the grant.
+Choose **15m**, **30m**, **1h**, **4h**, **24h**, **1w**, **1month** or **Forever**
+in the summary to apply the grant. **1w** means seven days; **1month** means
+30 days. **Forever** has no expiry. You can still revoke it, and a service
+configuration change still invalidates it. The dashboard labels it **Until
+revoked** instead of showing an expiry date.
 The grant always belongs to one service. Existing service restrictions still
 apply. Requests that require a fresh decision, including protected plugin
 operations, SSH sessions and FTP leases, do not gain reusable HTTP scopes.

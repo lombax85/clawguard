@@ -326,7 +326,8 @@ export interface ScopedApproval {
   configHash: string;
   scope: HttpApprovalScope;
   approvedAt: number;
-  expiresAt: number;
+  // null means the owner selected Forever; revocation and config checks still apply.
+  expiresAt: number | null;
   approvedBy: string;
 }
 

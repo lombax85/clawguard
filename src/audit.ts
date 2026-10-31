@@ -267,6 +267,7 @@ export class AuditLogger {
     try { this.db.exec("ALTER TABLE approvals ADD COLUMN method TEXT NOT NULL DEFAULT '*'"); } catch { /* already exists */ }
     // NULL path = method-wide approval; non-null = path-scoped (exact match on pathname + querystring)
     try { this.db.exec('ALTER TABLE approvals ADD COLUMN path TEXT'); } catch { /* already exists */ }
+    try { this.db.exec('ALTER TABLE scoped_approvals ADD COLUMN permanent INTEGER NOT NULL DEFAULT 0'); } catch { /* already exists */ }
     try { this.db.exec('ALTER TABLE telegram_paired_users ADD COLUMN showlog INTEGER NOT NULL DEFAULT 0'); } catch { /* already exists */ }
     // Optional request provenance (multi-user): who triggered the call and why.
     try { this.db.exec('ALTER TABLE requests ADD COLUMN request_user TEXT'); } catch { /* already exists */ }
@@ -298,12 +299,13 @@ export class AuditLogger {
   // ─── Approval logging ─────────────────────────────────────
 
   saveScopedApproval(approval: ScopedApproval): void {
-    this.db.prepare('INSERT INTO scoped_approvals(id, service, approval_json, expires_at) VALUES (?, ?, ?, ?)')
-      .run(approval.id, approval.service, JSON.stringify(approval), approval.expiresAt);
+    // Keep the existing NOT NULL expiry column compatible with older databases.
+    this.db.prepare('INSERT INTO scoped_approvals(id, service, approval_json, expires_at, permanent) VALUES (?, ?, ?, ?, ?)')
+      .run(approval.id, approval.service, JSON.stringify(approval), approval.expiresAt ?? 0, approval.expiresAt === null ? 1 : 0);
   }
 
   getScopedApprovals(): ScopedApproval[] {
-    return (this.db.prepare('SELECT approval_json FROM scoped_approvals WHERE revoked = 0 AND expires_at > ?')
+    return (this.db.prepare('SELECT approval_json FROM scoped_approvals WHERE revoked = 0 AND (permanent = 1 OR expires_at > ?)')
       .all(Date.now()) as { approval_json: string }[]).map(row => JSON.parse(row.approval_json));
   }
 
@@ -788,7 +790,7 @@ export class AuditLogger {
         const a: ScopedApproval = JSON.parse(row.approval_json);
         return { id: a.id, service: a.service, method: a.scope.methods.join(', '), scope: a.scope,
           timestamp: new Date(a.approvedAt).toISOString(), approved_by: a.approvedBy,
-          ttl_seconds: (a.expiresAt - a.approvedAt) / 1000, revoked: row.revoked };
+          ttl_seconds: a.expiresAt === null ? null : (a.expiresAt - a.approvedAt) / 1000, revoked: row.revoked };
       });
     return [...legacy, ...scoped].sort((a, b) => b.timestamp.localeCompare(a.timestamp)).slice(0, limit);
   }

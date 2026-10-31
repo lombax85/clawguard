@@ -1,11 +1,10 @@
 import { randomBytes } from 'crypto';
 import { CallbackQuery, InlineKeyboardMarkup, User } from 'node-telegram-bot-api';
 import { HttpApprovalScope } from './types';
-import { approvalTarget, pathChoices, scopeLabel } from './approval-scope';
+import { approvalTarget, pathChoices, scopeLabel, SCOPE_DURATIONS, SCOPE_FOREVER } from './approval-scope';
 
 const PREFIX = 'cgs:';
 const PAGE = 7;
-const DURATIONS = { '15m': 900, '30m': 1800, '1h': 3600, '4h': 14400, '24h': 86400 };
 interface Draft {
   requestId: string;
   service: string;
@@ -73,7 +72,8 @@ export class TelegramScopeMenu {
     if (d.view === 'summary') {
       rows = [[button('Path', 'view-path'), button('Query', 'view-query'), button('Methods', 'view-methods')],
         ...(d.scope.path === d.paths.at(-1) ? [[button(`Subpaths: ${d.scope.includeSubpaths ? 'included' : 'excluded'}`, 'subpaths')]] : []),
-        ...(queryReady ? [['15m', '30m', '1h'], ['4h', '24h']].map(list => list.map(value => button(value, `grant-${value}`))) : [])];
+        ...(queryReady ? [['15m', '30m', '1h'], ['4h', '24h'], ['1w', '1month', 'forever']]
+          .map(list => list.map(value => button(value === 'forever' ? 'Forever' : value, `grant-${value}`))) : [])];
     } else if (d.view === 'query') {
       rows = [[button('Same parameters and values', 'query-exact')], [button('Ignore query', 'query-ignore')]];
       if (keys.length) rows.push([button('Choose parameters', 'view-params')]);
@@ -121,14 +121,15 @@ export class TelegramScopeMenu {
     this.drafts.delete(token);
     d.userId = query.from.id;
     if (action.startsWith('grant-') || action === 'once' || action === 'deny') {
-      const seconds = DURATIONS[action.slice(6) as keyof typeof DURATIONS] ?? 0;
+      const seconds = SCOPE_DURATIONS[action.slice(6) as keyof typeof SCOPE_DURATIONS] ?? 0;
       const approved = action !== 'deny';
       const applied = this.options.resolve(d.requestId, seconds ? d.scope : undefined, seconds, query.from, approved);
       this.clear(d.requestId);
       await this.answer(query.id, applied ? (approved ? 'Approved.' : 'Denied.') : 'Request expired.');
       if (applied) {
         try { await this.options.edit(d.messageId!, `${d.service}\n${scopeLabel(d.scope)}\n\n`
-          + (approved ? (seconds ? `Approved for ${action.slice(6)}.` : 'Approved for this request only.') : 'Denied.'), { inline_keyboard: [] }); }
+          + (approved ? (seconds === SCOPE_FOREVER ? 'Approved until revoked.'
+            : seconds ? `Approved for ${action.slice(6)}.` : 'Approved for this request only.') : 'Denied.'), { inline_keyboard: [] }); }
         catch { /* The decision has already been delivered. */ }
       }
       return;

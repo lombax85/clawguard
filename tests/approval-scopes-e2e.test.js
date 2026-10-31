@@ -28,6 +28,71 @@ async function scope(f, target, method = 'GET') {
   return r;
 }
 
+async function withAdmin(f, run) {
+  f.config.admin = { enabled: true, pin: 'test-pin', allowedIPs: ['127.0.0.1'], strictMode: false };
+  f.config.sshBroker = {};
+  const app = express();
+  app.use('/__admin', createAdminRouter(f.config, f.manager, f.audit));
+  const server = http.createServer(app);
+  const base = await listen(server);
+  async function admin(path, method = 'GET', authenticated = true) {
+    const res = await fetch(`${base}/__admin/api/${path}`, { method, headers: authenticated ? { 'X-ClawGuard-Pin': 'test-pin' } : {} });
+    return { status: res.status, body: await res.json() };
+  }
+  try { await run(admin); } finally { await new Promise(resolve => server.close(resolve)); }
+}
+
+test('week and month buttons persist the selected duration and expire at the exact boundary', async t => {
+  for (const [label, days] of [['1w', 7], ['1month', 30]]) {
+    await t.test(label, async t => {
+      await fixture(async f => {
+        const r = await scope(f, '/long-running?owner=me');
+        for (const choice of ['15m', '30m', '1h', '4h', '24h', '1w', '1month', 'Forever']) button(r.menu, choice);
+        await r.tap(label);
+        assert.equal(await r.response, 200);
+        const [grant] = f.audit.getScopedApprovals();
+        assert.equal(grant.expiresAt - grant.approvedAt, days * 86400_000);
+        await f.restart();
+        t.mock.timers.enable({ apis: ['Date'], now: grant.expiresAt - 1 });
+        try {
+          assert.equal(await f.request('GET', 'app', '/long-running?owner=me'), 200);
+          t.mock.timers.setTime(grant.expiresAt);
+          await deny(f, '/long-running?owner=me');
+          await f.restart();
+          await deny(f, '/long-running?owner=me');
+        } finally { t.mock.timers.reset(); }
+      }, 3000);
+    });
+  }
+});
+
+test('Forever has no expiry after decades and restart, keeps its scope and remains revocable in the dashboard', async t => {
+  await fixture(async f => {
+    const r = await scope(f, '/permanent?owner=me');
+    await r.tap('Forever');
+    assert.equal(await r.response, 200);
+    assert.match(r.menu.text, /Approved until revoked/);
+    assert.equal(f.audit.getScopedApprovals()[0].expiresAt, null);
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() + 20 * 365 * 86400_000 });
+    try {
+      await f.restart();
+      assert.equal(await f.request('GET', 'app', '/permanent?owner=me'), 200);
+      await deny(f, '/permanent?owner=someone-else');
+      await deny(f, '/permanent?owner=me', 'POST');
+      await withAdmin(f, async admin => {
+        const data = (await admin('approvals')).body;
+        const [grant] = Object.values(data.active);
+        assert.equal(grant.expiresAt, null);
+        assert.equal(grant.remainingMinutes, null);
+        assert.equal(data.recent[0].ttl_seconds, null);
+        assert.equal((await admin(`revoke/app?scopeId=${grant.scopeId}`, 'POST')).status, 200);
+      });
+      await f.restart();
+      await deny(f, '/permanent?owner=me');
+    } finally { t.mock.timers.reset(); }
+  }, 3000);
+});
+
 test('default scope is exact GET with all query values, survives restart and expires at the boundary', async t => {
   await fixture(async f => {
     const r = await scope(f, '/api/items?owner=me&page=1&tag=a&tag=b');
@@ -168,17 +233,7 @@ test('dashboard shows structured scope and can revoke its ID without removing a 
     for (const target of ['/one?owner=me', '/two?owner=me']) {
       const r = await scope(f, target); await r.tap('1h'); assert.equal(await r.response, 200);
     }
-    f.config.admin = { enabled: true, pin: 'test-pin', allowedIPs: ['127.0.0.1'], strictMode: false };
-    f.config.sshBroker = {};
-    const app = express();
-    app.use('/__admin', createAdminRouter(f.config, f.manager, f.audit));
-    const server = http.createServer(app);
-    const base = await listen(server);
-    async function admin(path, method = 'GET', authenticated = true) {
-      const res = await fetch(`${base}/__admin/api/${path}`, { method, headers: authenticated ? { 'X-ClawGuard-Pin': 'test-pin' } : {} });
-      return { status: res.status, body: await res.json() };
-    }
-    try {
+    await withAdmin(f, async admin => {
       assert.equal((await admin('approvals', 'GET', false)).status, 401);
       const data = (await admin('approvals')).body;
       const approvals = Object.values(data.active);
@@ -194,20 +249,20 @@ test('dashboard shows structured scope and can revoke its ID without removing a 
       assert.equal(await f.request('GET', 'app', '/two?owner=me'), 200);
       assert.equal((await admin('revoke-all', 'POST')).status, 200);
       await deny(f, '/two?owner=me');
-    } finally { await new Promise(resolve => server.close(resolve)); }
+    });
   }, 3000);
 });
 
 test('new allow replaces scopes; service configuration changes invalidate scopes', async t => {
   await fixture(async f => {
-    let r = await scope(f, '/one'); await r.tap('24h'); assert.equal(await r.response, 200);
+    let r = await scope(f, '/one'); await r.tap('Forever'); assert.equal(await r.response, 200);
     await f.transport.command('/allow app 30m');
     assert.deepEqual(f.audit.getScopedApprovals(), []);
     const [temporary] = f.audit.getTemporaryServiceApprovals();
     t.mock.timers.enable({ apis: ['Date'], now: temporary.expiresAt });
     try { await deny(f, '/one'); } finally { t.mock.timers.reset(); }
     await f.transport.command('/revoke app');
-    r = await scope(f, '/two'); await r.tap('1h'); assert.equal(await r.response, 200);
+    r = await scope(f, '/two'); await r.tap('Forever'); assert.equal(await r.response, 200);
     f.config.services.app.http.allowedMethods.push('PUT');
     await deny(f, '/two');
     assert.deepEqual(f.audit.getScopedApprovals(), []);

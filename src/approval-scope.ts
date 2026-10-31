@@ -1,5 +1,12 @@
 import { HttpApprovalScope } from './types';
 
+// -1 means no expiry. Zero remains reserved for a one-request decision.
+export const SCOPE_FOREVER = -1;
+export const SCOPE_DURATIONS = {
+  '15m': 900, '30m': 1800, '1h': 3600, '4h': 14400, '24h': 86400,
+  '1w': 604800, '1month': 2592000, 'forever': SCOPE_FOREVER,
+};
+
 // Do not decode the path or collapse slashes. Ambiguous traversal/separator
 // encodings cannot use a reusable scope; the request can still be approved once.
 export function approvalTarget(target: string): { path: string; params: [string, string][] } | undefined {

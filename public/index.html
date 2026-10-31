@@ -1367,8 +1367,8 @@ function activeApprovalRow(info) {
       <td><span class="badge blue">${esc(method)}</span></td>
       <td>${scopeCell}</td>
       <td>${esc(info.approvedBy)}</td>
-      <td>${new Date(info.expiresAt).toLocaleString()}</td>
-      <td><span class="badge green">${info.remainingMinutes} min</span></td>
+      <td>${info.expiresAt === null ? 'Until revoked' : new Date(info.expiresAt).toLocaleString()}</td>
+      <td><span class="badge green">${info.remainingMinutes === null ? 'Forever' : `${info.remainingMinutes} min`}</span></td>
       <td><button class="btn btn-danger btn-sm" data-service="${esc(info.service)}" data-scope-id="${esc(info.scopeId || '')}" data-method="${esc(method)}" data-path="${path === null ? '' : esc(path)}" data-pathscoped="${path === null ? '0' : '1'}" onclick="revokeApprovalFromBtn(this)">Revoke</button></td>
     </tr>
   `;
@@ -1392,7 +1392,7 @@ function approvalHistoryRow(row) {
       <td><span class="badge blue">${esc(row.method || '*')}</span></td>
       <td>${pathCell}</td>
       <td>${esc(row.approved_by)}</td>
-      <td>${row.ttl_seconds >= 3600 ? `${Math.round(row.ttl_seconds / 3600)}h` : `${Math.round(row.ttl_seconds / 60)} min`}</td>
+      <td>${row.ttl_seconds === null ? 'Forever' : row.ttl_seconds >= 3600 ? `${Math.round(row.ttl_seconds / 3600)}h` : `${Math.round(row.ttl_seconds / 60)} min`}</td>
     </tr>
   `;
 }
