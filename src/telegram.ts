@@ -866,7 +866,7 @@ export class TelegramNotifier {
       this.pendingTexts.set(requestId, text);
       const actions = new Set(['approve_once', 'deny', ...(approvalInfo?.oneTime ? [] : ['approve_1h'])]);
       this.httpMessages.set(requestId, { messageId: 0, actions });
-      const scopeAction = approvalInfo?.oneTime ? undefined
+      const scopeActions = approvalInfo?.oneTime ? undefined
         : this.scopeMenu.register(requestId, service, method, path, deadline, allowedMethods);
 
       (async () => {
@@ -879,10 +879,12 @@ export class TelegramNotifier {
               ],
             ] : [[
               { text: '✅ Only this request', callback_data: `approve_once:${requestId}` },
-              ...(scopeAction ? [{ text: '🎯 Choose scope', callback_data: scopeAction }] : []),
-              { text: '❌ Deny', callback_data: `deny:${requestId}` },
-            ], [
               { text: '⚡ 1h method-wide', callback_data: `approve_1h:${requestId}` },
+            ], ...(scopeActions ? [[
+              { text: 'Method-wide', callback_data: scopeActions.methodWide },
+              { text: 'Path-based', callback_data: scopeActions.pathBased },
+            ]] : []), [
+              { text: '❌ Deny', callback_data: `deny:${requestId}` },
             ]],
           },
         }));

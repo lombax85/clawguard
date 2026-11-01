@@ -44,12 +44,11 @@ async function approveRequest(f, method, alias, choice) {
     if (!prompt) await delay(5);
   }
   assert.ok(prompt, 'request must ask for a Telegram decision');
-  await f.transport.tap(prompt, button(prompt, '🎯 Choose scope'));
-  if (choice === '✅ 1h') {
-    await f.transport.tap(prompt, button(prompt, 'Path'));
-    await f.transport.tap(prompt, button(prompt, '0. /'));
-    await f.transport.tap(prompt, button(prompt, 'Query'));
-    await f.transport.tap(prompt, button(prompt, 'Ignore query'));
+  await f.transport.tap(prompt, button(prompt, choice === '✅ 1h' ? 'Method-wide' : 'Path-based'));
+  if (choice !== '✅ 1h') {
+    await f.transport.tap(prompt, button(prompt, '/resource/*'));
+    await f.transport.tap(prompt, button(prompt, 'More options'));
+    await f.transport.tap(prompt, button(prompt, 'Exact path only'));
   }
   await f.transport.tap(prompt, button(prompt, choice === '✅ 1h' ? '1h' : '24h'));
   return response;

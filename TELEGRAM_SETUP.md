@@ -101,35 +101,53 @@ You should receive a Telegram message like:
 🔹 Agent IP: ::1
 🔹 Time: 28/2/2026, 15:30:00
 
-[✅ Only this request] [🎯 Choose scope] [❌ Deny]
-[⚡ 1h method-wide]
+[✅ Only this request] [⚡ 1h method-wide]
+[Method-wide]         [Path-based]
+[❌ Deny]
 ```
 
-Tap **Only this request** to approve one request. To reuse an approval, tap
-**Choose scope**, review its scope, then tap a duration.
-
-The second row provides a quick approval. **1h method-wide** approves the
-request's HTTP method on all paths and queries of that service for one hour.
-It does not approve other methods or other services. This shortcut does not
-replace the scope editor. Requests that require a fresh decision do not offer
-the method-wide shortcut.
+Tap **Only this request** to approve one request. **1h method-wide** approves
+that HTTP method on all paths and queries of the service for one hour.
+It does not approve other methods or services. Both shortcuts take one tap.
 
 ### HTTP approval scopes
 
-The scope editor updates the same Telegram message. It starts with the exact
-path, all query parameters and the request's HTTP method. No access is granted
-while you change the scope.
+The menus update the same Telegram message. No access is granted while you
+change the scope. A duration button approves the displayed scope and the
+pending request. There is no additional confirmation step.
 
-1. Tap **Path** to select a complete path or an ancestor from the list.
-2. Tap **Query** to select how query parameters must match.
-3. Tap **Methods** to select additional HTTP methods, if needed.
-4. Tap a duration to approve the scope shown in the summary.
+**Method-wide** takes two taps with the default settings:
 
-Path choices show the actual prefix at each depth. Long lists have **Next** and
-**Previous** buttons. Selecting an ancestor includes its subpaths so the scope
-still covers the pending request. For the complete path, **Subpaths** switches
-between that path alone and that path with its descendants. `/repo` with
-subpaths matches `/repo` and `/repo/info`, but not `/repo-other`.
+1. Tap **Method-wide**.
+2. Tap a duration.
+
+The summary shows the request's HTTP method, all paths and an ignored query.
+Use **Methods** to add HTTP methods if needed. This is optional. There are no
+path or query controls in this menu. **Back** returns to the initial choices.
+
+**Path-based** takes three taps with the default settings:
+
+1. Tap **Path-based**.
+2. Tap a path prefix or the complete path.
+3. Tap a duration.
+
+Each path choice includes the selected path and all its subpaths by default.
+Query parameters are ignored by default. The request's HTTP method stays
+selected. For example, `/users/fabio/*` covers `/users/fabio` and
+`/users/fabio/documents`, with any query. It does not cover `/users/fabio2`.
+The `/*` label describes subpath matching; it is not a literal URL suffix.
+
+The path list shows the actual prefixes. Long lists have **Next** and
+**Previous** buttons. The root path is offered only for a request to `/`;
+use **Method-wide** to allow all paths of a service.
+
+The duration screen also contains optional **Methods** and **Query** controls.
+For the complete request path, **More options** lets you select **Exact path
+only** or **Include subpaths**. An ancestor must include its subpaths to cover
+the pending request. **Change path** returns to the path list. Selecting a
+path includes its subpaths again and preserves the selected methods and query
+rule. Returning to the initial choices and opening either mode resets its
+defaults.
 
 | Query option | Matching rule |
 |---|---|
@@ -158,8 +176,9 @@ operations, SSH sessions and FTP leases, do not gain reusable HTTP scopes.
 request. Editing does not extend its approval timeout. Menu buttons are bound
 to the message and the approver who opened the editor. Old buttons, double
 taps and expired requests cannot create or extend a grant. If a URL cannot
-be safely matched, or is too long for the editor, **Choose scope** is not
-offered. The quick approval remains available for ordinary HTTP requests.
+be safely matched, or is too long for the editor, the **Method-wide** and
+**Path-based** menus are not offered. Quick approvals remain available for
+ordinary HTTP requests.
 
 Scopes retain their expiry after a restart. A service configuration change
 invalidates its scopes when next used. The dashboard's **Approvals** page shows

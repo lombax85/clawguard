@@ -24,7 +24,11 @@ async function deny(f, target, method = 'GET', alias = 'app') {
 }
 async function scope(f, target, method = 'GET') {
   const r = await begin(f, target, method);
-  await r.tap('🎯 Choose scope');
+  await r.tap('Path-based');
+  const path = target.split('?')[0];
+  const choice = `${path}${path.endsWith('/') ? '' : '/'}*`;
+  while (!r.menu.options.reply_markup.inline_keyboard.flat().some(b => b.text === choice)) await r.tap('Next →');
+  await r.tap(choice);
   return r;
 }
 
@@ -46,8 +50,9 @@ test('initial buttons offer one single-request action and the method-wide shortc
   await fixture(async f => {
     const r = await begin(f, '/quick');
     assert.deepEqual(r.menu.options.reply_markup.inline_keyboard.map(row => row.map(b => b.text)), [
-      ['✅ Only this request', '🎯 Choose scope', '❌ Deny'],
-      ['⚡ 1h method-wide'],
+      ['✅ Only this request', '⚡ 1h method-wide'],
+      ['Method-wide', 'Path-based'],
+      ['❌ Deny'],
     ]);
     const quick = button(r.menu, '✅ Only this request');
     await f.transport.tap(r.menu, quick);
@@ -95,6 +100,137 @@ test('quick 1h is limited to its service and method, survives restart, and expir
   }, 3000);
 });
 
+test('method-wide takes two taps, ignores path and query, and preserves service, method and expiry boundaries', async t => {
+  await fixture(async f => {
+    f.config.services.other = structuredClone(f.config.services.app);
+    const r = await begin(f, '/repo/refs?service=upload');
+    await r.tap('Method-wide');
+    assert.match(r.menu.text, /Methods: GET\nPath: all\nQuery: ignored/);
+    assert.deepEqual(r.menu.options.reply_markup.inline_keyboard.map(row => row.map(b => b.text)), [
+      ['15m', '30m', '1h'], ['4h', '24h', '1w'], ['1month', 'Forever'],
+      ['Methods: GET ▾'], ['← Back'], ['❌ Deny'],
+    ]);
+    assert.equal(f.hits(), 0);
+    await r.tap('1month');
+    assert.equal(await r.response, 200);
+    const [grant] = f.audit.getScopedApprovals();
+    assert.deepEqual(grant.scope, { path: '/', includeSubpaths: true, methods: ['GET'], query: { mode: 'ignore', params: [] } });
+    assert.equal(grant.expiresAt - grant.approvedAt, 30 * 86400_000);
+    await f.restart();
+    assert.equal(await f.request('GET', 'app', '/'), 200);
+    assert.equal(await f.request('GET', 'app', '/other/path?new=value'), 200);
+    await deny(f, '/other/path?new=value', 'POST');
+    await deny(f, '/other/path?new=value', 'GET', 'other');
+    t.mock.timers.enable({ apis: ['Date'], now: grant.expiresAt });
+    try { await deny(f, '/other/path?new=value'); } finally { t.mock.timers.reset(); }
+  }, 3000);
+});
+
+test('path-based takes three taps and includes subpaths and any query for both ancestor and complete paths', async t => {
+  for (const selected of ['/users/Fabio%20Lombardo', '/users/Fabio%20Lombardo/documents/123']) {
+    await t.test(selected, async () => {
+      await fixture(async f => {
+        const r = await begin(f, '/users/Fabio%20Lombardo/documents/123?format=pdf');
+        await r.tap('Path-based');
+        assert.deepEqual(r.menu.options.reply_markup.inline_keyboard.map(row => row.map(b => b.text)), [
+          ['/users/*'], ['/users/Fabio%20Lombardo/*'], ['/users/Fabio%20Lombardo/documents/*'],
+          ['/users/Fabio%20Lombardo/documents/123/*'], ['← Back'], ['❌ Deny'],
+        ]);
+        const forged = button(r.menu, selected + '/*').replace(/pick-\d+$/, 'grant-forever');
+        await f.transport.tap(r.menu, forged);
+        assert.match(f.transport.answers.at(-1).text, /Choice not available/);
+        await r.tap(selected + '/*');
+        assert.match(r.menu.text, /Subpaths: included\nQuery: Ignored/);
+        assert.equal(f.hits(), 0);
+        await r.tap('1h');
+        assert.equal(await r.response, 200);
+        for (const target of [selected, selected + '?format=json&new=1', selected + '/child?new=2']) {
+          assert.equal(await f.request('GET', 'app', target), 200);
+        }
+        await deny(f, selected + '-other');
+        await deny(f, '/users/other/documents/123');
+        await deny(f, selected, 'POST');
+        await f.restart();
+        assert.equal(await f.request('GET', 'app', selected + '/child?different=1'), 200);
+      }, 3000);
+    });
+  }
+});
+
+test('method-wide optionally adds allowed methods, keeps the original method, and can be revoked', async () => {
+  await fixture(async f => {
+    const r = await begin(f, '/api?x=1');
+    await r.tap('Method-wide');
+    const forged = button(r.menu, '1h').replace('grant-1h', 'view-query');
+    await f.transport.tap(r.menu, forged);
+    assert.match(f.transport.answers.at(-1).text, /Choice not available/);
+    await r.tap('Methods: GET ▾');
+    await r.tap('✓ GET');
+    button(r.menu, '✓ GET');
+    await r.tap('POST'); await r.tap('Done');
+    assert.match(r.menu.text, /Methods: GET, POST/);
+    await r.tap('Forever');
+    assert.equal(await r.response, 200);
+    assert.equal(f.audit.getScopedApprovals()[0].expiresAt, null);
+    assert.equal(await f.request('POST', 'app', '/other?x=2'), 200);
+    assert.equal(await f.request('DELETE', 'app', '/other'), 405);
+    await f.transport.command('/revoke app');
+    await deny(f, '/other');
+    await deny(f, '/other', 'POST');
+  }, 3000);
+});
+
+test('back navigation switches modes with fresh defaults and rejects buttons from previous views', async () => {
+  await fixture(async f => {
+    const r = await begin(f, '/a/b?owner=me');
+    const initialPath = button(r.menu, 'Path-based');
+    await r.tap('Method-wide');
+    await f.transport.tap(r.menu, initialPath);
+    assert.match(f.transport.answers.at(-1).text, /expired/);
+    await r.tap('Methods: GET ▾'); await r.tap('POST'); await r.tap('Done');
+    const oldGrant = button(r.menu, 'Forever');
+    await r.tap('← Back'); await r.tap('Path-based'); await r.tap('/a/b/*');
+    assert.match(r.menu.text, /Methods: GET\nPath: \/a\/b\nSubpaths: included\nQuery: Ignored/);
+    await r.tap('Query: ignored ▾'); await r.tap('Same parameters and values');
+    await r.tap('More options'); await r.tap('Exact path only');
+    await r.tap('← Change path'); await r.tap('/a/*');
+    assert.match(r.menu.text, /Subpaths: included/);
+    assert.ok(!r.menu.options.reply_markup.inline_keyboard.flat().some(b => b.text === 'More options'));
+    await r.tap('← Change path'); await r.tap('← Back'); await r.tap('Method-wide');
+    assert.match(r.menu.text, /Methods: GET\nPath: all\nQuery: ignored/);
+    await f.transport.tap(r.menu, oldGrant);
+    assert.match(f.transport.answers.at(-1).text, /expired/);
+    assert.equal(f.hits(), 0);
+    assert.deepEqual(f.audit.getScopedApprovals(), []);
+    await r.tap('❌ Deny');
+    assert.equal(await r.response, 403);
+  }, 3000);
+});
+
+test('quick actions still work after returning from the path selector', async t => {
+  for (const quick of ['✅ Only this request', '⚡ 1h method-wide']) {
+    await t.test(quick, async () => {
+      await fixture(async f => {
+        const r = await begin(f, '/a/b?x=1');
+        await r.tap('Path-based'); await r.tap('← Back');
+        const callback = button(r.menu, quick);
+        await r.tap(quick);
+        assert.equal(await r.response, 200);
+        await f.transport.tap(r.menu, callback);
+        assert.deepEqual(f.audit.getScopedApprovals(), []);
+        if (quick === '✅ Only this request') {
+          assert.deepEqual(f.audit.getActiveApprovals(), []);
+          await deny(f, '/a/b?x=1');
+        } else {
+          assert.equal(f.audit.getActiveApprovals().length, 1);
+          assert.equal(await f.request('GET', 'app', '/other?x=2'), 200);
+          await deny(f, '/other?x=2', 'POST');
+        }
+      }, 3000);
+    });
+  }
+});
+
 test('week and month buttons persist the selected duration and expire at the exact boundary', async t => {
   for (const [label, days] of [['1w', 7], ['1month', 30]]) {
     await t.test(label, async t => {
@@ -122,6 +258,7 @@ test('week and month buttons persist the selected duration and expire at the exa
 test('Forever has no expiry after decades and restart, keeps its scope and remains revocable in the dashboard', async t => {
   await fixture(async f => {
     const r = await scope(f, '/permanent?owner=me');
+    await r.tap('Query: ignored ▾'); await r.tap('Same parameters and values');
     await r.tap('Forever');
     assert.equal(await r.response, 200);
     assert.match(r.menu.text, /Approved until revoked/);
@@ -146,9 +283,11 @@ test('Forever has no expiry after decades and restart, keeps its scope and remai
   }, 3000);
 });
 
-test('default scope is exact GET with all query values, survives restart and expires at the boundary', async t => {
+test('optional exact path and all query values survive restart and expire at the boundary', async t => {
   await fixture(async f => {
     const r = await scope(f, '/api/items?owner=me&page=1&tag=a&tag=b');
+    await r.tap('More options'); await r.tap('Exact path only');
+    await r.tap('Query: ignored ▾'); await r.tap('Same parameters and values');
     assert.match(r.menu.text, /Subpaths: excluded/);
     assert.match(r.menu.text, /All parameters/);
     assert.equal(f.hits(), 0);
@@ -173,11 +312,11 @@ test('repository scope ignores query, selects GET and POST and respects path bou
   await fixture(async f => {
     f.config.services.other = structuredClone(f.config.services.app);
     const r = await scope(f, '/logotel_spa/repo.git/info/refs?service=git-upload-pack');
-    await r.tap('Path');
-    await r.tap('2. /logotel_spa/repo.git');
+    await r.tap('← Change path');
+    await r.tap('/logotel_spa/repo.git/*');
     assert.match(r.menu.text, /Subpaths: included/);
-    await r.tap('Query'); await r.tap('Ignore query');
-    await r.tap('Methods'); await r.tap('POST'); await r.tap('Done');
+    await r.tap('Query: ignored ▾'); await r.tap('Ignore query');
+    await r.tap('Methods: GET ▾'); await r.tap('POST'); await r.tap('Done');
     await r.tap('1h');
     assert.equal(await r.response, 200);
     for (const target of ['/logotel_spa/repo.git', '/logotel_spa/repo.git/info/refs?different=1', '/logotel_spa/repo.git/git-upload-pack']) {
@@ -201,10 +340,10 @@ test('repository scope ignores query, selects GET and POST and respects path bou
 test('selected query parameters keep their values and multiplicity while other parameters can change', async () => {
   await fixture(async f => {
     const r = await scope(f, '/api/items?owner=me&page=1&tag=a&tag=b');
-    await r.tap('Query'); await r.tap('Choose parameters');
+    await r.tap('Query: ignored ▾'); await r.tap('Choose parameters');
     await r.tap('Done');
     assert.ok(!r.menu.options.reply_markup.inline_keyboard.flat().some(b => b.text === '1h'));
-    await r.tap('Query'); await r.tap('Choose parameters');
+    await r.tap('Query: selected ▾'); await r.tap('Choose parameters');
     await r.tap('owner'); await r.tap('Done');
     assert.match(r.menu.text, /Selected parameters: owner=me/);
     await r.tap('15m');
@@ -222,18 +361,19 @@ test('scope callbacks bind message, chat, user and revision; once cannot be repl
   await fixture(async f => {
     const r = await begin(f, '/a/b');
     const original = structuredClone(r.menu);
-    const open = button(r.menu, '🎯 Choose scope');
+    const open = button(r.menu, 'Path-based');
     for (const overrides of [{ from: { id: 8, is_bot: false } }, { from: { id: 7, is_bot: true } },
       { message: { ...r.menu, chat: { id: 200 } } }, { message: { ...r.menu, message_id: -1 } }]) {
       await f.transport.tap(r.menu, open, overrides);
       assert.equal(f.hits(), 0);
     }
-    await r.tap('🎯 Choose scope');
+    await r.tap('Path-based');
+    await r.tap('/a/b/*');
     const oldGrant = button(r.menu, '1h');
-    await r.tap('Path');
+    await r.tap('← Change path');
     await f.transport.tap(r.menu, oldGrant);
     assert.equal(f.hits(), 0);
-    await r.tap('1. /a');
+    await r.tap('/a/*');
     const grant = button(r.menu, '30m');
     const forged = button(original, '✅ Only this request').replace('approve_once:', 'approve_1month:');
     await f.transport.tap(original, forged);
@@ -270,14 +410,39 @@ test('path and query menus paginate and show full scope; sensitive query values 
     const path = '/a/b/c/d/e/f/g/h/i/j';
     const r = await scope(f, `${path}?token=private-test-value&${Array.from({ length: 10 }, (_, i) => `p${i}=v${i}`).join('&')}`);
     assert.ok(!r.menu.text.includes('private-test-value'));
+    await r.tap('Query: ignored ▾');
+    assert.ok(!r.menu.text.includes('private-test-value'));
     assert.match(r.menu.text, /token=\[hidden\]/);
-    await r.tap('Path'); await r.tap('Next →'); await r.tap('8. /a/b/c/d/e/f/g/h');
-    await r.tap('Query'); await r.tap('Choose parameters'); await r.tap('Next →');
+    await r.tap('Ignore query');
+    await r.tap('← Change path'); await r.tap('Next →'); await r.tap('/a/b/c/d/e/f/g/h/*');
+    await r.tap('Query: ignored ▾'); await r.tap('Choose parameters'); await r.tap('Next →');
     await r.tap('p9'); await r.tap('Done');
     assert.match(r.menu.text, /Path: \/a\/b\/c\/d\/e\/f\/g\/h\n/);
     await r.tap('24h');
     assert.equal(await r.response, 200);
     assert.equal(f.audit.getScopedApprovals()[0].scope.path, '/a/b/c/d/e/f/g/h');
+  }, 3000);
+});
+
+test('long path choices remain distinct and query previews fit a Telegram message when edited again', async () => {
+  await fixture(async f => {
+    const prefix = '/' + 'a'.repeat(80);
+    const r = await begin(f, `${prefix}/items/details?value=${'%00'.repeat(500)}`);
+    await r.tap('Path-based');
+    const paths = r.menu.options.reply_markup.inline_keyboard.flat().filter(b => b.callback_data.includes(':pick-'));
+    assert.equal(new Set(paths.map(b => b.text)).size, 3);
+    assert.ok(paths.every(b => b.text.endsWith('/*') && b.text.length <= 60));
+    await r.tap(paths.at(-1).text);
+    await r.tap('Query: ignored ▾');
+    assert.ok(r.menu.text.length <= 4096);
+    await r.tap('Same parameters and values');
+    assert.ok(r.menu.text.length <= 4096);
+    await r.tap('Query: same ▾');
+    assert.ok(r.menu.text.length <= 4096);
+    await r.tap('Ignore query');
+    await r.tap('1h');
+    assert.equal(await r.response, 200);
+    assert.equal(await f.request('GET', 'app', `${prefix}/items/details/child?changed=1`), 200);
   }, 3000);
 });
 
@@ -291,7 +456,7 @@ test('dashboard shows structured scope and can revoke its ID without removing a 
       const data = (await admin('approvals')).body;
       const approvals = Object.values(data.active);
       assert.equal(approvals.length, 2);
-      assert.equal(data.recent[0].scope.query.mode, 'exact');
+      assert.equal(data.recent[0].scope.query.mode, 'ignore');
       const one = approvals.find(item => item.scope.path === '/one');
       assert.deepEqual(one.scope.methods, ['GET']);
       assert.ok(one.expiresAt && one.remainingMinutes > 0);
@@ -344,10 +509,9 @@ test('legacy approvals keep their scope after upgrade and a new allow replaces t
 
 test('a root scope cannot authorize a plugin operation that requires a fresh decision', async () => {
   await fixture(async f => {
-    const r = await scope(f, '/sdk/read');
-    await r.tap('Path'); await r.tap('0. /');
-    await r.tap('Query'); await r.tap('Ignore query');
-    await r.tap('Methods'); await r.tap('POST'); await r.tap('Done');
+    const r = await begin(f, '/sdk/read');
+    await r.tap('Method-wide');
+    await r.tap('Methods: GET ▾'); await r.tap('POST'); await r.tap('Done');
     await r.tap('1h'); assert.equal(await r.response, 200);
     const before = f.transport.messages.length;
     const decision = f.manager.checkApproval('app', f.config.services.app, 'POST', '/sdk', '127.0.0.1', undefined,
