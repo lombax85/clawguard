@@ -92,7 +92,7 @@ async function fixture(run, approvalTimeoutMs = 20) {
     req.on('error', reject); req.end();
   });
   try {
-    await run({ transport, config, request, get audit() { return audit; }, get manager() { return manager; },
+    await run({ transport, config, request, get base() { return base; }, get audit() { return audit; }, get manager() { return manager; },
       hits: () => hits, async restart() {
         await new Promise(resolve => server.close(resolve));
         await telegram.stop(); audit.close();

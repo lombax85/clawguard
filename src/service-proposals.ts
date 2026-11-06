@@ -31,6 +31,16 @@ export function isProposalApplying(config: Config, name: string): boolean {
   return applyingServices.get(config)?.has(name) ?? false;
 }
 
+/** Shared by both listeners and every admin service mutation. */
+export function reserveService(config: Config, name: string): (() => void) | undefined {
+  const applying = applyingServices.get(config) ?? new Set<string>();
+  applyingServices.set(config, applying);
+  if (applying.has(name)) return;
+  applying.add(name);
+  let released = false;
+  return () => { if (!released) { released = true; applying.delete(name); } };
+}
+
 function object(value: unknown): value is Obj {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -176,7 +186,7 @@ function normalizeProposal(name: unknown, input: unknown, config: Config): Obj {
     }
     if (object(value) && '$clawguard' in value) {
       const validCredential = marker(value, CREDENTIAL) && (isCredentialPath(doc, path)
-        || path === '/auth/username' || path === '/auth/pluginConfig/username');
+        || path === '/auth/dummyToken' || path === '/auth/username' || path === '/auth/pluginConfig/username');
       const validInput = marker(value, INPUT) && path === '/ssh/knownHostKey';
       if (!validCredential && !validInput) throw new Error(`Invalid placeholder at ${path}`);
     }
@@ -193,6 +203,61 @@ function normalizeProposal(name: unknown, input: unknown, config: Config): Obj {
   return doc;
 }
 
+function canonical(value: unknown): string {
+  const sorted = (v: unknown): unknown => Array.isArray(v) ? v.map(sorted)
+    : object(v) ? Object.fromEntries(Object.keys(v).sort().map(key => [key, sorted(v[key])])) : v;
+  return JSON.stringify(sorted(value));
+}
+
+/** No secrets or provider references enter proposal snapshots or diffs. */
+function proposalSnapshot(service: ServiceConfig): Obj {
+  const doc = structuredClone(service) as unknown as Obj;
+  doc.protocol ??= 'http';
+  walk(doc, (value, path) => {
+    if ((isCredentialPath(doc, path) || path === '/auth/dummyToken') && value !== '') set(doc, path, { $clawguard: CREDENTIAL });
+  });
+  return doc;
+}
+
+function mergePatch(base: unknown, patch: unknown): unknown {
+  if (!object(base) || !object(patch) || '$clawguard' in patch) return structuredClone(patch);
+  const result = structuredClone(base);
+  for (const [key, value] of Object.entries(patch)) result[key] = mergePatch(result[key], value);
+  return result;
+}
+
+function changes(before: unknown, after: unknown, path = ''): NonNullable<ServiceProposal['changes']> {
+  if (canonical(before) === canonical(after)) return [];
+  if (object(before) && object(after) && !('$clawguard' in before) && !('$clawguard' in after)) {
+    return [...new Set([...Object.keys(before), ...Object.keys(after)])].sort()
+      .flatMap(key => changes(before[key], after[key], `${path}/${pointerPart(key)}`));
+  }
+  return [{ path, ...(before === undefined ? {} : { before }), ...(after === undefined ? {} : { after }) }];
+}
+
+function credentialContext(doc: Obj): string {
+  return canonical({ protocol: doc.protocol, upstream: doc.upstream, hostnames: doc.hostnames, auth: doc.auth });
+}
+
+function matchesBase(proposal: ServiceProposal, config: Config, audit: AuditLogger): boolean {
+  const current = config.services[proposal.name];
+  if ((proposal.operation === 'update') !== !!current) return false;
+  return !proposal.baseRevision || proposal.baseRevision === audit.getServiceRevision(proposal.name, current);
+}
+
+function refreshProposal(proposal: ServiceProposal, config: Config, audit: AuditLogger): ServiceProposal {
+  if (proposal.status === 'pending' && !matchesBase(proposal, config, audit)) {
+    audit.staleServiceProposal(proposal.id);
+    return audit.getServiceProposal(proposal.id)!;
+  }
+  return proposal;
+}
+
+function requirements(proposal: ServiceProposal) {
+  return proposalRequirements(proposal.config).map(item => ({ ...item,
+    ...(item.kind === 'credential' && proposal.reuseCredentials?.includes(item.path) ? { reusable: true } : {}) }));
+}
+
 function parseBody(req: Request): Obj {
   const raw = req.body?.toString() || '{}';
   if (Buffer.byteLength(raw) > MAX_PROPOSAL_BYTES) throw new Error('Proposal payload exceeds 64 KiB');
@@ -202,7 +267,7 @@ function parseBody(req: Request): Obj {
 }
 
 function publicStatus(proposal: ServiceProposal): Obj {
-  return { id: proposal.id, name: proposal.name, status: proposal.status,
+  return { id: proposal.id, name: proposal.name, operation: proposal.operation ?? 'create', status: proposal.status,
     createdAt: proposal.createdAt, decidedAt: proposal.decidedAt };
 }
 
@@ -224,18 +289,35 @@ export function createServiceProposalRouter(config: Config, audit: AuditLogger):
     try {
       const body = parseBody(req);
       if (Object.keys(body).some((key) => key !== 'name' && key !== 'config')) throw new Error('Only name and config are accepted');
-      const doc = normalizeProposal(body.name, body.config, config);
-      const name = body.name as string;
-      if (Object.hasOwn(config.services, name)) { res.status(409).json({ error: 'Service already exists' }); return; }
-      const existing = audit.getPendingServiceProposal(name);
-      if (existing) {
-        if (JSON.stringify(existing.config) === JSON.stringify(doc)) {
+      const name = body.name;
+      if (typeof name !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(name) || name.startsWith('__')
+        || ['constructor', 'prototype'].includes(name)) throw new Error('Invalid service name');
+      if (!object(body.config)) throw new Error('config must be an object');
+      walk(body.config, () => {}); // Reject unsafe keys and excessive nesting before merging.
+      if (isProposalApplying(config, name)) { res.status(409).json({ error: 'Service is being changed; try after the operation finishes' }); return; }
+      const current = config.services[name];
+      const before = current ? proposalSnapshot(current) : undefined;
+      const doc = normalizeProposal(name, current ? mergePatch(before, body.config) : body.config, config);
+      const baseRevision = audit.getServiceRevision(name, current);
+      const existingRow = audit.getPendingServiceProposal(name);
+      const existing = existingRow && refreshProposal(existingRow, config, audit);
+      if (existing && (existing.status === 'pending' || existing.status === 'approving')) {
+        if (canonical(existing.config) === canonical(doc) && (!existing.baseRevision || existing.baseRevision === baseRevision)) {
           res.status(200).json({ ...publicStatus(existing), activated: false }); return;
         }
         res.status(409).json({ error: 'A different proposal for this service is already pending' }); return;
       }
+      const diff = current ? changes(before, doc) : undefined;
+      if (diff?.length === 0) {
+        res.json({ name, operation: 'update', status: 'unchanged', activated: true, message: 'Service already has this configuration' }); return;
+      }
       const proposal: ServiceProposal = {
-        id: randomUUID(), name, config: doc, status: 'pending', createdAt: new Date().toISOString(),
+        id: randomUUID(), name, operation: current ? 'update' : 'create', baseRevision,
+        config: doc, status: 'pending', createdAt: new Date().toISOString(),
+        ...(before ? { before, changes: diff,
+          reuseCredentials: proposalRequirements(doc).filter(item => item.kind === 'credential'
+            && get(current, item.path) !== undefined && get(current, item.path) !== '').map(item => item.path),
+          credentialContextChanged: credentialContext(before) !== credentialContext(doc) } : {}),
         decidedAt: null, clientIp: req.ip || req.socket.remoteAddress || 'unknown',
       };
       // RequestMeta uses shorter keys; persist the explicit audit field names.
@@ -244,13 +326,13 @@ export function createServiceProposalRouter(config: Config, audit: AuditLogger):
       proposal.requestReason = meta.reason;
       audit.saveServiceProposal(proposal);
       res.status(202).json({ ...publicStatus(proposal), activated: false, validation: 'configuration',
-        requirements: proposalRequirements(doc), requiredUpstreams: proposalUpstreams(doc, config) });
+        requirements: requirements(proposal), requiredUpstreams: proposalUpstreams(doc, config) });
     } catch (error) { failure(res, error); }
   });
   router.get('/services/:id', (req, res) => {
     const proposal = audit.getServiceProposal(req.params['id'] as string);
     if (!proposal) { res.status(404).json({ error: 'Proposal not found' }); return; }
-    res.json(publicStatus(proposal));
+    res.json(publicStatus(refreshProposal(proposal, config, audit)));
   });
   return router;
 }
@@ -262,13 +344,14 @@ export function restoreProposalUpstreams(config: Config, audit: AuditLogger): vo
   audit.recoverServiceProposals();
 }
 
-export function createAdminProposalRouter(config: Config, audit: AuditLogger, runtime: AdminServiceRuntime): Router {
+export function createAdminProposalRouter(config: Config, audit: AuditLogger, runtime: AdminServiceRuntime,
+  invalidateApprovals: (name: string) => void = () => {}): Router {
   const router = Router();
   router.use((_req, res, next) => { res.setHeader('Cache-Control', 'no-store'); next(); });
   router.get('/credential-sources', (_req, res) => res.json(listCredentialSources(config)));
   router.get('/service-proposals', (_req, res) => {
-    res.json(audit.getServiceProposals().map((proposal) => ({ ...proposal,
-      requirements: proposalRequirements(proposal.config), requiredUpstreams: proposalUpstreams(proposal.config, config) })));
+    res.json(audit.getServiceProposals().map(item => refreshProposal(item, config, audit)).map((proposal) => ({ ...proposal,
+      requirements: requirements(proposal), requiredUpstreams: proposalUpstreams(proposal.config, config) })));
   });
   router.post('/service-proposals/:id/reject', (req, res) => {
     const id = req.params['id'] as string;
@@ -281,14 +364,16 @@ export function createAdminProposalRouter(config: Config, audit: AuditLogger, ru
     const id = req.params['id'] as string;
     const proposal = audit.getServiceProposal(id);
     if (!proposal) { res.status(404).json({ error: 'Proposal not found' }); return; }
-    if (Object.hasOwn(config.services, proposal.name)) { res.status(409).json({ error: 'Service already exists' }); return; }
-    if (!audit.claimServiceProposal(id)) { res.status(409).json({ error: 'Proposal is no longer pending' }); return; }
-    const applying = applyingServices.get(config) ?? new Set<string>();
-    applyingServices.set(config, applying);
-    applying.add(proposal.name);
+    if (proposal.status !== 'pending' || !matchesBase(proposal, config, audit)) {
+      if (proposal.status === 'pending') audit.staleServiceProposal(id);
+      res.status(409).json({ error: 'Proposal is no longer current. Submit a new proposal for the current service.' }); return;
+    }
+    const release = reserveService(config, proposal.name);
+    if (!release) { res.status(409).json({ error: 'Service is being changed' }); return; }
     let applied = false;
     let sensitiveOperation = false;
     try {
+      if (!audit.claimServiceProposal(id)) { res.status(409).json({ error: 'Proposal is no longer pending' }); return; }
       const body = parseBody(req);
       const doc = normalizeProposal(proposal.name, proposal.config, config);
       const upstreams = proposalUpstreams(doc, config);
@@ -310,11 +395,19 @@ export function createAdminProposalRouter(config: Config, audit: AuditLogger, ru
       const sources = listCredentialSources(config);
       for (const requirement of proposalRequirements(doc)) {
         let value: unknown;
+        let retained = false;
         if (requirement.kind === 'input') value = inputs[requirement.path];
         else {
           const binding = bindings[requirement.path];
-          if (!object(binding)) throw new Error(`Supply a credential for ${requirement.path}`);
-          if (Object.hasOwn(binding, 'value')) value = binding.value;
+          if ((!binding || (object(binding) && binding.keep === true)) && proposal.reuseCredentials?.includes(requirement.path)) {
+            if (proposal.credentialContextChanged && body.confirmCredentialReuse !== true) {
+              throw new Error('Confirm reuse of current credentials for the changed destination or authentication context');
+            }
+            const source = audit.getServiceOverrides()[proposal.name] ?? config.services[proposal.name];
+            value = get(source, requirement.path);
+            retained = true;
+          } else if (!object(binding)) throw new Error(`Supply a credential for ${requirement.path}`);
+          else if (Object.hasOwn(binding, 'value')) value = binding.value;
           else {
             const source = sources.find((item) => item.service === binding.service && item.path === binding.path);
             if (!source || source.path.split('/').pop() !== requirement.path.split('/').pop()) {
@@ -323,24 +416,33 @@ export function createAdminProposalRouter(config: Config, audit: AuditLogger, ru
             value = get(config.services[source.service], source.path);
           }
         }
-        if (typeof value !== 'string' || !value.trim()) throw new Error(`Required value missing for ${requirement.path}`);
+        if (!retained && (typeof value !== 'string' || !value.trim())) throw new Error(`Required value missing for ${requirement.path}`);
+        if (value === undefined) throw new Error(`Current value missing for ${requirement.path}`);
         set(doc, requirement.path, value);
       }
       const service = doc as unknown as ServiceConfig;
+      sensitiveOperation = true;
       const errors = validateAdminService(proposal.name, service, withUpstreams(config, upstreams));
       if (errors.length) throw new Error(errors.join('; '));
-      // Temporary runtime config: live allowlists and services are unchanged
-      // until plugin initialization and the SQLite transaction both succeed.
-      sensitiveOperation = true;
-      const active = await runtime.apply(proposal.name, service, withUpstreams(config, upstreams));
+      const update = proposal.operation === 'update';
+      if (update && !runtime.prepare) throw new Error('Runtime does not support prepared updates');
+      const prepared = runtime.prepare ? await runtime.prepare(proposal.name, service, withUpstreams(config, upstreams)) : undefined;
+      const active = prepared?.service ?? await runtime.apply(proposal.name, service, withUpstreams(config, upstreams));
       applied = true;
-      if (Object.hasOwn(config.services, proposal.name)) throw new Error('Service was added while reviewing this proposal');
-      audit.approveServiceProposal(id, proposal.name, service, upstreams);
+      if (!matchesBase(proposal, config, audit)) {
+        audit.staleServiceProposal(id);
+        res.status(409).json({ error: 'Service changed while preparing the proposal. Submit a new proposal.' }); return;
+      }
+      // No await after this point: persist decision + config + revocations, then
+      // publish prepared instances and configuration in the same event-loop turn.
+      audit.approveServiceProposal(id, proposal.name, service, upstreams, update);
+      prepared?.commit();
       config.security.allowedUpstreams = [...new Set([...config.security.allowedUpstreams, ...upstreams])];
       config.services[proposal.name] = active;
+      if (update) invalidateApprovals(proposal.name);
       res.json({ ok: true, service: proposal.name });
     } catch (error) {
-      if (sensitiveOperation) runtime.remove(proposal.name);
+      if (sensitiveOperation && !runtime.prepare && proposal.operation !== 'update') runtime.remove(proposal.name);
       audit.releaseServiceProposal(id);
       // Plugin/provider errors can contain credentials. Never echo those
       // errors to either the browser or the agent-facing status endpoint.
@@ -348,7 +450,7 @@ export function createAdminProposalRouter(config: Config, audit: AuditLogger, ru
         : applied ? 'Could not persist the service; the proposal remains pending'
           : 'Could not initialize the service. Check credentials, host identity, and protocol configuration; the proposal remains pending.' });
     } finally {
-      applying.delete(proposal.name);
+      release();
     }
   });
   return router;

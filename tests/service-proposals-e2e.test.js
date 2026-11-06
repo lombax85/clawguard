@@ -15,7 +15,7 @@ const credential = { $clawguard: 'credential' };
 const hostKey = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC';
 const agent = { 'X-ClawGuard-Key': 'test-agent', 'X-ClawGuard-User': 'Agent for Fabio', 'X-ClawGuard-Reason': 'Add requested service' };
 const owner = { 'X-ClawGuard-Pin': 'test-owner' };
-const manager = { checkApproval: async () => true, getStatus: () => [], getActiveCount: () => 0 };
+const manager = { checkApproval: async () => true, getStatus: () => [], getActiveCount: () => 0, revokeApproval: () => true };
 
 function makeConfig() {
   return {
@@ -38,10 +38,10 @@ async function listen(server) {
   return `http://127.0.0.1:${server.address().port}`;
 }
 
-async function withGateway(fn, config = makeConfig(), dbPath = ':memory:') {
+async function withGateway(fn, config = makeConfig(), dbPath = ':memory:', managerFactory = () => manager) {
   const audit = new AuditLogger(dbPath);
   restoreProposalUpstreams(config, audit);
-  const server = http.createServer(createProxy(config, manager, audit));
+  const server = http.createServer(createProxy(config, managerFactory(audit), audit));
   const base = await listen(server);
   const request = async (url, method = 'GET', body, headers = agent) => {
     const res = await fetch(base + url, { method, headers: { ...headers, 'Content-Type': 'application/json' },
@@ -111,6 +111,7 @@ test('HTTP proposal stays inert until the owner supplies credentials and allows 
 test('proposal API validates supported HTTP auth modes and SSH/FTP/FTPS without activating plugins', async () => {
   await withGateway(async ({ request, config }) => {
     const variants = [
+      { type: 'bearer', token: credential, dummyToken: 'dummy' },
       { type: 'header', headerName: 'X-Api-Key', token: credential },
       { type: 'query', paramName: 'key', token: credential },
       { type: 'basic', username: 'fabio', password: credential },
@@ -376,4 +377,275 @@ test('approved HTTP service remains usable after starting the real ClawGuard ent
     await new Promise(resolve => upstream.close(resolve));
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+async function activate(request, name, doc) {
+  const id = await submit(request, name, doc);
+  const result = await request(`/__admin/api/service-proposals/${id}/approve`, 'POST', {
+    allowUpstreams: true, credentials: { '/auth/token': { value: 'CURRENT-TEST-SECRET' } },
+  }, owner);
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+}
+
+test('partial update preserves credentials and omitted fields, shows a safe diff, and activates only after owner approval', async () => {
+  const upstream = http.createServer((req, res) => {
+    assert.equal(req.headers.authorization, 'Bearer CURRENT-TEST-SECRET');
+    res.setHeader('content-type', 'application/json'); res.end('{"ok":true}');
+  });
+  const upstreamUrl = await listen(upstream);
+  try {
+    await withGateway(async ({ request, config, audit }) => {
+      const initial = service(upstreamUrl); initial.http = { allowedMethods: ['GET'], allowPrivateTarget: true };
+      await activate(request, 'lombax', initial);
+      const blocked = await request('/lombax/resource', 'POST', {});
+      assert.equal(blocked.status, 405);
+      assert.equal(blocked.body.proposalEndpoint, '/__proposals/services');
+      assert.deepEqual(blocked.body.allowedMethods, ['GET']);
+      const patch = { http: { allowedMethods: ['GET', 'POST'] } };
+      const id = await submit(request, 'lombax', patch);
+      assert.equal((await request(`/__proposals/services/${id}`)).body.operation, 'update');
+      assert.equal((await request('/lombax/resource', 'POST', {})).status, 405);
+      assert.equal((await request('/lombax/resource')).status, 200);
+      assert.equal((await request('/__proposals/services', 'POST', { name: 'lombax', config: patch })).body.id, id);
+      assert.equal((await request('/__proposals/services', 'POST', { name: 'lombax', config: { http: { allowedMethods: ['POST'] } } })).status, 409);
+      const queue = await request('/__admin/api/service-proposals', 'GET', undefined, owner);
+      const proposed = queue.body.find(item => item.id === id);
+      assert.deepEqual(proposed.changes, [{ path: '/http/allowedMethods', before: ['GET'], after: ['GET', 'POST'] }]);
+      assert.equal(proposed.requirements[0].reusable, true);
+      assert.equal(proposed.credentialContextChanged, false);
+      assert.ok(!JSON.stringify(queue.body).includes('CURRENT-TEST-SECRET'));
+      assert.equal((await request(`/__admin/api/service-proposals/${id}/approve`, 'POST', {})).status, 401);
+      assert.equal((await request(`/__admin/api/service-proposals/${id}/approve`, 'POST', {}, owner)).status, 200);
+      assert.equal((await request('/lombax/resource', 'POST', {})).status, 200);
+      assert.equal(config.services.lombax.http.allowPrivateTarget, true);
+      assert.equal(config.services.lombax.policy.default, 'require_approval');
+      assert.equal(config.services.lombax.auth.token, 'CURRENT-TEST-SECRET');
+      const unchanged = await request('/__proposals/services', 'POST', { name: 'lombax', config: patch });
+      assert.equal(unchanged.status, 200); assert.equal(unchanged.body.status, 'unchanged');
+      assert.equal(unchanged.body.id, undefined);
+      const removal = await submit(request, 'lombax', { http: { allowedMethods: ['POST'] } });
+      assert.equal((await request(`/__admin/api/service-proposals/${removal}/approve`, 'POST', {}, owner)).status, 200);
+      assert.equal((await request('/lombax/resource')).status, 405);
+      assert.equal((await request('/lombax/resource', 'POST', {})).status, 200);
+      assert.ok(!JSON.stringify(audit.getServiceProposals()).includes('CURRENT-TEST-SECRET'));
+      assert.equal((await request('/__proposals/services', 'POST', { name: 'lombax', config: { auth: { token: 'FORBIDDEN-SECRET' } } })).status, 400);
+    });
+  } finally { await new Promise(resolve => upstream.close(resolve)); }
+});
+
+test('manual edits, credential rotation and delete/recreate invalidate pending updates', async () => {
+  await withGateway(async ({ request, config }) => {
+    const initial = service('https://existing.example.com'); initial.http.allowedMethods = ['GET'];
+    await activate(request, 'lombax', initial);
+    for (const change of ['edit', 'credentials', 'recreate']) {
+      const id = await submit(request, 'lombax', { http: { allowedMethods: ['GET', 'POST'] } });
+      if (change === 'recreate') {
+        const copy = structuredClone(config.services.lombax);
+        assert.equal((await request('/__admin/api/services/lombax', 'DELETE', undefined, owner)).status, 200);
+        assert.equal((await request('/__admin/api/services', 'POST', { name: 'lombax', config: copy }, owner)).status, 200);
+      } else {
+        const patch = change === 'edit' ? { http: { noCheckCertificate: true } } : { auth: { token: 'ROTATED-TEST-SECRET' } };
+        assert.equal((await request('/__admin/api/services/lombax', 'PUT', { config: patch }, owner)).status, 200);
+      }
+      assert.equal((await request(`/__proposals/services/${id}`)).body.status, 'stale');
+      assert.equal((await request(`/__admin/api/service-proposals/${id}/approve`, 'POST', {}, owner)).status, 409);
+      assert.deepEqual(config.services.lombax.http.allowedMethods, ['GET']);
+    }
+    const fresh = await submit(request, 'lombax', { http: { allowedMethods: ['GET', 'POST'] } });
+    assert.equal((await request(`/__admin/api/service-proposals/${fresh}/approve`, 'POST', {}, owner)).status, 200);
+  });
+});
+
+test('credential reuse across destination changes requires owner confirmation; new credential slots require owner input', async () => {
+  await withGateway(async ({ request, config }) => {
+    await activate(request, 'lombax', service('https://existing.example.com'));
+    const id = await submit(request, 'lombax', { upstream: 'https://different.example.com' });
+    const denied = await request(`/__admin/api/service-proposals/${id}/approve`, 'POST', { allowUpstreams: true }, owner);
+    assert.equal(denied.status, 400); assert.match(denied.body.error, /Confirm reuse/);
+    assert.equal(config.services.lombax.upstream, 'https://existing.example.com');
+    assert.equal((await request(`/__admin/api/service-proposals/${id}/approve`, 'POST', { allowUpstreams: true, confirmCredentialReuse: true }, owner)).status, 200);
+    assert.equal(config.services.lombax.auth.token, 'CURRENT-TEST-SECRET');
+    const newSlot = await submit(request, 'lombax', { auth: { type: 'basic', username: 'deploy', password: credential } });
+    assert.equal((await request(`/__admin/api/service-proposals/${newSlot}/approve`, 'POST', { confirmCredentialReuse: true }, owner)).status, 400);
+    assert.equal((await request(`/__admin/api/service-proposals/${newSlot}/approve`, 'POST', {
+      confirmCredentialReuse: true, credentials: { '/auth/password': { value: 'NEW-TEST-PASSWORD' } },
+    }, owner)).status, 200);
+    assert.equal(config.services.lombax.auth.password, 'NEW-TEST-PASSWORD');
+  });
+});
+
+test('unchanged revisions survive reopen; YAML changes invalidate pending updates', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-proposal-update-'));
+  const db = path.join(dir, 'audit.db');
+  let saved, id;
+  try {
+    await withGateway(async ({ request, config }) => {
+      const initial = service('https://existing.example.com'); initial.http.allowedMethods = ['GET'];
+      await activate(request, 'lombax', initial);
+      id = await submit(request, 'lombax', { http: { allowedMethods: ['GET', 'POST'] } });
+      saved = structuredClone(config);
+    }, makeConfig(), db);
+    await withGateway(async ({ request, config }) => {
+      assert.equal((await request(`/__proposals/services/${id}`)).body.status, 'pending');
+      assert.equal((await request(`/__admin/api/service-proposals/${id}/approve`, 'POST', {}, owner)).status, 200);
+      id = await submit(request, 'lombax', { http: { allowedMethods: ['GET', 'POST', 'PUT'] } });
+      saved = structuredClone(config);
+    }, saved, db);
+    saved.services.lombax.upstream = 'https://changed-via-yaml.example.com';
+    await withGateway(async ({ request }) => {
+      assert.equal((await request(`/__proposals/services/${id}`)).body.status, 'stale');
+      assert.equal((await request(`/__admin/api/service-proposals/${id}/approve`, 'POST', {}, owner)).status, 409);
+    }, saved, db);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+async function withPluginGateway(run) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-proposal-plugin-'));
+  const pluginPath = path.join(dir, 'plugin.cjs');
+  const pluginName = path.basename(dir);
+  fs.writeFileSync(pluginPath, `let gate; let entered = false;
+    exports.pause = promise => { gate = promise; entered = false; };
+    exports.entered = () => entered;
+    exports.createPlugin = () => ({ name: ${JSON.stringify(pluginName)},
+      async init(_dir, config) { entered = true; if (gate) await gate; gate = undefined;
+        if (config.token === 'INVALID-TEST-SECRET') throw Error(config.token);
+        this.token = config.token; },
+      async rewriteRequest(ctx) { return { headers: { ...ctx.headers, authorization: 'Bearer ' + this.token }, body: ctx.body }; }
+    });`);
+  let received;
+  const upstream = http.createServer((req, res) => {
+    received = req.headers.authorization; res.setHeader('content-type', 'application/json'); res.end('{"ok":true}');
+  });
+  const url = await listen(upstream);
+  const config = makeConfig(); config.security.allowedUpstreams.push('127.0.0.1');
+  try {
+    await withGateway(async f => {
+      const doc = { ...service(url), auth: { type: 'plugin', pluginPath, pluginConfig: { token: 'OLD-TEST-SECRET', enabled: true } },
+        http: { allowedMethods: ['GET'], allowPrivateTarget: true } };
+      assert.equal((await f.request('/__admin/api/services', 'POST', { name: 'plugin-app', config: doc }, owner)).status, 200);
+      await run({ ...f, plugin: require(pluginPath), received: () => received });
+    }, config);
+  } finally {
+    await new Promise(resolve => upstream.close(resolve));
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(path.resolve('data/plugins', pluginName), { recursive: true, force: true });
+  }
+}
+
+test('failed initialization and database save preserve the old live plugin and leave update pending', async () => {
+  await withPluginGateway(async ({ request, audit, received }) => {
+    const id = await submit(request, 'plugin-app', { http: { allowedMethods: ['GET', 'POST'] } });
+    const approve = value => request(`/__admin/api/service-proposals/${id}/approve`, 'POST', {
+      credentials: { '/auth/pluginConfig/token': { value } },
+    }, owner);
+    const bad = await approve('INVALID-TEST-SECRET');
+    assert.equal(bad.status, 400); assert.ok(!JSON.stringify(bad.body).includes('INVALID-TEST-SECRET'));
+    assert.equal((await request('/plugin-app/')).status, 200); assert.equal(received(), 'Bearer OLD-TEST-SECRET');
+    const save = audit.saveServiceOverride.bind(audit);
+    audit.saveServiceOverride = () => { throw Error('simulated disk failure'); };
+    try { assert.equal((await approve('NEW-TEST-SECRET')).status, 400); }
+    finally { audit.saveServiceOverride = save; }
+    assert.equal((await request(`/__proposals/services/${id}`)).body.status, 'pending');
+    assert.equal((await request('/plugin-app/')).status, 200); assert.equal(received(), 'Bearer OLD-TEST-SECRET');
+    assert.equal((await request('/plugin-app/', 'POST', {})).status, 405);
+    assert.equal((await approve('NEW-TEST-SECRET')).status, 200);
+    assert.equal((await request('/plugin-app/', 'POST', {})).status, 200); assert.equal(received(), 'Bearer NEW-TEST-SECRET');
+  });
+});
+
+test('admin writes and proposal approvals reserve the alias while preparing a plugin', async () => {
+  await withPluginGateway(async ({ request, plugin, received }) => {
+    const id = await submit(request, 'plugin-app', { http: { allowedMethods: ['GET', 'POST'] } });
+    let release;
+    plugin.pause(new Promise(resolve => { release = resolve; }));
+    const approval = request(`/__admin/api/service-proposals/${id}/approve`, 'POST', {
+      credentials: { '/auth/pluginConfig/token': { value: 'NEW-TEST-SECRET' } },
+    }, owner);
+    try {
+      for (let i = 0; i < 100 && !plugin.entered(); i++) await new Promise(resolve => setTimeout(resolve, 5));
+      assert.ok(plugin.entered());
+      assert.equal((await request('/plugin-app/')).status, 200); assert.equal(received(), 'Bearer OLD-TEST-SECRET');
+      assert.equal((await request('/__admin/api/services/plugin-app', 'PUT', { config: { policy: { default: 'auto_approve' } } }, owner)).status, 409);
+      assert.equal((await request('/__admin/api/services/plugin-app', 'DELETE', undefined, owner)).status, 409);
+      assert.equal((await request(`/__admin/api/service-proposals/${id}/approve`, 'POST', {}, owner)).status, 409);
+    } finally { release(); }
+    assert.equal((await approval).status, 200);
+    const next = await submit(request, 'plugin-app', { http: { allowedMethods: ['GET'] } });
+    plugin.pause(new Promise(resolve => { release = resolve; }));
+    const manual = request('/__admin/api/services/plugin-app', 'PUT', { config: { auth: { pluginConfig: { token: 'MANUAL-TEST-SECRET' } } } }, owner);
+    try {
+      for (let i = 0; i < 100 && !plugin.entered(); i++) await new Promise(resolve => setTimeout(resolve, 5));
+      assert.ok(plugin.entered());
+      assert.equal((await request(`/__admin/api/service-proposals/${next}/approve`, 'POST', {}, owner)).status, 409);
+    } finally { release(); }
+    assert.equal((await manual).status, 200);
+    assert.equal((await request(`/__proposals/services/${next}`)).body.status, 'stale');
+  });
+});
+
+test('legacy proposal databases migrate without losing decisions and accept the stale status', async () => {
+  const Database = require('better-sqlite3');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-proposal-migration-'));
+  const filename = path.join(dir, 'audit.db');
+  const db = new Database(filename);
+  const old = { id: 'legacy-pending', name: 'legacy', config: service('https://existing.example.com'),
+    status: 'pending', createdAt: new Date().toISOString(), decidedAt: null, clientIp: '127.0.0.1' };
+  db.exec(`CREATE TABLE service_proposals (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, proposal_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'approving', 'approved', 'rejected')),
+    created_at TEXT NOT NULL, decided_at TEXT);
+    CREATE UNIQUE INDEX idx_service_proposals_pending_name ON service_proposals(name) WHERE status IN ('pending','approving');`);
+  for (const status of ['pending', 'approved', 'rejected']) {
+    const row = { ...old, id: 'legacy-' + status, name: 'legacy-' + status, status };
+    db.prepare('INSERT INTO service_proposals VALUES (?, ?, ?, ?, ?, NULL)').run(row.id, row.name, JSON.stringify(row), row.status, row.createdAt);
+  }
+  db.close();
+  try {
+    await withGateway(async ({ request, config }) => {
+      for (const status of ['pending', 'approved', 'rejected']) {
+        assert.equal((await request(`/__proposals/services/legacy-${status}`)).body.status, status);
+      }
+      config.services['legacy-pending'] = { ...service('https://existing.example.com'), auth: { type: 'bearer', token: 'TEST' } };
+      assert.equal((await request('/__proposals/services/legacy-pending')).body.status, 'stale');
+      const id = await submit(request, 'legacy-pending', { http: { allowedMethods: ['GET'] } });
+      assert.equal((await request(`/__admin/api/service-proposals/${id}/approve`, 'POST', {}, owner)).status, 200);
+    }, makeConfig(), filename);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('SSH, FTP and FTPS updates retain managed credentials and keep the previous service on failed initialization', async () => {
+  const { getFtpCredentialPlugin } = require('../dist/ftp-credential-plugins/loader');
+  await withGateway(async ({ request, config }) => {
+    for (const protocol of ['ssh', 'ftp', 'ftps']) {
+      const name = `update-${protocol}`;
+      const field = protocol === 'ssh' ? 'privateKey' : 'password';
+      const doc = { protocol, upstream: `${protocol}://127.0.0.1:${protocol === 'ssh' ? 22 : 21}`,
+        auth: { type: 'plugin', pluginPath: protocol === 'ssh' ? 'ssh-agent-key' : 'ftp-password',
+          pluginConfig: { username: 'deploy', [field]: credential } }, policy: { default: 'require_approval' },
+        ...(protocol === 'ssh' ? { ssh: { allowPrivateTarget: true, knownHostKey: hostKey } }
+          : { ftp: { allowPrivateTarget: true, root: 'initial', ...(protocol === 'ftps' ? { tlsMode: 'explicit' } : {}) } }) };
+      const created = await submit(request, name, doc);
+      const slot = '/auth/pluginConfig/' + field;
+      assert.equal((await request(`/__admin/api/service-proposals/${created}/approve`, 'POST', {
+        allowUpstreams: true, credentials: { [slot]: { value: 'TEST-ONLY-PROTOCOL-CREDENTIAL' } },
+      }, owner)).status, 200);
+      const patch = protocol === 'ssh' ? { upstream: 'ssh://127.0.0.1:2222' } : { ftp: { root: 'subset' } };
+      const updated = await submit(request, name, patch);
+      assert.equal((await request(`/__admin/api/service-proposals/${updated}/approve`, 'POST', { confirmCredentialReuse: true }, owner)).status, 200);
+      assert.equal(config.services[name].auth.pluginConfig[field], 'TEST-ONLY-PROTOCOL-CREDENTIAL');
+      if (protocol === 'ssh') {
+        assert.equal(config.services[name].upstream, patch.upstream);
+        assert.equal(config.services[name].ssh.knownHostKey, hostKey);
+      } else {
+        assert.equal(config.services[name].ftp.root, 'subset');
+        const previous = getFtpCredentialPlugin(name);
+        const broken = await submit(request, name, { ftp: { root: 'next' } });
+        assert.equal((await request(`/__admin/api/service-proposals/${broken}/approve`, 'POST', {
+          credentials: { [slot]: { value: 'INVALID\nPASSWORD' } },
+        }, owner)).status, 400);
+        assert.equal(config.services[name].ftp.root, 'subset');
+        assert.equal(getFtpCredentialPlugin(name), previous);
+      }
+    }
+  });
 });

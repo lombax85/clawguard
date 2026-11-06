@@ -101,3 +101,9 @@ export function unloadPlugin(serviceName: string): void {
 export function getPluginDataDir(pluginName: string, dataBaseDir: string): string {
   return path.join(dataBaseDir, pluginName);
 }
+
+/** Publish an already initialized instance without asynchronous work. */
+export function activatePreparedPlugin(serviceName: string, plugin: IAuthPlugin | undefined): void {
+  if (plugin) pluginRegistry.set(serviceName, plugin);
+  else pluginRegistry.delete(serviceName);
+}

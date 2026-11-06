@@ -94,7 +94,13 @@ export interface ServiceProposal {
   id: string;
   name: string;
   config: Record<string, unknown>;
-  status: 'pending' | 'approving' | 'approved' | 'rejected';
+  operation?: 'create' | 'update';
+  baseRevision?: string;
+  before?: Record<string, unknown>;
+  changes?: Array<{ path: string; before?: unknown; after?: unknown }>;
+  reuseCredentials?: string[];
+  credentialContextChanged?: boolean;
+  status: 'pending' | 'approving' | 'approved' | 'rejected' | 'stale';
   createdAt: string;
   decidedAt: string | null;
   requestUser?: string;

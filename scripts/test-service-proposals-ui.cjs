@@ -17,15 +17,18 @@ async function main() {
   const source = { protocol: 'ssh', upstream: 'ssh://127.0.0.1:22',
     auth: { type: 'plugin', pluginPath: 'ssh-agent-key', pluginConfig: { username: 'root', privateKey: key.privateKey } },
     policy: { default: 'require_approval' }, ssh: { allowPrivateTarget: true, knownHostKey: hostKey } };
-  const config = { server: { agentKey: 'test-agent' }, services: { source },
+  const config = { server: { agentKey: 'test-agent' }, services: { source, 'http-update': {
+      protocol: 'http', upstream: 'https://api.example.com', auth: { type: 'bearer', token: 'UI-ONLY-TEST-TOKEN' },
+      policy: { default: 'require_approval' }, http: { allowedMethods: ['GET'] },
+    } },
     admin: { enabled: true, strictMode: false, pin: 'test-owner', allowedIPs: ['127.0.0.1'] },
-    security: { allowedUpstreams: ['127.0.0.1'], blockPrivateIPs: true, followRedirects: false, maxPayloadLogSize: 1024 },
+    security: { allowedUpstreams: ['127.0.0.1', 'api.example.com'], blockPrivateIPs: true, followRedirects: false, maxPayloadLogSize: 1024 },
     audit: { logPayload: false }, sshBroker: { ...DEFAULT_SSH_BROKER, enabled: true },
     ftpGateway: { ...DEFAULT_FTP_GATEWAY, enabled: false } };
   const server = http.createServer(createProxy(config, manager, audit));
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({ headless: true, channel: process.env.CLAWGUARD_BROWSER_CHANNEL || undefined });
   try {
     for (const [name, ssh] of [['old-placeholder', { allowPrivateTarget: true, knownHostKey: { $clawguard: 'input' } }],
       ['proposed-first-use', { allowPrivateTarget: true, trustOnFirstUse: true }]]) {
@@ -71,6 +74,49 @@ async function main() {
     await page.locator('#proposal-modal').waitFor({ state: 'hidden' });
     assert.equal(config.services['proposed-first-use'].ssh.knownHostKey, hostKey);
 
+    async function proposeUpdate(patch) {
+      const res = await fetch(base + '/__proposals/services', { method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-ClawGuard-Key': 'test-agent' },
+        body: JSON.stringify({ name: 'http-update', config: patch }) });
+      assert.equal(res.status, 202); return res.json();
+    }
+    await proposeUpdate({ http: { allowedMethods: ['GET', 'POST'] } });
+    await page.locator('[data-section="proposals"]').click();
+    await page.locator('#proposals-table tr').filter({ hasText: 'http-update' }).getByRole('button', { name: 'Review', exact: true }).click();
+    await page.locator('#proposal-modal').waitFor({ state: 'visible' });
+    assert.match(await page.locator('#proposal-title').innerText(), /Review update/);
+    assert.match(await page.locator('#proposal-changes').innerText(), /HTTP methods/);
+    assert.match(await page.locator('#proposal-changes').innerText(), /POST/);
+    assert.equal(await page.locator('#proposal-credentials select').inputValue(), 'keep');
+    assert.equal(await page.locator('#proposal-credentials input').isVisible(), false);
+    assert.equal(await page.locator('#proposal-reuse-review').isVisible(), false);
+    assert.ok(!(await page.locator('#proposal-config').inputValue()).includes('UI-ONLY-TEST-TOKEN'));
+    assert.equal(await page.locator('#proposal-approve-btn').innerText(), 'Approve changes');
+    await page.screenshot({ path: '/tmp/clawguard-proposal-update-desktop.png', fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({ path: '/tmp/clawguard-proposal-update-mobile.png', fullPage: true });
+    const modalBounds = await page.locator('#proposal-modal .modal').boundingBox();
+    assert.ok(modalBounds.x >= 0 && modalBounds.x + modalBounds.width <= 390);
+    await page.setViewportSize({ width: 1280, height: 1000 });
+    const updated = page.waitForResponse(response => response.url().endsWith('/approve'));
+    await page.locator('#proposal-approve-btn').click();
+    assert.equal((await updated).status(), 200);
+    await page.locator('#proposal-modal').waitFor({ state: 'hidden' });
+    assert.deepEqual(config.services['http-update'].http.allowedMethods, ['GET', 'POST']);
+    assert.equal(config.services['http-update'].auth.token, 'UI-ONLY-TEST-TOKEN');
+    const stale = await proposeUpdate({ http: { allowedMethods: ['GET', 'POST', 'PUT'] } });
+    const changed = await fetch(base + '/__admin/api/services/http-update', { method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-ClawGuard-Pin': 'test-owner' },
+      body: JSON.stringify({ config: { http: { noCheckCertificate: true } } }) });
+    assert.equal(changed.status, 200);
+    await page.locator('[data-section="proposals"]').click();
+    await page.locator('#proposals-table tr').filter({ hasText: 'http-update' }).filter({ hasText: 'stale' })
+      .getByRole('button', { name: 'Review', exact: true }).click();
+    await page.locator('#proposal-modal').waitFor({ state: 'visible' });
+    assert.equal(await page.locator('#proposal-approve-btn').isDisabled(), true);
+    assert.match(await page.locator('#proposal-changes').innerText(), /out of date/);
+    await page.evaluate(() => hideProposal());
+
     await page.locator('[data-section="services"]').click();
     await page.locator('#add-ssh-host-btn').click();
     await page.locator('#ssh-host-id').fill('wizard-first-use');
@@ -96,7 +142,7 @@ async function main() {
     assert.match(await page.locator('#ssh-host-key-saved-status').innerText(), /SHA256:/);
     await page.screenshot({ path: '/tmp/clawguard-ssh-first-use-ui.png', fullPage: true });
     assert.deepEqual(errors, []);
-    console.log('PASS: existing proposal, first-use/pinned choice, managed key reuse, pasted key without final newline, SSH wizard and learned fingerprint');
+    console.log('PASS: update diff, credential retention, stale update, mobile layout, existing proposal, first-use/pinned choice, managed key reuse, pasted key without final newline, SSH wizard and learned fingerprint');
   } finally {
     await browser.close(); await new Promise(resolve => server.close(resolve)); audit.close();
   }

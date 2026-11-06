@@ -302,10 +302,14 @@
     <h3 id="proposal-title">Review service proposal</h3>
     <p class="form-help" id="proposal-provenance"></p>
     <p class="form-help" id="proposal-summary"></p>
-    <div class="form-group">
-      <label>Proposed configuration</label>
+    <div id="proposal-changes" class="form-group"></div>
+    <details id="proposal-config-details" class="form-group" open>
+      <summary>Proposed configuration</summary>
       <textarea id="proposal-config" readonly spellcheck="false" style="min-height:200px"></textarea>
       <p class="form-help">This configuration was supplied by an agent. Validation checks configuration structure; it does not prove that credentials or upstream connectivity work.</p>
+    </details>
+    <div id="proposal-reuse-review" class="form-group" style="display:none">
+      <label><input type="checkbox" id="proposal-confirm-reuse" style="width:auto"> Confirm use of current credentials with the changed destination or authentication settings</label>
     </div>
     <div id="proposal-warnings" class="notice warning"></div>
     <div id="proposal-domain-review" class="form-group">
@@ -617,7 +621,7 @@ async function loadProposals() {
     tbody.replaceChildren();
     for (const proposal of proposals) {
       const tr = document.createElement('tr');
-      for (const value of [proposal.name + ' / ' + (proposal.config.protocol || 'http'), proposal.config.upstream,
+      for (const value of [proposal.name + ' / ' + (proposal.config.protocol || 'http') + '\n' + (proposal.operation === 'update' ? 'Update service' : 'New service'), proposal.config.upstream,
         (proposal.requestUser || 'Unspecified agent') + '\n' + (proposal.requestReason || 'No reason supplied'), proposal.status]) {
         const td = document.createElement('td');
         td.textContent = value;
@@ -625,7 +629,7 @@ async function loadProposals() {
         tr.appendChild(td);
       }
       const actions = document.createElement('td');
-      if (proposal.status === 'pending') {
+      if (proposal.status === 'pending' || proposal.status === 'stale') {
         const button = document.createElement('button');
         button.className = 'btn btn-primary btn-sm';
         button.textContent = 'Review';
@@ -650,13 +654,13 @@ async function loadProposals() {
 
 async function reviewProposal(id) {
   const proposal = proposalsCache.find(item => item.id === id);
-  if (!proposal || proposal.status !== 'pending') return;
+  if (!proposal || !['pending', 'stale'].includes(proposal.status)) return;
   try {
     const sources = await api('GET', '/api/credential-sources');
     reviewingProposal = proposal;
     proposalCredentialFields = [];
     proposalInputFields = [];
-    document.getElementById('proposal-title').textContent = 'Review ' + proposal.name;
+    document.getElementById('proposal-title').textContent = (proposal.operation === 'update' ? 'Review update: ' : 'Review new service: ') + proposal.name;
     document.getElementById('proposal-provenance').textContent =
       (proposal.requestUser || 'Unspecified agent') + ' — ' + (proposal.requestReason || 'No reason supplied');
     document.getElementById('proposal-summary').textContent =
@@ -665,6 +669,41 @@ async function reviewProposal(id) {
       ((proposal.config.protocol || 'http') === 'http'
         ? ' · Methods: ' + (proposal.config.http?.allowedMethods?.join(', ') || 'All') : '');
     document.getElementById('proposal-config').value = JSON.stringify(proposal.config, null, 2);
+    document.getElementById('proposal-config-details').open = proposal.operation !== 'update';
+    const changeBox = document.getElementById('proposal-changes');
+    changeBox.replaceChildren();
+    if (proposal.operation === 'update') {
+      const note = document.createElement('p');
+      note.textContent = proposal.status === 'stale'
+        ? 'This proposal is out of date. Submit a new proposal for the current service.'
+        : 'Only the changes below will be applied. Existing access approvals will be revoked.';
+      changeBox.appendChild(note);
+      const table = document.createElement('table');
+      const head = document.createElement('tr');
+      for (const title of ['Setting', 'Before', 'After']) {
+        const cell = document.createElement('th'); cell.textContent = title; head.appendChild(cell);
+      }
+      table.appendChild(head);
+      const labels = { '/http/allowedMethods': 'HTTP methods', '/upstream': 'Upstream', '/protocol': 'Protocol',
+        '/hostnames': 'Hostnames', '/policy/default': 'Default policy', '/ftp/root': 'FTP root',
+        '/ssh/knownHostKey': 'SSH host key', '/ssh/trustOnFirstUse': 'SSH first-use trust' };
+      const display = value => value === undefined ? '(not set)' : value?.$clawguard ? 'Managed credential'
+        : Array.isArray(value) && value.every(item => typeof item === 'string') ? value.join(', ')
+          : typeof value === 'string' ? value : JSON.stringify(value);
+      for (const change of proposal.changes || []) {
+        const row = document.createElement('tr');
+        for (const value of [labels[change.path] || change.path, change.before, change.after]) {
+          const cell = document.createElement('td');
+          cell.textContent = display(value);
+          cell.style.overflowWrap = 'anywhere'; row.appendChild(cell);
+        }
+        table.appendChild(row);
+      }
+      changeBox.appendChild(table);
+    }
+    document.getElementById('proposal-confirm-reuse').checked = false;
+    document.getElementById('proposal-reuse-review').style.display = proposal.credentialContextChanged
+      && proposal.reuseCredentials?.length ? 'block' : 'none';
     const warnings = [];
     if (proposal.config.policy?.default === 'auto_approve' || proposal.config.policy?.rules?.some(rule => rule.action === 'auto_approve')) {
       warnings.push('Some API requests will be automatically approved under the proposed policy.');
@@ -718,6 +757,10 @@ async function reviewProposal(id) {
         paste.value = '';
         paste.textContent = 'Paste a credential';
         select.appendChild(paste);
+        if (requirement.reusable) {
+          const keep = document.createElement('option'); keep.value = 'keep'; keep.textContent = 'Keep current credential';
+          select.appendChild(keep); select.value = 'keep'; input.hidden = true;
+        }
         const compatible = sources.filter(source => source.path.split('/').pop() === requirement.path.split('/').pop());
         compatible.forEach((source, index) => {
           const option = document.createElement('option');
@@ -738,8 +781,9 @@ async function reviewProposal(id) {
     }
     onProposalTrustChange();
     document.getElementById('proposal-error').style.display = 'none';
-    document.getElementById('proposal-approve-btn').disabled = !serviceEditingEnabled;
-    document.getElementById('proposal-reject-btn').disabled = false;
+    document.getElementById('proposal-approve-btn').textContent = proposal.operation === 'update' ? 'Approve changes' : 'Approve & add service';
+    document.getElementById('proposal-approve-btn').disabled = !serviceEditingEnabled || proposal.status !== 'pending';
+    document.getElementById('proposal-reject-btn').disabled = proposal.status !== 'pending';
     document.getElementById('proposal-modal').classList.add('show');
   } catch (error) { alert(error.message); }
 }
@@ -783,7 +827,7 @@ async function approveProposal() {
   const inputs = {};
   for (const field of proposalCredentialFields) {
     credentials[field.path] = field.select.value === ''
-      ? { value: field.input.value } : field.compatible[Number(field.select.value)];
+      ? { value: field.input.value } : field.select.value === 'keep' ? { keep: true } : field.compatible[Number(field.select.value)];
   }
   const sshTrustOnFirstUse = reviewingProposal?.config.protocol === 'ssh'
     && document.getElementById('proposal-ssh-trust').value === 'first-use';
@@ -791,7 +835,7 @@ async function approveProposal() {
     if (!sshTrustOnFirstUse) inputs[field.path] = field.input.value;
   }
   await decideProposal('approve', { credentials, inputs,
-    sshTrustOnFirstUse,
+    sshTrustOnFirstUse, confirmCredentialReuse: document.getElementById('proposal-confirm-reuse').checked,
     allowUpstreams: document.getElementById('proposal-allow-upstreams').checked });
 }
 

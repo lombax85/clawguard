@@ -36,6 +36,12 @@ can approve it in the **Service proposals** dashboard, supply credentials or
 select managed credentials, and allow new upstream domains. Read the decision
 from `GET /__proposals/services/:id`. Never request real credentials, use the
 admin PIN, auto-retry a rejection, or treat submission as authorization.
+For an existing service that needs a configuration change, use the same POST
+with a partial `config`. Fields you omit stay unchanged; lists replace the
+previous list. HTTP 200 with `status: "unchanged"` needs no approval. HTTP 202
+still requires owner review. Read `stale` as a conflict with a newer service
+revision; do not automatically resubmit. Current credentials can be retained
+in the dashboard without exposing them to the agent.
 See [API details and complete examples](../docs/agent-service-proposals.md).
 
 ## CRITICAL RULES

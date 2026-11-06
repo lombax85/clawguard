@@ -34,6 +34,13 @@ function withFallbackReason(meta: RequestMeta | undefined, fallback: string): Re
 export class ApprovalManager {
   // Keyed by `${service}::${METHOD}::${path|*}` — `*` means method-wide
   private activeApprovals: Map<string, Approval> = new Map();
+  private serviceGenerations = new Map<string, number>();
+
+  /** Persistent grants were revoked in the service-update transaction. */
+  invalidateServiceApprovals(service: string): void {
+    this.serviceGenerations.set(service, (this.serviceGenerations.get(service) ?? 0) + 1);
+    for (const [key, approval] of this.activeApprovals) if (approval.service === service) this.activeApprovals.delete(key);
+  }
 
   private approvalKey(service: string, method: string, path?: string | null): string {
     const pathPart = (path === undefined || path === null) ? '*' : path;
@@ -203,6 +210,7 @@ export class ApprovalManager {
     meta?: RequestMeta,
     approvalInfo?: RequestApprovalInfo
   ): Promise<boolean> {
+    const generation = this.serviceGenerations.get(service) ?? 0;
     const approvalPath = approvalInfo?.approvalPath || path;
     const temporary = this.temporaryApproval(service, serviceConfig);
     if (temporary) {
@@ -310,6 +318,11 @@ export class ApprovalManager {
       result.approvedBy = 'scope_no_longer_valid';
     }
 
+    if (generation !== (this.serviceGenerations.get(service) ?? 0)) {
+      result.approved = false;
+      result.approvedBy = 'service_changed';
+    }
+
     // Side-channel notification of resolution so external integrations can dismiss alerts
     this.webhook?.notifyApprovalResolved(requestId, result.approved, result.approvedBy);
 
@@ -364,6 +377,7 @@ export class ApprovalManager {
     timeoutMs: number = this.approvalTimeout,
     signal?: AbortSignal
   ): Promise<boolean> {
+    const generation = this.serviceGenerations.get(service) ?? 0;
     // Keep the public signature aligned with checkApproval while making it
     // explicit that SSH policy rules are not consulted.
     const temporary = signal?.aborted ? undefined : this.temporaryApproval(service, serviceConfig);
@@ -441,6 +455,10 @@ export class ApprovalManager {
       this.telegram.clearPendingRequest(requestId);
     }
 
+    if (generation !== (this.serviceGenerations.get(service) ?? 0)) {
+      result.approved = false;
+      result.approvedBy = 'service_changed';
+    }
     this.webhook?.notifyApprovalResolved(requestId, result.approved, result.approvedBy);
 
     if (result.approved) {
@@ -465,6 +483,7 @@ export class ApprovalManager {
     timeoutMs: number = this.approvalTimeout,
     signal?: AbortSignal
   ): Promise<FtpAccessMode | false> {
+    const generation = this.serviceGenerations.get(service) ?? 0;
     const temporary = signal?.aborted ? undefined : this.temporaryApproval(service, serviceConfig);
     if (temporary && temporary.accessMode) {
       this.notifyTemporary(temporary, FTP_SESSION_METHOD, path, agentIp,
@@ -529,6 +548,10 @@ export class ApprovalManager {
       this.telegram.clearPendingRequest(requestId);
     }
 
+    if (generation !== (this.serviceGenerations.get(service) ?? 0)) {
+      result.approved = false;
+      result.approvedBy = 'service_changed';
+    }
     const effectiveApproval = result.approved
       && (result.accessMode === 'read_only' || result.accessMode === 'read_write');
     this.webhook?.notifyApprovalResolved(requestId, effectiveApproval, result.approvedBy);

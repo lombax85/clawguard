@@ -255,7 +255,10 @@ export function handleHostProxy(
     // ─── Validate dummy token ─────────────────────────────────
     if (serviceConfig.http?.allowedMethods && !serviceConfig.http.allowedMethods.includes(req.method)) {
       res.setHeader('Allow', serviceConfig.http.allowedMethods.join(', '));
-      res.status(405).json({ error: 'HTTP method is not allowed for this service' });
+      res.status(405).json({ error: 'HTTP method is not allowed for this service', service: serviceName,
+        allowedMethods: serviceConfig.http.allowedMethods,
+        ...(config.admin.enabled ? { proposalEndpoint: '/__proposals/services',
+          hint: 'Submit name and a partial config to propose a change. Only the owner can activate it in the dashboard.' } : {}) });
       return;
     }
     const dummyError = validateDummyToken(req, serviceConfig);
@@ -515,7 +518,10 @@ function handleProxy(
     // ─── Validate dummy token ─────────────────────────────────
     if (serviceConfig.http?.allowedMethods && !serviceConfig.http.allowedMethods.includes(req.method)) {
       res.setHeader('Allow', serviceConfig.http.allowedMethods.join(', '));
-      res.status(405).json({ error: 'HTTP method is not allowed for this service' });
+      res.status(405).json({ error: 'HTTP method is not allowed for this service', service: serviceName,
+        allowedMethods: serviceConfig.http.allowedMethods,
+        ...(config.admin.enabled ? { proposalEndpoint: '/__proposals/services',
+          hint: 'Submit name and a partial config to propose a change. Only the owner can activate it in the dashboard.' } : {}) });
       return;
     }
     const dummyError = validateDummyToken(req, serviceConfig);

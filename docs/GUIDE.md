@@ -784,7 +784,7 @@ Tap **[Deny]**. The repo is safe. That's ClawGuard in action.
 
 ClawGuard includes a built-in dashboard at `http://clawguard-host:9090/__admin`, protected by PIN and localhost-only access (configurable via `admin.allowedIPs`).
 
-**Service proposals** — agents can POST an HTTP, SSH or FTP/FTPS service
+**Service proposals** — agents can POST a new or updated HTTP, SSH or FTP/FTPS service
 configuration with credential placeholders to `/__proposals/services`. Valid
 configurations wait in **Service proposals** without changing live services or
 allowlists. The administrator reviews the target and policy, supplies credentials
@@ -793,6 +793,10 @@ chooses **Approve & add service**. The agent key cannot approve or access the
 credential picker. Approvals require `admin.strictMode: false`; strict mode still
 permits review and rejection. Proposals, decisions, services and approved domains
 persist in SQLite. See [the API and protocol examples](agent-service-proposals.md).
+For an existing alias, send only the fields to change. The dashboard shows a
+before/after comparison and retains current credentials by default. Stale
+proposals cannot overwrite later edits. Applying an update revokes that
+service's existing access grants.
 
 **Analytics** — requests per service, hourly heatmap, approve/deny ratio, HTTP method breakdown:
 

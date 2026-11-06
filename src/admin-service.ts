@@ -15,14 +15,14 @@ import {
   validateUpstreamUrl,
 } from './security';
 import { Config, ServiceConfig } from './types';
-import { loadPlugin, unloadPlugin } from './auth-plugins/loader';
+import { loadPlugin, unloadPlugin, activatePreparedPlugin } from './auth-plugins/loader';
 import {
-  getSshCredentialPlugin,
+  getSshCredentialPlugin, activatePreparedSshPlugin,
   loadSshCredentialPlugin,
   unloadSshCredentialPlugin,
 } from './ssh-credential-plugins/loader';
 import {
-  getFtpCredentialPlugin,
+  getFtpCredentialPlugin, activatePreparedFtpPlugin,
   loadFtpCredentialPlugin,
   unloadFtpCredentialPlugin,
 } from './ftp-credential-plugins/loader';
@@ -32,7 +32,13 @@ const SECRET_MARKER_VALUE = 'keep-secret';
 
 type JsonObject = Record<string, unknown>;
 
+export interface PreparedAdminService {
+  service: ServiceConfig;
+  commit(): void;
+}
+
 export interface AdminServiceRuntime {
+  prepare?(name: string, service: ServiceConfig, validationConfig?: Config): Promise<PreparedAdminService>;
   apply(name: string, service: ServiceConfig, validationConfig?: Config): Promise<ServiceConfig>;
   remove(name: string): void;
 }
@@ -292,6 +298,38 @@ export function createAdminServiceRuntime(config: Config): AdminServiceRuntime {
   };
 
   return {
+    async prepare(name, service, validationConfig = config): Promise<PreparedAdminService> {
+      const active = await resolveServiceConfigSecrets(service, config.secrets);
+      if (active.protocol === 'ssh' || active.protocol === 'ftp' || active.protocol === 'ftps') {
+        const result = active.protocol === 'ssh'
+          ? await validateSshTargetRuntime(active, validationConfig.security)
+          : await validateFtpTargetRuntime(active, validationConfig.security);
+        if (!result.valid) throw new Error(result.reason || 'Invalid protocol target');
+      }
+      const current = config.services[name];
+      if (current && current.upstream === active.upstream && (current.protocol ?? 'http') === (active.protocol ?? 'http')
+        && JSON.stringify(current.auth) === JSON.stringify(active.auth)) {
+        return { service: active, commit() {} };
+      }
+      // Temporary registry key: failed initialization cannot unload the active instance.
+      const staging = `${name}__proposal_${randomUUID()}`;
+      let httpPlugin: Awaited<ReturnType<typeof loadPlugin>> | undefined;
+      let sshPlugin: Awaited<ReturnType<typeof loadSshCredentialPlugin>> | undefined;
+      let ftpPlugin: Awaited<ReturnType<typeof loadFtpCredentialPlugin>> | undefined;
+      try {
+        if (active.auth.type === 'plugin' && active.auth.pluginPath) {
+          const args = [staging, active.auth.pluginPath, active.auth.pluginConfig || {}] as const;
+          if (active.protocol === 'ssh') sshPlugin = await loadSshCredentialPlugin(...args, sshPluginDataDir);
+          else if (active.protocol === 'ftp' || active.protocol === 'ftps') ftpPlugin = await loadFtpCredentialPlugin(...args, ftpPluginDataDir);
+          else httpPlugin = await loadPlugin(...args, pluginDataDir);
+        }
+      } finally { remove(staging); }
+      return { service: active, commit() {
+        activatePreparedPlugin(name, httpPlugin);
+        activatePreparedSshPlugin(name, sshPlugin);
+        activatePreparedFtpPlugin(name, ftpPlugin);
+      } };
+    },
     async apply(name: string, service: ServiceConfig, validationConfig: Config = config): Promise<ServiceConfig> {
       const activeService = await resolveServiceConfigSecrets(service, config.secrets);
 

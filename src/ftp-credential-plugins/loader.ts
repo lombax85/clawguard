@@ -144,3 +144,9 @@ export function getFtpCredentialPlugin(serviceName: string): IFtpCredentialPlugi
 export function unloadFtpCredentialPlugin(serviceName: string): void {
   registry.delete(serviceName);
 }
+
+/** Publish an already initialized instance without asynchronous work. */
+export function activatePreparedFtpPlugin(serviceName: string, plugin: IFtpCredentialPlugin | undefined): void {
+  if (plugin) registry.set(serviceName, plugin);
+  else registry.delete(serviceName);
+}

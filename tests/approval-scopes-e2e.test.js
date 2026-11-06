@@ -528,3 +528,41 @@ test('a root scope cannot authorize a plugin operation that requires a fresh dec
     assert.equal(await decision, false);
   }, 3000);
 });
+
+test('owner-approved service updates revoke each grant type and cannot revive approvals from the old configuration', async t => {
+  for (const kind of ['method-wide', 'scope', 'temporary']) {
+    await t.test(kind, async () => {
+      await fixture(async f => {
+        if (kind === 'temporary') await f.transport.command('/allow app 1h');
+        else {
+          const granted = kind === 'scope' ? await scope(f, '/resource') : await begin(f, '/resource');
+          await granted.tap(kind === 'scope' ? '1h' : '⚡ 1h method-wide');
+          assert.equal(await granted.response, 200);
+        }
+        assert.equal(await f.request('GET', 'app', '/resource'), 200);
+        const pending = kind === 'method-wide' ? await begin(f, '/pending', 'POST') : undefined;
+        await withAdmin(f, async admin => {
+          const res = await fetch(f.base + '/__proposals/services', {
+            method: 'POST', headers: { 'Content-Type': 'application/json', 'X-ClawGuard-Key': 'test-agent' },
+            body: JSON.stringify({ name: 'app', config: { http: { allowedMethods: ['GET', 'POST', 'PUT'] } } }),
+          });
+          assert.equal(res.status, 202);
+          const proposal = await res.json();
+          assert.equal((await admin(`service-proposals/${proposal.id}/approve`, 'POST')).status, 200);
+          assert.deepEqual((await admin('approvals')).body.active, {});
+        });
+        assert.deepEqual(f.audit.getActiveApprovals(), []);
+        assert.deepEqual(f.audit.getScopedApprovals(), []);
+        assert.deepEqual(f.audit.getTemporaryServiceApprovals(), []);
+        if (pending) {
+          await pending.tap('✅ Only this request');
+          assert.equal(await pending.response, 403, 'decision from the previous configuration must not authorize a request');
+        }
+        await deny(f, '/resource');
+        await deny(f, '/resource', 'PUT');
+        await f.restart();
+        await deny(f, '/resource');
+      }, 3000);
+    });
+  }
+});

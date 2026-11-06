@@ -207,3 +207,9 @@ export function getSshCredentialPlugin(
 export function unloadSshCredentialPlugin(serviceName: string): void {
   sshCredentialPluginRegistry.delete(serviceName);
 }
+
+/** Publish an already initialized instance without asynchronous work. */
+export function activatePreparedSshPlugin(serviceName: string, plugin: ISshCredentialPlugin | undefined): void {
+  if (plugin) sshCredentialPluginRegistry.set(serviceName, plugin);
+  else sshCredentialPluginRegistry.delete(serviceName);
+}

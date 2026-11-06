@@ -1,4 +1,6 @@
 import Database from 'better-sqlite3';
+import { randomUUID } from 'crypto';
+import { serviceApprovalHash } from './temporary-approval';
 import { AuditEntry, Approval, DashboardStats, FtpAccessMode, ServiceConfig, ServiceProposal, TemporaryServiceApproval, ScopedApproval } from './types';
 
 export type SshSessionAction = 'shell' | 'exec';
@@ -182,11 +184,14 @@ export class AuditLogger {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS service_revisions (
+        name TEXT PRIMARY KEY, revision TEXT NOT NULL, fingerprint TEXT
+      );
       CREATE TABLE IF NOT EXISTS service_proposals (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
         proposal_json TEXT NOT NULL,
-        status TEXT NOT NULL CHECK (status IN ('pending', 'approving', 'approved', 'rejected')),
+        status TEXT NOT NULL CHECK (status IN ('pending', 'approving', 'approved', 'rejected', 'stale')),
         created_at TEXT NOT NULL,
         decided_at TEXT
       );
@@ -480,6 +485,47 @@ export class AuditLogger {
       : this.db.prepare('UPDATE temporary_service_approvals SET revoked = 1 WHERE service = ? AND revoked = 0').run(service).changes;
   }
 
+  private migrateProposalStatuses(): void {
+    const row = this.db.prepare("SELECT sql FROM sqlite_master WHERE name = 'service_proposals'").get() as { sql: string };
+    if (row.sql.includes("'stale'")) return;
+    this.db.transaction(() => {
+      this.db.exec(`DROP INDEX idx_service_proposals_pending_name;
+        ALTER TABLE service_proposals RENAME TO service_proposals_old;
+        CREATE TABLE service_proposals (
+          id TEXT PRIMARY KEY, name TEXT NOT NULL, proposal_json TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('pending', 'approving', 'approved', 'rejected', 'stale')),
+          created_at TEXT NOT NULL, decided_at TEXT);
+        INSERT INTO service_proposals SELECT * FROM service_proposals_old;
+        DROP TABLE service_proposals_old;
+        CREATE UNIQUE INDEX idx_service_proposals_pending_name ON service_proposals(name)
+          WHERE status IN ('pending', 'approving');`);
+    })();
+  }
+
+  /** Opaque revision, including changes to credentials and delete/recreate cycles. */
+  getServiceRevision(name: string, service: ServiceConfig | undefined): string {
+    const fingerprint = service ? serviceApprovalHash(service) : 'absent';
+    const row = this.db.prepare('SELECT revision, fingerprint FROM service_revisions WHERE name = ?').get(name) as
+      { revision: string; fingerprint: string | null } | undefined;
+    if (row && row.fingerprint === fingerprint) return row.revision;
+    const revision = row?.fingerprint === null ? row.revision : randomUUID();
+    this.db.prepare(`INSERT INTO service_revisions VALUES (?, ?, ?)
+      ON CONFLICT(name) DO UPDATE SET revision = excluded.revision, fingerprint = excluded.fingerprint`)
+      .run(name, revision, fingerprint);
+    return revision;
+  }
+
+  private bumpServiceRevision(name: string): void {
+    this.db.prepare(`INSERT INTO service_revisions VALUES (?, ?, NULL)
+      ON CONFLICT(name) DO UPDATE SET revision = excluded.revision, fingerprint = NULL`).run(name, randomUUID());
+  }
+
+  staleServiceProposal(id: string): void {
+    this.migrateProposalStatuses();
+    this.db.prepare("UPDATE service_proposals SET status = 'stale', decided_at = ? WHERE id = ? AND status IN ('pending', 'approving')")
+      .run(new Date().toISOString(), id);
+  }
+
   getServiceProposal(id: string): ServiceProposal | undefined {
     const row = this.db.prepare('SELECT proposal_json, status, decided_at FROM service_proposals WHERE id = ?')
       .get(id) as { proposal_json: string; status: ServiceProposal['status']; decided_at: string | null } | undefined;
@@ -518,6 +564,7 @@ export class AuditLogger {
   }
 
   recoverServiceProposals(): void {
+    this.migrateProposalStatuses();
     this.db.prepare("UPDATE service_proposals SET status = 'pending' WHERE status = 'approving'").run();
   }
 
@@ -526,12 +573,17 @@ export class AuditLogger {
       .run(new Date().toISOString(), id).changes === 1;
   }
 
-  approveServiceProposal(id: string, name: string, service: ServiceConfig, upstreams: string[]): void {
+  approveServiceProposal(id: string, name: string, service: ServiceConfig, upstreams: string[], update = false): void {
     this.db.transaction(() => {
       const updated = this.db.prepare("UPDATE service_proposals SET status = 'approved', decided_at = ? WHERE id = ? AND status = 'approving'")
         .run(new Date().toISOString(), id);
       if (updated.changes !== 1) throw new Error('Proposal is no longer awaiting approval');
       this.saveServiceOverride(name, service);
+      if (update) {
+        this.revokeApprovalInDb(name);
+        this.revokeScopedApprovals(name);
+        this.revokeTemporaryServiceApprovals(name);
+      }
       const insert = this.db.prepare('INSERT OR IGNORE INTO admin_upstreams VALUES (?, ?, ?)');
       for (const hostname of upstreams) insert.run(hostname, id, new Date().toISOString());
     })();
@@ -554,6 +606,7 @@ export class AuditLogger {
   }
 
   saveServiceOverride(name: string, config: ServiceConfig): void {
+    this.bumpServiceRevision(name);
     const now = new Date().toISOString();
     this.db.prepare(`
       INSERT INTO services_override (service_name, config_json, created_at, updated_at)
@@ -563,6 +616,7 @@ export class AuditLogger {
   }
 
   deleteServiceOverride(name: string): void {
+    this.bumpServiceRevision(name);
     this.db.prepare('DELETE FROM services_override WHERE service_name = ?').run(name);
   }
 

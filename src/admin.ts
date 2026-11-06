@@ -6,7 +6,7 @@ import { ApprovalManager } from './approval';
 import { AuditLogger } from './audit';
 import { TelegramNotifier } from './telegram';
 import { getPassthroughHosts } from './mitm-proxy';
-import { createAdminProposalRouter, isProposalApplying } from './service-proposals';
+import { createAdminProposalRouter, reserveService } from './service-proposals';
 import {
   AdminServiceRuntime,
   createAdminServiceRuntime,
@@ -134,7 +134,7 @@ export function createAdminRouter(
     next();
   };
 
-  router.use('/api', pinAuth, createAdminProposalRouter(config, audit, serviceRuntime));
+  router.use('/api', pinAuth, createAdminProposalRouter(config, audit, serviceRuntime, name => approvalManager.invalidateServiceApprovals?.(name)));
   // A proposal may be asynchronously initializing credentials on either the
   // HTTP or HTTPS listener. Reserve its alias across ordinary admin writes.
   router.use('/api', (req: Request, res: Response, next: NextFunction) => {
@@ -144,11 +144,22 @@ export function createAdminRouter(
     const pathName = /^\/(?:services|ssh-services)\/([^/]+)/.exec(req.path)?.[1];
     let decodedName: string | undefined;
     try { decodedName = pathName ? decodeURIComponent(pathName) : undefined; } catch { /* route reports invalid encoding */ }
-    if ((typeof name === 'string' && isProposalApplying(config, name))
-      || (decodedName && isProposalApplying(config, decodedName))) {
-      res.status(409).json({ error: 'This service is being approved; wait for the proposal to finish' });
-      return;
+    const names = [...new Set([name, decodedName].filter((item): item is string => typeof item === 'string'))];
+    const releases: Array<() => void> = [];
+    for (const alias of names) {
+      const release = reserveService(config, alias);
+      if (!release) {
+        releases.forEach(fn => fn());
+        res.status(409).json({ error: 'This service is being changed; wait for the operation to finish' }); return;
+      }
+      releases.push(release);
     }
+    // Keep the reservation even if the client disconnects while initialization runs.
+    const end = res.end;
+    res.end = function (this: Response, ...args: unknown[]) {
+      try { return Reflect.apply(end, this, args); }
+      finally { releases.forEach(fn => fn()); }
+    } as typeof res.end;
     next();
   });
 

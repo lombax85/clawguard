@@ -1,7 +1,7 @@
 # Agent service proposals
 
-An agent can propose a service; only the ClawGuard administrator can activate
-it. Submission does not change live services or `security.allowedUpstreams`,
+An agent can propose a new service or changes to an existing service. Only
+the ClawGuard administrator can activate the proposal. Submission does not change live services or `security.allowedUpstreams`,
 resolve secrets, initialize plugins, scan hosts, or call an upstream. This is
 configuration validation, not a connectivity or credential test.
 
@@ -44,12 +44,14 @@ admin HTTPS listener. Prefer HTTPS for remote access.
 
 | Endpoint | Authentication | Purpose |
 |---|---|---|
-| `POST /__proposals/services` | `X-ClawGuard-Key` | Validate and enqueue a new service |
+| `POST /__proposals/services` | `X-ClawGuard-Key` | Validate and enqueue a new service or an update |
 | `GET /__proposals/services/:id` | `X-ClawGuard-Key` | Read decision status, without credentials |
 
 Send `X-ClawGuard-User` and `X-ClawGuard-Reason` to record provenance. The POST
-body contains exactly `name` and `config`. `config` is the complete service
-document used in YAML or the admin JSON editor, with these placeholders:
+body contains exactly `name` and `config`. For a new alias, `config` is the
+complete service document used in YAML or the admin JSON editor. For an
+existing alias, `config` can contain only the fields to change. Both modes use
+these placeholders:
 
 - `{"$clawguard":"credential"}` for an auth token, password, client ID/secret,
   injected JSON field, SSH private key, or plugin credential.
@@ -99,14 +101,70 @@ Successful submission returns HTTP **202**:
 ```
 
 An identical resubmission while pending returns **200** and the same proposal
-ID. A different pending proposal for the same alias, or an existing service,
-returns **409**. Invalid documents return **400**. There can be at most 100
+ID. A different pending proposal for the same alias returns **409**. An
+existing service receives an update proposal. A submission that makes no
+change returns **200**, `status: "unchanged"` and `activated: true`, without
+an ID or a new proposal to approve. Invalid documents return **400**. There can be at most 100
 pending proposals, with a 64 KiB limit and bounded document nesting.
 
-Status returns only ID, name, timestamps and `pending`, `approving`, `approved`
-or `rejected`. Never interpret acceptance as activation. Do not retry a
+Status returns ID, name, operation (`create` or `update`), timestamps and
+`pending`, `approving`, `approved`, `rejected` or `stale`. `stale` means the
+service changed after submission. It cannot be approved. Review the current
+configuration and submit a new proposal explicitly. Never interpret acceptance as activation. Do not retry a
 rejected proposal automatically; ask the operator to review the intended
 configuration. A replacement requires a new explicit submission.
+
+## Update an existing service
+
+Use the same endpoint, authentication and decision endpoint as for creation.
+For example, if `lombax` currently allows only GET, submit:
+
+```json
+{
+  "name": "lombax",
+  "config": {
+    "http": { "allowedMethods": ["GET", "POST"] }
+  }
+}
+```
+
+ClawGuard returns **202** with `operation: "update"`. GET continues to work
+under its existing policy. POST remains blocked until the owner approves.
+A 405 response includes `allowedMethods` and, when proposals are enabled,
+`proposalEndpoint` to help agents discover this workflow. This response does
+not create a proposal or approve a request.
+
+Merge rules are fixed:
+
+- Omitted fields retain their current values.
+- Objects merge field by field.
+- Lists replace the complete previous list. Include every method you intend
+  to retain; `["POST"]` also removes GET. There is no implicit list union.
+- Scalars replace the previous value. `null` is not a delete instruction;
+  the resulting configuration must pass validation.
+
+The dashboard labels the proposal **Update service** and shows the changes
+with before/after values. **Approve changes** applies them. The existing
+configuration stays active until approval completes. Validation, plugin
+initialization or persistence failures leave the previous service active.
+
+Current credential slots default to **Keep current credential**. The owner
+can instead paste a replacement or choose a managed credential. New slots
+require owner input. Changing the destination or authentication context
+requires explicit confirmation before current credentials can be reused.
+Agents never send real credentials, secret references or `keep-secret`
+markers. Existing `credential` placeholders remain compatible.
+
+Each proposal records an opaque base revision. Manual admin edits, credential
+changes, observed YAML changes, and deletion/recreation of an alias invalidate
+a pending proposal. The owner cannot approve a stale proposal. Updates do not
+silently rebase onto a newer configuration. The revision survives restart;
+an unchanged service can still receive its pending update after restart.
+
+Activation revokes existing HTTP, scoped and temporary `/allow` grants for
+that service. An outstanding approval decision for the previous configuration
+cannot grant new access. New requests use the updated policy. Already-open
+SSH sessions and FTP leases retain their normal lifetime.
 
 ## HTTP example: lombax.it with GET, POST and PUT
 
@@ -221,10 +279,12 @@ create an FTP lease or bypass the existing read-only/read/write decision.
 
 ## Persistence
 
-SQLite stores immutable credential-free proposal documents and their
+SQLite stores immutable credential-free proposal documents, update snapshots,
+before/after differences, base revisions and their
 decisions in `service_proposals`. Approval saves the service in
 `services_override` and new allowlist entries in `admin_upstreams` within one
-transaction. On restart ClawGuard restores approved domains before validating
+transaction. Updates revoke saved access grants in that transaction as well.
+Prepared plugin instances become active only after the save succeeds. On restart ClawGuard restores approved domains before validating
 service overrides. Strict mode ignores both overrides and approved domains.
 An interrupted `approving` state is reset to pending on startup.
 
