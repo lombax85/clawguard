@@ -1,4 +1,5 @@
 import { WebhookConfig, RequestMeta, RequestApprovalInfo } from './types';
+import { createWebhookSchedule, WebhookSchedule } from './webhook-schedule';
 
 export interface WebhookAlertPreferences {
   getWebhookAlertsEnabled(): boolean;
@@ -25,6 +26,7 @@ export interface WebhookAlertPreferences {
 export class WebhookNotifier {
   private config: WebhookConfig;
   private alertsEnabled: boolean;
+  private schedule: WebhookSchedule | undefined;
   // requestId → timer for the deferred 'approval_required' send
   private pendingTimers: Map<string, NodeJS.Timeout> = new Map();
   // requestIds for which 'approval_required' was actually sent
@@ -33,16 +35,26 @@ export class WebhookNotifier {
 
   constructor(config: WebhookConfig, private preferences?: WebhookAlertPreferences) {
     this.config = config;
+    this.schedule = createWebhookSchedule(config.activeHours);
     this.alertsEnabled = config.enabled && (preferences?.getWebhookAlertsEnabled() ?? true);
     const dest = new URL(config.url);
     const escalate = config.escalateAfterSeconds ?? 0;
     const escalateNote = escalate > 0 ? `, escalate after ${escalate}s` : '';
     console.log(`🪝 Webhook notifier started — ${config.method ?? 'POST'} ${dest.protocol}//${dest.host}${dest.pathname}${escalateNote}`);
     if (!this.alertsEnabled) console.log('🔕 Webhook alerts are off');
+    if (this.schedule) console.log(`🕒 Webhook active hours: ${this.schedule.description}`);
   }
 
   isAlertsEnabled(): boolean {
     return this.alertsEnabled;
+  }
+
+  isWithinActiveHours(): boolean {
+    return this.schedule?.isActive(new Date()) ?? true;
+  }
+
+  getActiveHoursDescription(): string | undefined {
+    return this.schedule?.description;
   }
 
   setAlertsEnabled(enabled: boolean): void {
@@ -93,7 +105,9 @@ export class WebhookNotifier {
 
     const fire = () => {
       this.pendingTimers.delete(requestId);
-      if (!this.alertsEnabled) return;
+      // Check at delivery time: the escalation delay can cross the window end.
+      // Drop out-of-hours alerts. Never queue them for the next active window.
+      if (!this.alertsEnabled || !this.isWithinActiveHours()) return;
       this.firedRequests.add(requestId);
       void this.send(payload);
     };
@@ -117,7 +131,8 @@ export class WebhookNotifier {
       return;
     }
 
-    // Keep resolution events for alerts already sent, even after /alerts off,
+    // Keep resolution events for alerts already sent, even after /alerts off
+    // or outside active hours,
     // so the receiver can clear them. Muted requests never enter this set.
     if (!this.firedRequests.delete(requestId)) return;
 

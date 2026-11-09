@@ -4,6 +4,7 @@ import yaml from 'js-yaml';
 import { Config, FtpGatewayConfig, ServiceConfig, SshBrokerConfig } from './types';
 import { createSecretProviders, resolveSecretValue, SecretProvider } from './secrets/provider';
 import { validateFtpService, validateSshService } from './security';
+import { createWebhookSchedule } from './webhook-schedule';
 
 function substituteEnvVars(str: string): string {
   return str.replace(/\$\{(\w+)\}/g, (match, varName) => {
@@ -466,6 +467,13 @@ export async function loadConfig(configPath: string): Promise<Config> {
   }
 
   // ─── Outbound webhook ──────────────────────────────────────
+
+  try {
+    createWebhookSchedule(config.notifications?.webhook?.activeHours);
+  } catch (err) {
+    console.error(`❌ ${err instanceof Error ? err.message : err}`);
+    process.exit(1);
+  }
 
   if (config.notifications?.webhook?.enabled) {
     const wh = config.notifications.webhook;

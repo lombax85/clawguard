@@ -237,6 +237,40 @@ notifications:
 Keep the existing Telegram configuration and other webhook fields. Changing
 `escalateAfterSeconds` to `0` sends alerts immediately; it does not disable them.
 
+To prevent new webhook alerts at night, add `activeHours` to the existing
+webhook configuration and restart ClawGuard. For example:
+
+```yaml
+notifications:
+  webhook:
+    enabled: true
+    url: "https://your-system.example.com/hook/abc123" # Keep your existing URL.
+    escalateAfterSeconds: 60
+    activeHours:
+      start: "08:00"
+      end: "23:00"
+      timezone: "Europe/Rome"
+```
+
+This example permits new alerts every day from 08:00 inclusive to 23:00 exclusive.
+Use quoted `HH:mm` times and an explicit named time zone. The time zone handles
+daylight-saving changes and does not depend on the server or container time zone.
+A window such as `22:00` to `07:00` crosses midnight. Start and end must differ.
+Remove `activeHours` for all-day delivery; existing configurations keep that behavior.
+Invalid times or time zones stop startup with a configuration error.
+
+ClawGuard checks the time when the escalation delay ends. For example, a request
+at 22:59:30 with a 60-second delay produces no new webhook alert. An alert skipped
+outside the window is discarded; it is not sent the next morning. A request just
+before 08:00 can trigger an alert if its delay ends inside the window.
+
+`/alerts status` and `/status` show the window and whether new alerts are currently
+muted by it. `/alerts on` respects the window; `/alerts off` also mutes alerts inside
+it. Telegram approval requests and decisions continue as usual. If `cancelOnResolve`
+is true, resolution events for alerts already sent can still arrive outside the
+window. Configure the receiver to clear an alert on `approval_resolved`, not to
+trigger a new alert.
+
 ### Temporary service approvals
 
 To permit work while you cannot answer approval requests:

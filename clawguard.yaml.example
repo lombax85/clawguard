@@ -338,6 +338,17 @@ notifications:
   #   # If the request resolves first, neither event is sent.
   #   # Default: 0 (fire immediately, in parallel with Telegram).
   #   # escalateAfterSeconds: 60
+  #
+  #   # Optional daily window for new alerts. Omit for all-day delivery.
+  #   # Checked when the escalation delay ends; muted alerts are not replayed.
+  #   # Use quoted 24-hour times. Start is included; end is excluded.
+  #   # A start later than the end crosses midnight. Times must differ.
+  #   # The named time zone handles daylight-saving changes automatically.
+  #   # activeHours:
+  #   #   start: "08:00"
+  #   #   end: "23:00"
+  #   #   timezone: "Europe/Rome"
+  #   # Resolution events can still clear alerts sent before the window ended.
 
 security:
   allowedUpstreams:

@@ -1063,7 +1063,11 @@ The **Approvals** dashboard shows these scopes and can revoke each one.
 Use `/alerts off` to stop Home Assistant/webhook alerts and cancel queued
 escalation timers. The setting survives restarts. `/alerts on` enables alerts
 for new requests without replaying muted requests. Already-sent alerts can
-still receive a resolution event so the receiver can clear them. See
+still receive a resolution event so the receiver can clear them. Set
+`notifications.webhook.activeHours` with `start`, `end` and `timezone` to limit
+new alerts to a daily window. ClawGuard checks the window after the escalation
+delay and discards alerts outside it. `/alerts on` respects the window;
+`/alerts status` shows it. Omit `activeHours` for all-day delivery. See
 [webhook alert controls](../TELEGRAM_SETUP.md#home-assistant-and-webhook-alerts)
 for configuration and permissions.
 

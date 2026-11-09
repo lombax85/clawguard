@@ -261,7 +261,12 @@ export class TelegramNotifier {
 
   private webhookAlertStatus(): string {
     if (!this.webhookAlerts) return 'not configured (notifications.webhook.enabled must be true)';
-    return this.webhookAlerts.isAlertsEnabled() ? 'ON' : 'OFF';
+    const enabled = this.webhookAlerts.isAlertsEnabled();
+    const status = enabled ? 'ON' : 'OFF';
+    const hours = this.webhookAlerts.getActiveHoursDescription();
+    if (!hours) return status;
+    const muted = enabled && !this.webhookAlerts.isWithinActiveHours() ? '; outside active hours — new alerts muted' : '';
+    return `${status}; active hours: ${hours}${muted}`;
   }
 
   canUseTemporaryApproval(chatId: string): boolean {
@@ -323,6 +328,8 @@ export class TelegramNotifier {
         'Telegram approval requests remain active.',
         ...(this.webhookAlerts ? [
           'This setting survives restarts. Use /alerts on or /alerts off to change it.',
+          ...(this.webhookAlerts.getActiveHoursDescription()
+            ? ['Active hours come from configuration. /alerts on does not override them.'] : []),
           ...(!this.webhookAlerts.isAlertsEnabled() ? ['Queued alerts are cancelled. Re-enabling does not replay them.'] : []),
         ] : []),
       ].join('\n'), this.sendOptions({ parse_mode: undefined }));

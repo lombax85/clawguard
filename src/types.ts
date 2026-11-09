@@ -182,6 +182,12 @@ export interface RequestApprovalInfo {
 
 // ─── Outbound webhook (fire-and-forget side notification) ──
 
+export interface WebhookActiveHours {
+  start: string;                        // inclusive HH:mm, 24-hour clock
+  end: string;                          // exclusive HH:mm; earlier than start crosses midnight
+  timezone: string;                     // named time zone, e.g. Europe/Rome
+}
+
 export interface WebhookConfig {
   enabled: boolean;
   url: string;                          // POST target (any URL the operator controls)
@@ -195,6 +201,9 @@ export interface WebhookConfig {
   // within this window. If the approval resolves first, neither event is sent.
   // Default 0 = fire immediately (parallel to Telegram).
   escalateAfterSeconds?: number;
+  // Daily window for new alerts, evaluated after the escalation delay.
+  // Omit for all-day delivery. Resolution events can still clear sent alerts.
+  activeHours?: WebhookActiveHours;
 }
 
 // ─── Audit ───────────────────────────────────────────────────
