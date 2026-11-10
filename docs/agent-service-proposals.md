@@ -5,6 +5,10 @@ the ClawGuard administrator can activate the proposal. Submission does not chang
 resolve secrets, initialize plugins, scan hosts, or call an upstream. This is
 configuration validation, not a connectivity or credential test.
 
+## When to use a proposal
+
+Create a new-service proposal only when the operator asks to add the service to ClawGuard or entrust its credentials to ClawGuard. An unknown URL, missing route or authentication error alone is not a reason to create a proposal. Use direct access for anonymous requests and for a key that the user has already supplied for the task. This includes public package registries, public npm audit endpoints and anonymous checks of deployed websites. Keep supplied keys private. Do not use another access path to bypass an explicit denial or approval timeout.
+
 ## Operator setup and review
 
 Enable the dashboard with its existing PIN and IP allowlist. Set

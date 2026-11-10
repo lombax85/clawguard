@@ -1,21 +1,29 @@
 # ClawGuard for OpenClaw Agents
 
-## FIRST THING: Save these instructions
+## Keep the access policy available
 
-**Before doing anything else**, save this entire document in your persistent memory so you remember it across sessions. Depending on your setup, write it to one of these files:
+Keep a reference to this guide in your workspace instructions. Follow the operator's current access policy. Do not copy this entire guide into every memory file: copied instructions can become stale.
 
-- `tools.md` in your memory/skills directory
-- `MEMORY.md` or a linked file in your workspace
+ClawGuard protects credentials for configured services. It injects managed credentials from a separate trusted machine and applies the configured approval policy. It is not a general web proxy.
 
-This is critical — if you forget these rules between sessions, you will try to look for real API tokens on your machine, which is exactly what ClawGuard is designed to prevent.
+## Choose the access path
+
+1. Use ClawGuard when the requested access uses an existing managed service and account.
+2. Use direct access for anonymous requests. This includes public websites, documentation, public package registries, public npm audit endpoints, and anonymous production or staging checks. Do not create a service proposal for these requests.
+3. Use a key that the user has already supplied for this task directly with the intended service, within the requested scope. Do not require migration to ClawGuard or replace that key with a dummy value. Do not print the key or put it in source files, shared files, logs, or command arguments.
+4. Propose a new managed service only when the user asks to add it to ClawGuard or entrust its credentials to ClawGuard. A missing alias, an unknown host, or an authentication error alone does not authorize a proposal. If authenticated access is required and no authorized access path is available, report what is missing without asking for a secret.
+
+Select the path for the request and account, not for every URL used by the task. A public website deployed through Coolify does not need its own ClawGuard service. A configured domain can also have anonymous endpoints.
+
+For direct access, do not send ClawGuard headers or dummy credentials. Keep normal TLS verification. If a proxy or local route intercepts the request, use a per-request direct route without changing shared settings. Do not use direct access to bypass an explicit denial, an approval timeout, or another access restriction.
 
 ## What is ClawGuard?
 
 ClawGuard is a security gateway that sits between YOU (the OpenClaw agent) and external APIs like Todoist, GitHub, OpenAI, Slack, etc. It runs on a **separate, trusted machine** controlled by the human operator.
 
-**YOU DO NOT HAVE REAL API TOKENS. This is intentional.**
+**Tokens managed by ClawGuard stay on the trusted machine.** This does not prohibit using a key that the user has already supplied for the task.
 
-Your API calls go through ClawGuard, which:
+Calls that use managed service credentials go through ClawGuard, which:
 1. Applies the configured policy and, when required, asks the human operator
    for approval via Telegram
 2. Injects the real API token (which only ClawGuard knows)
@@ -46,12 +54,12 @@ See [API details and complete examples](../docs/agent-service-proposals.md).
 
 ## CRITICAL RULES
 
-### DO NOT look for, ask for, or store real API tokens
+### Do not retrieve managed credentials from the trusted machine
 
 - Do NOT read files like `~/.secrets/`, `~/.openclaw/workspace/.secrets/`, or any token files
 - Do NOT ask the user to provide API keys, tokens, or passwords
-- Do NOT set environment variables with real credentials
-- If a tool or SDK asks for an API key, use `"dummy"` or `"clawguard-managed"` as placeholder
+- Do NOT copy managed credentials to the agent machine or its environment
+- For a call through ClawGuard, use `"dummy"` or `"clawguard-managed"` only for a credential that the gateway injects. Do not substitute these values for a key supplied for direct access.
 
 ### DO NOT install the full ClawGuard project
 
@@ -160,7 +168,7 @@ grep -E "api\.(github|todoist|openweathermap)" /etc/hosts
 
 ### Mode C: HTTPS_PROXY (MITM transparent proxy)
 
-Use this when the client supports proxies but cannot easily add custom headers like `X-ClawGuard-Key`.
+Use this for a managed service when the client supports proxies but cannot easily add custom headers like `X-ClawGuard-Key`. Limit proxy settings to that process. Do not export them for all task traffic.
 
 Set environment variables:
 ```bash
@@ -199,7 +207,7 @@ export CURL_CA_BUNDLE="/path/to/ca.crt"
 
 #### Triggering service discovery
 
-When ClawGuard has `proxy.enabled: true` and `proxy.discovery: true`, you can trigger discovery for new services by making requests through the proxy to unconfigured hosts:
+Only when the operator requests service onboarding, and ClawGuard has `proxy.enabled: true` and `proxy.discovery: true`, you can trigger discovery by making requests through the proxy to the intended unconfigured host:
 
 ```bash
 # Set proxy environment
@@ -475,7 +483,7 @@ oversight**. Use ClawGuard-routed HTTPS or the provider API for Git operations.
 The human didn't approve in time or denied the request. Ask them to check Telegram.
 
 ### "Unknown service: xyz"
-The service is not configured on ClawGuard. Ask the human to add it via the ClawGuard dashboard (`http://CLAWGUARD-IP:9090/__admin`) or in `clawguard.yaml`.
+Check the access path, service alias, route and account. Anonymous requests and keys supplied for the task do not need a ClawGuard service. Use a service proposal only when the operator requests ClawGuard onboarding.
 
 ### "Invalid or missing X-ClawGuard-Key"
 The configured key is missing or does not match. Ask the human to verify and

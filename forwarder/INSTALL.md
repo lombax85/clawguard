@@ -9,6 +9,10 @@ The forwarder is a tiny HTTPS interceptor that runs on YOUR machine (the agent m
 - **No real API tokens** — it only knows how to reach the ClawGuard server
 - **One job** — intercept HTTPS calls to specific domains and forward them to ClawGuard
 
+## Scope
+
+Configure routes only for services that the operator wants ClawGuard to manage. The forwarder protects managed credentials; it is not a general web proxy. Public websites, documentation, public package registries, public npm audit endpoints and anonymous production or staging checks use direct access. A key already supplied for the task can also be used directly with its intended service. Do not create a route or service proposal for these cases. Keep normal TLS verification for direct requests. Never expose supplied keys or use direct access to bypass an explicit denial or approval timeout.
+
 ## Prerequisites
 
 You need from the human operator:
